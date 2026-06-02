@@ -10,6 +10,8 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.2 terminé (lab-as-code)** — Virtumfile, `virtum up` / `down`, `pull`, `disk-size`, ports (`socat`), provision, réseau isolé **`virtum-lab-<name>`** : [`STEPS2.md`](./STEPS2.md), [`SPEC_TECH_V0.2.md`](./SPEC_TECH_V0.2.md). Exemple : [`examples/Virtumfile`](./examples/Virtumfile).
 
+**Roadmap v0.3** (réseau `bridge` lab / machine, NAT par défaut) : [`STEPS3.md`](./STEPS3.md), spec réseau [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md) (brouillon).
+
 ## Documentation
 
 | Document | Rôle |
