@@ -5,8 +5,10 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 
 use crate::config::{self, VirtumPaths};
-use crate::libvirt::domain_exists;
-use crate::metadata;
+use crate::lab_network;
+use crate::libvirt::{domain_exists, domain_is_active, domain_state};
+use crate::metadata::{self, Instance, InstanceStatus};
+use crate::port_forward::{self, PortForward};
 use crate::ssh::{ensure_ssh_keypair, read_public_key};
 use crate::virtumfile;
 use crate::vm::{self, cleanup_failed_run, lab_vm_id, launch_vm_inner, VmLaunchConfig};
@@ -45,7 +47,7 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
     let path = resolve_virtumfile_path(file)?;
     let lab = virtumfile::load(&path)?;
     eprintln!(
-        "Déploiement du lab '{}' ({} machine(s)) depuis {}…",
+        "Lab '{}' ({} machine(s)) depuis {}…",
         lab.name,
         lab.machines.len(),
         path.display()
@@ -54,17 +56,33 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
     let paths = config::ensure_layout().await?;
     let metadata = metadata::load_metadata(&paths.metadata).await?;
 
+    let lab_net = lab_network::ensure_lab_network(&lab.name)?;
+
+    let port_plan: Vec<(String, Vec<PortForward>)> = lab
+        .machines
+        .iter()
+        .map(|(name, spec)| {
+            virtumfile::machine_port_forwards(spec).map(|forwards| (name.clone(), forwards))
+        })
+        .collect::<Result<_>>()?;
+    for (machine_name, forwards) in &port_plan {
+        if forwards.is_empty() {
+            continue;
+        }
+        let vm_id = lab_vm_id(&lab.name, machine_name);
+        if metadata::find_by_lab_machine(&metadata, &lab.name, machine_name).is_some() {
+            continue;
+        }
+        port_forward::ensure_ports_available(forwards)?;
+        port_forward::ensure_ports_not_in_metadata(&metadata, Some(&vm_id), forwards)?;
+    }
+
     for machine_name in lab.machines.keys() {
         let vm_id = lab_vm_id(&lab.name, machine_name);
+        if metadata::find_by_lab_machine(&metadata, &lab.name, machine_name).is_some() {
+            continue;
+        }
         if domain_exists(&vm_id) {
-            if metadata::find_by_lab_machine(&metadata, &lab.name, machine_name).is_some() {
-                bail!(
-                    "Le domaine libvirt '{vm_id}' existe déjà pour la machine '{machine_name}' du lab '{}'. \
-                     Exécutez `virtum down -f {}` ou `virtum destroy {machine_name}`.",
-                    lab.name,
-                    path.display()
-                );
-            }
             eprintln!(
                 "Domaine orphelin '{vm_id}' (machine '{machine_name}') : nettoyage avant déploiement…"
             );
@@ -77,10 +95,39 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
     let keys = ensure_ssh_keypair(&paths.keys)?;
     let public_key = read_public_key(&keys.public_key)?;
 
-    let mut deployed: Vec<String> = Vec::new();
+    let mut created_this_run: Vec<String> = Vec::new();
+    let mut ready = 0usize;
     for (machine_name, spec) in &lab.machines {
         let machine = machine_name.as_str();
         let vm_id = lab_vm_id(&lab.name, machine);
+        let metadata = metadata::load_metadata(&paths.metadata).await?;
+
+        eprintln!("--- Machine '{machine_name}' ({vm_id}) ---");
+
+        let spec_ports = virtumfile::machine_port_forwards(spec)?;
+
+        if let Some(existing) = metadata::find_by_lab_machine(&metadata, &lab.name, machine) {
+            port_forward::ensure_forwards_match_existing(machine_name, &spec_ports, existing)?;
+            if !spec_ports.is_empty() {
+                port_forward::ensure_ports_available(&spec_ports)?;
+                port_forward::ensure_ports_not_in_metadata(&metadata, Some(&vm_id), &spec_ports)?;
+            }
+            let instance_dir = paths.instances.join(&vm_id);
+            match resume_lab_machine(existing, &vm_id, machine_name, &instance_dir, &spec_ports)
+                .await
+            {
+                Ok(()) => {
+                    ready += 1;
+                    continue;
+                }
+                Err(err) => {
+                    eprintln!("Échec sur la machine '{machine_name}': {err:#}");
+                    rollback_lab_vms(&paths, &created_this_run).await;
+                    return Err(err);
+                }
+            }
+        }
+
         let config = VmLaunchConfig {
             os: spec.os.clone(),
             ram: spec.ram,
@@ -91,11 +138,12 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
             provision: spec.provision.clone(),
             lab_name: Some(lab.name.clone()),
             machine_name: Some(machine.to_string()),
+            port_forwards: spec_ports,
+            libvirt_network: Some(lab_net.clone()),
         };
         let hostname = config.hostname_for_vm(&vm_id);
         let instance_dir = paths.instances.join(&vm_id);
 
-        eprintln!("--- Machine '{machine_name}' ({vm_id}) ---");
         let mut retain = false;
         if let Err(err) = launch_vm_inner(
             &config,
@@ -109,16 +157,53 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
         .await
         {
             eprintln!("Échec sur la machine '{machine_name}': {err:#}");
-            rollback_lab_vms(&paths, &deployed).await;
+            rollback_lab_vms(&paths, &created_this_run).await;
             return Err(err);
         }
-        deployed.push(vm_id);
+        created_this_run.push(vm_id);
+        ready += 1;
     }
 
-    println!("Lab '{}' déployé ({} VM).", lab.name, deployed.len());
+    println!("Lab '{}' prêt ({} VM).", lab.name, ready);
     println!("  virtum ps");
     println!("  virtum shell <name>   # ex. virtum shell web");
     Ok(())
+}
+
+/// Relance une machine de lab déjà enregistrée (après `virtum down` sans `--destroy`).
+async fn resume_lab_machine(
+    existing: &Instance,
+    vm_id: &str,
+    machine_name: &str,
+    instance_dir: &std::path::Path,
+    spec_ports: &[PortForward],
+) -> Result<()> {
+    if existing.id != vm_id {
+        bail!(
+            "Incohérence lab/machine '{machine_name}' : metadata {} vs domaine attendu {vm_id}. \
+             Utilisez `virtum destroy {machine_name}` puis `virtum up`.",
+            existing.id
+        );
+    }
+
+    let reference = existing.name.clone().unwrap_or_else(|| existing.id.clone());
+
+    if domain_exists(vm_id) {
+        let state = domain_state(vm_id)?;
+        if domain_is_active(&state) && existing.status == InstanceStatus::Running {
+            let ip = existing.ip.as_deref().unwrap_or("-");
+            eprintln!("Machine '{machine_name}' déjà en cours d'exécution (IP: {ip}).");
+            if !spec_ports.is_empty() && ip != "-" {
+                port_forward::start_instance_proxies(instance_dir, ip, spec_ports)?;
+            }
+            port_forward::print_forward_lines(spec_ports);
+            println!("  SSH:      virtum shell {reference}");
+            return Ok(());
+        }
+    }
+
+    eprintln!("Relance de la machine '{machine_name}'…");
+    vm::start_vm_async(&reference).await
 }
 
 async fn rollback_lab_vms(paths: &VirtumPaths, vm_ids: &[String]) {
@@ -159,6 +244,12 @@ async fn down_async(file: Option<PathBuf>, destroy: bool) -> Result<()> {
         eprintln!("Suppression de {} VM du lab '{}'…", refs.len(), lab.name);
         for reference in &refs {
             vm::destroy_vm_async(reference).await?;
+        }
+        if let Err(err) = lab_network::destroy_lab_network(&lab.name) {
+            eprintln!(
+                "Avertissement: impossible de supprimer le réseau du lab '{}': {err:#}",
+                lab.name
+            );
         }
         println!("Lab '{}' supprimé.", lab.name);
     } else {

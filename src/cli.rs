@@ -23,6 +23,11 @@ pub enum Commands {
         #[arg(short = 'a', long)]
         all: bool,
     },
+    /// Download and cache a cloud OS image (without starting a VM)
+    Pull {
+        /// OS image id (e.g. debian-12, ubuntu-24.04)
+        os: String,
+    },
     /// Launch a headless VM
     Run(RunArgs),
     /// Deploy all machines from a Virtumfile (default: ./Virtumfile)
@@ -67,7 +72,7 @@ pub enum Commands {
 
 #[derive(clap::Args)]
 pub struct RunArgs {
-    /// OS image (v0.1: debian-12 only)
+    /// OS image (debian-12, ubuntu-24.04, …)
     #[arg(long, default_value = "debian-12")]
     pub os: String,
 

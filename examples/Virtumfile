@@ -7,11 +7,13 @@ machines:
     ram: 2048
     cpu: 2
     disk_size: 10G
+    ports:
+      - "18080:80"
     provision:
       - apt-get update
       - apt-get install -y nginx
 
   db:
-    os: debian-12
+    os: ubuntu-24.04
     ram: 1024
     cpu: 1

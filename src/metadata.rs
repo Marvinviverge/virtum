@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+use crate::port_forward::PortForward;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstanceStatus {
@@ -42,6 +44,9 @@ pub struct Instance {
     /// Clé machine dans le Virtumfile (`machines.web` → `web`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_name: Option<String>,
+    /// Redirections TCP 127.0.0.1:hôte → invité:port (Virtumfile `ports:`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_forwards: Option<Vec<PortForward>>,
     pub created_at: String,
 }
 
@@ -264,6 +269,7 @@ mod tests {
             disk_size: None,
             lab_name: None,
             machine_name: None,
+            port_forwards: None,
             created_at: "2026-06-02T10:00:00Z".to_string(),
         }
     }

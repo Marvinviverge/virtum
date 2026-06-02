@@ -9,6 +9,7 @@ use serde::Deserialize;
 use crate::disk::parse_disk_size;
 use crate::images::resolve_image;
 use crate::metadata::validate_name;
+use crate::port_forward::{self, PortForward};
 
 pub const DEFAULT_VIRTUMFILE: &str = "Virtumfile";
 
@@ -59,6 +60,7 @@ pub fn validate(lab: &Virtumfile) -> Result<()> {
     if lab.machines.is_empty() {
         bail!("Le Virtumfile doit définir au moins une machine sous `machines`.");
     }
+    let mut port_machines: Vec<(String, Vec<PortForward>)> = Vec::new();
     for (machine_name, spec) in &lab.machines {
         validate_name(machine_name)
             .with_context(|| format!("Nom de machine '{machine_name}' invalide"))?;
@@ -74,18 +76,33 @@ pub fn validate(lab: &Virtumfile) -> Result<()> {
             parse_disk_size(size)
                 .with_context(|| format!("Machine '{machine_name}': disk_size invalide"))?;
         }
+        let mut forwards = Vec::new();
         for port in &spec.ports {
-            parse_port_mapping(port)
+            let (host_port, guest_port) = parse_port_mapping(port)
                 .with_context(|| format!("Machine '{machine_name}': port invalide"))?;
+            forwards.push(PortForward {
+                host_port,
+                guest_port,
+            });
         }
-        if !spec.ports.is_empty() {
-            bail!(
-                "Machine '{machine_name}': le mapping de ports (`ports`) n'est pas encore implémenté \
-                 (prévu STEPS2 étape 31). Retirez `ports` pour lancer le lab."
-            );
-        }
+        port_machines.push((machine_name.clone(), forwards));
     }
+    port_forward::validate_lab_port_uniqueness(&port_machines)?;
     Ok(())
+}
+
+/// Parse les `ports:` d'une machine Virtumfile.
+pub fn machine_port_forwards(spec: &MachineSpec) -> Result<Vec<PortForward>> {
+    spec.ports
+        .iter()
+        .map(|port| {
+            let (host_port, guest_port) = parse_port_mapping(port)?;
+            Ok(PortForward {
+                host_port,
+                guest_port,
+            })
+        })
+        .collect()
 }
 
 /// Parse `8080:80` (hôte:invité).
@@ -149,14 +166,33 @@ machines:
     }
 
     #[test]
-    fn rejects_ports_for_now() {
+    fn accepts_ports_in_virtumfile() {
         let yaml = r#"
 name: x
 machines:
   web:
     os: debian-12
     ports:
-      - "8080:80"
+      - "18080:80"
+"#;
+        let lab = load_from_str(yaml).unwrap();
+        let forwards = machine_port_forwards(&lab.machines["web"]).unwrap();
+        assert_eq!(forwards[0].host_port, 18080);
+    }
+
+    #[test]
+    fn rejects_duplicate_host_ports_in_lab() {
+        let yaml = r#"
+name: x
+machines:
+  web:
+    os: debian-12
+    ports:
+      - "18080:80"
+  api:
+    os: debian-12
+    ports:
+      - "18080:8080"
 "#;
         assert!(load_from_str(yaml).is_err());
     }

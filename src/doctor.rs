@@ -48,6 +48,11 @@ pub fn run() -> i32 {
             &["-V"],
             "Installez openssh-client (ex. sudo apt install openssh-client).",
         ),
+        check_binary(
+            "socat",
+            &["-V"],
+            "Requis pour `ports:` dans le Virtumfile (ex. sudo apt install socat).",
+        ),
         check_kvm(),
         check_groups(),
         check_libvirt_default_network(),

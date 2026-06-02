@@ -16,12 +16,14 @@ use crate::disk::{
     plan_disk_size,
 };
 use crate::images::{ensure_image, resolve_image};
+use crate::lab_network;
 use crate::libvirt::{
     self, define_domain, destroy_domain, domain_exists, domain_is_active, domain_state,
     shutdown_domain, start_domain, undefine_domain, write_domain_xml, DomainSpec,
 };
 use crate::libvirt_access;
 use crate::metadata::{self, Instance, InstanceStatus};
+use crate::port_forward::{self, PortForward};
 use crate::ssh::{ensure_ssh_keypair, read_public_key, run_provision_commands, ssh_auth_probe};
 
 const IP_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -48,6 +50,9 @@ pub struct VmLaunchConfig {
     pub provision: Vec<String>,
     pub lab_name: Option<String>,
     pub machine_name: Option<String>,
+    pub port_forwards: Vec<PortForward>,
+    /// Réseau libvirt (`virtum-lab-…` pour un lab, sinon `default` via `None`).
+    pub libvirt_network: Option<String>,
 }
 
 impl VmLaunchConfig {
@@ -62,6 +67,8 @@ impl VmLaunchConfig {
             provision: Vec::new(),
             lab_name: None,
             machine_name: None,
+            port_forwards: Vec::new(),
+            libvirt_network: None,
         }
     }
 
@@ -208,12 +215,23 @@ pub async fn launch_vm_inner(
         &iso_path,
     )?;
 
+    if !config.port_forwards.is_empty() {
+        port_forward::ensure_ports_available(&config.port_forwards)?;
+        let metadata = metadata::load_metadata(&paths.metadata).await?;
+        port_forward::ensure_ports_not_in_metadata(&metadata, Some(vm_id), &config.port_forwards)?;
+    }
+
+    let libvirt_network = config
+        .libvirt_network
+        .as_deref()
+        .unwrap_or(libvirt::LIBVIRT_DEFAULT_NETWORK);
     let spec = DomainSpec {
         vm_id,
         ram_mb: config.ram,
         vcpus: config.cpu,
         disk_path: &disk_path,
         iso_path: &iso_path,
+        network: libvirt_network,
     };
     let xml_path = write_domain_xml(instance_dir, &spec)?;
 
@@ -238,10 +256,10 @@ pub async fn launch_vm_inner(
 
     eprintln!(
         "Attente de l'adresse IP (réseau {}, max {} s)…",
-        libvirt::LIBVIRT_DEFAULT_NETWORK,
+        libvirt_network,
         IP_TIMEOUT.as_secs()
     );
-    let ip = wait_for_ip(vm_id, hostname, IP_TIMEOUT).await?;
+    let ip = wait_for_ip(vm_id, hostname, libvirt_network, IP_TIMEOUT).await?;
     if !is_usable_ssh_ip(&ip) {
         bail!(
             "Adresse IP invalide pour '{vm_id}': {ip}. \
@@ -334,9 +352,18 @@ pub async fn launch_vm_inner(
         disk_size: Some(disk_size_label),
         lab_name: config.lab_name.clone(),
         machine_name: config.machine_name.clone(),
+        port_forwards: if config.port_forwards.is_empty() {
+            None
+        } else {
+            Some(config.port_forwards.clone())
+        },
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
     metadata::upsert_instance(&paths.metadata, instance).await?;
+
+    if !config.port_forwards.is_empty() {
+        port_forward::start_instance_proxies(instance_dir, &ip, &config.port_forwards)?;
+    }
 
     let shell_ref = config.name.as_deref().unwrap_or(vm_id);
     println!("VM démarrée: {vm_id}");
@@ -348,16 +375,22 @@ pub async fn launch_vm_inner(
     }
     println!("  OS:       {}", config.os);
     println!("  IP:       {ip}");
+    port_forward::print_forward_lines(&config.port_forwards);
     println!("  SSH:      virtum shell {shell_ref}");
     Ok(())
 }
 
-pub async fn wait_for_ip(vm_id: &str, hostname: &str, timeout: Duration) -> Result<String> {
+pub async fn wait_for_ip(
+    vm_id: &str,
+    hostname: &str,
+    libvirt_network: &str,
+    timeout: Duration,
+) -> Result<String> {
     let started = Instant::now();
     sleep(IP_BOOT_GRACE).await;
 
     loop {
-        if let Some(ip) = try_discover_ip(vm_id, hostname)? {
+        if let Some(ip) = try_discover_ip(vm_id, hostname, libvirt_network)? {
             return Ok(ip);
         }
 
@@ -370,14 +403,14 @@ pub async fn wait_for_ip(vm_id: &str, hostname: &str, timeout: Duration) -> Resu
     bail!(
         "Aucune adresse IP trouvée pour '{vm_id}' après {} secondes.\n\
          Suggestions:\n\
-         - Exécutez `virtum doctor` (réseau « default » actif)\n\
-         - Vérifiez `virsh domifaddr {vm_id}` et `virsh net-dhcp-leases default`\n\
+         - Exécutez `virtum doctor` (réseau libvirt actif)\n\
+         - Vérifiez `virsh domifaddr {vm_id}` et `virsh net-dhcp-leases {libvirt_network}`\n\
          - Attendez la fin de cloud-init puis réessayez",
         timeout.as_secs()
     );
 }
 
-fn try_discover_ip(vm_id: &str, hostname: &str) -> Result<Option<String>> {
+fn try_discover_ip(vm_id: &str, hostname: &str, libvirt_network: &str) -> Result<Option<String>> {
     for output in libvirt::domifaddr_all_sources(vm_id) {
         if let Some(ip) = libvirt::parse_ipv4_from_domifaddr(&output) {
             if is_usable_ssh_ip(&ip) {
@@ -396,10 +429,7 @@ fn try_discover_ip(vm_id: &str, hostname: &str) -> Result<Option<String>> {
         .ok()
         .and_then(|output| libvirt::parse_mac_from_domiflist(&output));
 
-    if let (Some(mac), Ok(leases)) = (
-        mac.as_ref(),
-        libvirt::net_dhcp_leases(libvirt::LIBVIRT_DEFAULT_NETWORK),
-    ) {
+    if let (Some(mac), Ok(leases)) = (mac.as_ref(), libvirt::net_dhcp_leases(libvirt_network)) {
         if let Some(ip) = libvirt::parse_ipv4_from_dhcp_leases(&leases, mac) {
             if is_usable_ssh_ip(&ip) && dhcp_lease_mac_matches(&leases, &ip, mac) {
                 return Ok(Some(ip));
@@ -522,7 +552,9 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
 
     let disk_path = instance_dir.join("disk.qcow2");
     let iso_path = instance_dir.join("cloud-init.iso");
-    let xml_path = instance_dir.join("config.xml");
+    let libvirt_network = lab_network::network_for_lab(instance.lab_name.as_deref())?;
+    let xml_path =
+        libvirt::refresh_domain_xml(&instance_dir, &vm_id, Some(libvirt_network.as_str()))?;
     for path in [&disk_path, &iso_path, &xml_path] {
         if !path.is_file() {
             bail!(
@@ -544,15 +576,13 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         &iso_path,
     )?;
 
-    if !domain_exists(&vm_id) {
-        define_domain(&xml_path).with_context(|| {
-            format!(
-                "virsh define a échoué pour {vm_id} (domaine absent). \
-                 Vérifiez {} et virtum doctor.",
-                xml_path.display()
-            )
-        })?;
-    }
+    define_domain(&xml_path).with_context(|| {
+        format!(
+            "virsh define a échoué pour {vm_id}. \
+             Vérifiez {} et virtum doctor.",
+            xml_path.display()
+        )
+    })?;
 
     start_domain(&vm_id).with_context(|| {
         format!(
@@ -568,10 +598,16 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
 
     eprintln!(
         "Attente de l'adresse IP (réseau {}, max {} s)…",
-        libvirt::LIBVIRT_DEFAULT_NETWORK,
+        libvirt_network,
         IP_TIMEOUT.as_secs()
     );
-    let ip = wait_for_ip(&vm_id, &instance.hostname, IP_TIMEOUT).await?;
+    let ip = wait_for_ip(
+        &vm_id,
+        &instance.hostname,
+        libvirt_network.as_str(),
+        IP_TIMEOUT,
+    )
+    .await?;
     if !is_usable_ssh_ip(&ip) {
         bail!(
             "Adresse IP invalide pour '{vm_id}': {ip}. \
@@ -591,12 +627,22 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     .await?;
 
     let shell_ref = instance.name.clone().unwrap_or_else(|| vm_id.clone());
+    let forwards_snapshot = instance.port_forwards.clone();
     instance.status = InstanceStatus::Running;
     instance.ip = Some(ip.clone());
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
+    if let Some(ref forwards) = forwards_snapshot {
+        let metadata = metadata::load_metadata(&paths.metadata).await?;
+        port_forward::ensure_ports_not_in_metadata(&metadata, Some(&vm_id), forwards)?;
+        port_forward::start_instance_proxies(&instance_dir, &ip, forwards)?;
+    }
+
     println!("VM démarrée: {vm_id}");
     println!("  IP:       {ip}");
+    if let Some(ref forwards) = forwards_snapshot {
+        port_forward::print_forward_lines(forwards);
+    }
     println!("  SSH:      virtum shell {shell_ref}");
     Ok(())
 }
@@ -632,6 +678,9 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
         );
     }
 
+    let instance_dir = paths.instances.join(&vm_id);
+    port_forward::stop_instance_proxies(&instance_dir);
+
     instance.status = InstanceStatus::Stopped;
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
@@ -656,6 +705,8 @@ pub async fn destroy_vm_async(reference: &str) -> Result<()> {
     if orphan {
         eprintln!("Domaine Virtum orphelin (libvirt sans entrée metadata.json) : {vm_id}");
     }
+
+    port_forward::stop_instance_proxies(&instance_dir);
 
     if domain_exists(&vm_id) {
         if domain_is_active(&domain_state(&vm_id)?) {
@@ -740,6 +791,7 @@ async fn wait_for_domain_inactive(vm_id: &str, timeout: Duration) -> bool {
 
 pub async fn cleanup_failed_run(vm_id: &str, instance_dir: &Path) {
     eprintln!("Nettoyage après échec de virtum run pour '{vm_id}'…");
+    port_forward::stop_instance_proxies(instance_dir);
     if let Err(err) = destroy_domain(vm_id) {
         eprintln!("  avertissement destroy: {err:#}");
     }

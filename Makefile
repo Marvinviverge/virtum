@@ -7,7 +7,7 @@ DEBUG_BIN := $(TARGET_DIR)/debug/virtum
 INSTALL_DIR ?= $(HOME)/.cargo/bin
 INSTALLED_BIN := $(INSTALL_DIR)/virtum
 
-.PHONY: all release build debug install test fmt clippy check clean help setup-var-lib
+.PHONY: all release build debug install test fmt clippy check clean help setup-host setup-var-lib
 
 all: release
 
@@ -42,6 +42,11 @@ check: fmt clippy test
 clean:
 	$(CARGO) clean
 
+## Prérequis hôte apt + groupes libvirt/kvm (sudo, Debian/Ubuntu)
+setup-host:
+	@test -x scripts/setup-host.sh || { echo "scripts/setup-host.sh introuvable"; exit 1; }
+	sudo ./scripts/setup-host.sh
+
 ## Prépare /var/lib/virtum (sudo)
 setup-var-lib:
 	@test -x scripts/setup-var-lib.sh || { echo "scripts/setup-var-lib.sh introuvable"; exit 1; }
@@ -55,4 +60,5 @@ help:
 	@echo "  make test      — cargo test"
 	@echo "  make check     — fmt + clippy + test"
 	@echo "  make clean     — cargo clean"
+	@echo "  make setup-host    — sudo scripts/setup-host.sh (apt, libvirt, socat)"
 	@echo "  make setup-var-lib — sudo scripts/setup-var-lib.sh"

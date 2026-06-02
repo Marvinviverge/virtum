@@ -6,9 +6,11 @@ pub mod disk;
 pub mod doctor;
 pub mod images;
 pub mod lab;
+pub mod lab_network;
 pub mod libvirt;
 pub mod libvirt_access;
 pub mod metadata;
+pub mod port_forward;
 pub mod ps;
 pub mod ssh;
 pub mod test_env;
@@ -27,6 +29,7 @@ fn dispatch(command: Commands) -> Result<()> {
     match command {
         Commands::Doctor => std::process::exit(doctor::run()),
         Commands::Ps { all } => ps::ps(all)?,
+        Commands::Pull { os } => images::pull(&os)?,
         Commands::Run(args) => vm::run_vm(args)?,
         Commands::Shell { vm } => ssh::shell_to_instance(&vm)?,
         Commands::Start { vms } => run_for_each_vm(&vms, vm::start_vm)?,

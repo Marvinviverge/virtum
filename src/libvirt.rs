@@ -25,13 +25,14 @@ pub struct DomainSpec<'a> {
     pub vcpus: u32,
     pub disk_path: &'a Path,
     pub iso_path: &'a Path,
+    /// Réseau libvirt (`default` ou `virtum-lab-<name>`).
+    pub network: &'a str,
 }
 
-/// Builds libvirt domain XML for a headless KVM guest on the `default` NAT network.
+/// Builds libvirt domain XML for a headless KVM guest on a libvirt NAT network.
 pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
     let disk = absolute_path(spec.disk_path)?;
     let iso = absolute_path(spec.iso_path)?;
-
     Ok(format!(
         r#"<domain type='kvm'>
   <name>{name}</name>
@@ -84,8 +85,22 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
         machine = QEMU_MACHINE,
         disk = xml_escape(&disk),
         iso = xml_escape(&iso),
-        network = LIBVIRT_DEFAULT_NETWORK,
+        network = xml_escape(spec.network),
     ))
+}
+
+/// Lit le réseau libvirt depuis `config.xml` (NIC type `network`).
+pub fn parse_network_from_xml(xml: &str) -> Option<String> {
+    for line in xml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("<source network=") {
+            let rest = trimmed.strip_prefix("<source network=")?;
+            let quoted = rest.trim_start_matches('\'').trim_start_matches('"');
+            let end = quoted.find(['\'', '"'])?;
+            return Some(quoted[..end].to_string());
+        }
+    }
+    None
 }
 
 pub fn write_domain_xml(instance_dir: &Path, spec: &DomainSpec<'_>) -> Result<PathBuf> {
@@ -94,6 +109,50 @@ pub fn write_domain_xml(instance_dir: &Path, spec: &DomainSpec<'_>) -> Result<Pa
     std::fs::write(&xml_path, xml)
         .with_context(|| format!("Impossible d'écrire {}", xml_path.display()))?;
     Ok(xml_path)
+}
+
+/// Réécrit `config.xml` (une seule NIC) en conservant RAM/CPU si le fichier existe déjà.
+pub fn refresh_domain_xml(
+    instance_dir: &Path,
+    vm_id: &str,
+    network: Option<&str>,
+) -> Result<PathBuf> {
+    let xml_path = instance_dir.join("config.xml");
+    let disk_path = instance_dir.join("disk.qcow2");
+    let iso_path = instance_dir.join("cloud-init.iso");
+    let (ram_mb, vcpus, network_name) = if xml_path.is_file() {
+        let content = std::fs::read_to_string(&xml_path)
+            .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
+        let (ram, cpu) = parse_ram_vcpu_from_xml(&content).unwrap_or((2048, 2));
+        let net = network
+            .map(str::to_string)
+            .or_else(|| parse_network_from_xml(&content))
+            .unwrap_or_else(|| LIBVIRT_DEFAULT_NETWORK.to_string());
+        (ram, cpu, net)
+    } else {
+        (
+            2048,
+            2,
+            network.unwrap_or(LIBVIRT_DEFAULT_NETWORK).to_string(),
+        )
+    };
+    let spec = DomainSpec {
+        vm_id,
+        ram_mb,
+        vcpus,
+        disk_path: &disk_path,
+        iso_path: &iso_path,
+        network: &network_name,
+    };
+    write_domain_xml(instance_dir, &spec)
+}
+
+fn parse_ram_vcpu_from_xml(xml: &str) -> Option<(u32, u32)> {
+    let ram = xml.split("<memory").nth(1)?.split('>').nth(1)?;
+    let ram = ram.split('<').next()?.trim().parse().ok()?;
+    let vcpu = xml.split("<vcpu").nth(1)?.split('>').nth(1)?;
+    let vcpu = vcpu.split('<').next()?.trim().parse().ok()?;
+    Some((ram, vcpu))
 }
 
 pub fn domain_exists(vm_id: &str) -> bool {
@@ -386,6 +445,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_network_from_domain_xml() {
+        let xml = r#"<interface type='network'>
+      <source network='virtum-lab-demo-lab'/>
+    </interface>"#;
+        assert_eq!(
+            parse_network_from_xml(xml).as_deref(),
+            Some("virtum-lab-demo-lab")
+        );
+    }
+
+    #[test]
     fn generate_xml_contains_paths_and_headless_graphics() {
         let disk = std::env::temp_dir().join("virtum-xml-disk.qcow2");
         let iso = std::env::temp_dir().join("virtum-xml.iso");
@@ -398,12 +468,14 @@ mod tests {
             vcpus: 2,
             disk_path: &disk,
             iso_path: &iso,
+            network: "virtum-lab-demo-lab",
         };
         let xml = generate_domain_xml(&spec).unwrap();
         assert!(xml.contains("<name>vm-testxml</name>"));
+        assert!(xml.contains("network='virtum-lab-demo-lab'"));
         assert!(!xml.contains("<graphics"));
         assert!(xml.contains("type='network'"));
-        assert!(xml.contains("network='default'"));
+        assert!(!xml.contains("qemu:commandline"));
 
         let _ = std::fs::remove_file(disk);
         let _ = std::fs::remove_file(iso);

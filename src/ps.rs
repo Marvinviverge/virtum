@@ -8,6 +8,7 @@ use crate::config::{self, VirtumPaths};
 use crate::disk::{format_virtual_size_label, image_virtual_size_bytes};
 use crate::libvirt::{domain_exists, domain_state};
 use crate::metadata::{self, Instance, InstanceStatus};
+use crate::port_forward;
 
 #[derive(Debug, Clone)]
 struct PsRow {
@@ -18,6 +19,7 @@ struct PsRow {
     status: String,
     disk: String,
     ip: String,
+    forward: String,
 }
 
 pub fn ps(all: bool) -> Result<()> {
@@ -50,6 +52,9 @@ async fn ps_async(all: bool) -> Result<()> {
             status: live,
             disk: resolve_disk_size(instance, &paths),
             ip: format_ip(instance),
+            forward: port_forward::format_forward_list(
+                instance.port_forwards.as_deref().unwrap_or(&[]),
+            ),
         });
     }
 
@@ -109,13 +114,13 @@ fn format_ip(instance: &Instance) -> String {
 
 fn print_table(rows: &[PsRow]) {
     println!(
-        "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<24}",
-        "NAME", "LAB", "VM ID", "OS", "STATUS", "DISK", "IP"
+        "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<24} {:<28}",
+        "NAME", "LAB", "VM ID", "OS", "STATUS", "DISK", "IP", "FORWARD"
     );
     for row in rows {
         println!(
-            "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<24}",
-            row.name, row.lab, row.id, row.os, row.status, row.disk, row.ip
+            "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<24} {:<28}",
+            row.name, row.lab, row.id, row.os, row.status, row.disk, row.ip, row.forward
         );
     }
 }
@@ -144,6 +149,7 @@ mod tests {
             disk_size: Some("10G".into()),
             lab_name: None,
             machine_name: None,
+            port_forwards: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(format_ip(&inst), "127.0.0.1:22422");
@@ -170,6 +176,7 @@ mod tests {
             disk_size: Some("20G".into()),
             lab_name: Some("my-lab".into()),
             machine_name: Some("web".into()),
+            port_forwards: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(super::resolve_disk_size(&inst, &paths), "20G");
