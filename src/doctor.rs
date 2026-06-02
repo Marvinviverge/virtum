@@ -1,0 +1,267 @@
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::process::Command;
+
+const KVM_DEVICE: &str = "/dev/kvm";
+
+struct CheckResult {
+    name: String,
+    ok: bool,
+    detail: String,
+}
+
+pub fn run() -> i32 {
+    let results = vec![
+        check_binary(
+            "qemu-img",
+            &["--version"],
+            "Installez qemu-utils (ex. sudo apt install qemu-utils).",
+        ),
+        check_binary(
+            "virsh",
+            &["--version"],
+            "Installez libvirt-clients (ex. sudo apt install libvirt-clients).",
+        ),
+        check_binary(
+            "cloud-localds",
+            &["--help"],
+            "Installez cloud-image-utils (ex. sudo apt install cloud-image-utils).",
+        ),
+        check_binary(
+            "ssh",
+            &["-V"],
+            "Installez openssh-client (ex. sudo apt install openssh-client).",
+        ),
+        check_kvm(),
+        check_groups(),
+        check_libvirt_default_network(),
+    ];
+
+    print_report(&results)
+}
+
+fn check_binary(name: &str, version_args: &[&str], install_hint: &str) -> CheckResult {
+    match Command::new(name).args(version_args).output() {
+        Ok(output) if output.status.success() => CheckResult {
+            name: name.to_string(),
+            ok: true,
+            detail: String::new(),
+        },
+        Ok(_) => CheckResult {
+            name: name.to_string(),
+            ok: false,
+            detail: format!("{name} est présent mais a échoué ({install_hint})"),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => CheckResult {
+            name: name.to_string(),
+            ok: false,
+            detail: format!("{name} introuvable dans le PATH. {install_hint}"),
+        },
+        Err(e) => CheckResult {
+            name: name.to_string(),
+            ok: false,
+            detail: format!("Impossible d'exécuter {name}: {e}"),
+        },
+    }
+}
+
+fn check_kvm() -> CheckResult {
+    const NAME: &str = "KVM (/dev/kvm)";
+    match OpenOptions::new().read(true).write(true).open(KVM_DEVICE) {
+        Ok(_) => CheckResult {
+            name: NAME.to_string(),
+            ok: true,
+            detail: String::new(),
+        },
+        Err(e) => CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: format!(
+                "Accès lecture/écriture à {KVM_DEVICE} impossible ({e}). \
+                 Vérifiez que la virtualisation KVM est activée dans le BIOS/UEFI \
+                 et que votre utilisateur est dans le groupe kvm \
+                 (sudo usermod -aG kvm $USER, puis reconnectez la session)."
+            ),
+        },
+    }
+}
+
+fn check_groups() -> CheckResult {
+    const NAME: &str = "Groupes libvirt et kvm";
+    let groups = match user_groups() {
+        Ok(g) => g,
+        Err(e) => {
+            return CheckResult {
+                name: NAME.to_string(),
+                ok: false,
+                detail: format!("Impossible de lire les groupes de l'utilisateur: {e}"),
+            };
+        }
+    };
+
+    let mut missing = Vec::new();
+    if !groups.iter().any(|g| g == "libvirt") {
+        missing.push("libvirt");
+    }
+    if !groups.iter().any(|g| g == "kvm") {
+        missing.push("kvm");
+    }
+
+    if missing.is_empty() {
+        CheckResult {
+            name: NAME.to_string(),
+            ok: true,
+            detail: String::new(),
+        }
+    } else {
+        CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: format!(
+                "Groupes manquants: {}. Ajoutez-vous avec \
+                 sudo usermod -aG {} $USER puis reconnectez votre session.",
+                missing.join(", "),
+                missing.join(",")
+            ),
+        }
+    }
+}
+
+fn user_groups() -> io::Result<Vec<String>> {
+    let output = Command::new("id").arg("-Gn").output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "id -Gn a échoué: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect())
+}
+
+fn check_libvirt_default_network() -> CheckResult {
+    const NAME: &str = "Réseau libvirt « default »";
+    let output = match Command::new("virsh").args(["net-info", "default"]).output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return CheckResult {
+                name: NAME.to_string(),
+                ok: false,
+                detail: "virsh introuvable (voir la vérification virsh ci-dessus).".to_string(),
+            };
+        }
+        Err(e) => {
+            return CheckResult {
+                name: NAME.to_string(),
+                ok: false,
+                detail: format!("Impossible d'exécuter virsh net-info default: {e}"),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        return CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: format!(
+                "Le réseau « default » est introuvable ou inaccessible: {}. \
+                 Vérifiez que libvirt est installé et démarré \
+                 (sudo systemctl enable --now libvirtd).",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        };
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let active = field_value(&text, "Active:").is_some_and(|v| v.eq_ignore_ascii_case("yes"));
+    let autostart = field_value(&text, "Autostart:")
+        .is_some_and(|v| v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("enable"));
+
+    let mut problems = Vec::new();
+    if !active {
+        problems.push("le réseau n'est pas actif (essayez: virsh net-start default)".to_string());
+    }
+    if !autostart {
+        problems.push(
+            "l'autostart n'est pas activé (essayez: virsh net-autostart default)".to_string(),
+        );
+    }
+
+    if problems.is_empty() {
+        CheckResult {
+            name: NAME.to_string(),
+            ok: true,
+            detail: String::new(),
+        }
+    } else {
+        CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: problems.join("; "),
+        }
+    }
+}
+
+fn field_value(text: &str, key: &str) -> Option<String> {
+    text.lines()
+        .find(|line| line.starts_with(key))
+        .map(|line| line[key.len()..].trim().to_string())
+}
+
+fn print_report(results: &[CheckResult]) -> i32 {
+    let mut stdout = io::stdout().lock();
+    let failed = results.iter().filter(|r| !r.ok).count();
+    let passed = results.len() - failed;
+
+    let _ = writeln!(stdout, "Virtum doctor\n");
+
+    for result in results {
+        if result.ok {
+            let _ = writeln!(stdout, "  [ok]   {}", result.name);
+        } else {
+            let _ = writeln!(stdout, "  [FAIL] {} — {}", result.name, result.detail);
+        }
+    }
+
+    let _ = writeln!(stdout);
+    if failed == 0 {
+        let _ = writeln!(
+            stdout,
+            "Toutes les vérifications ont réussi ({passed}/{}).",
+            results.len()
+        );
+        0
+    } else {
+        let _ = writeln!(
+            stdout,
+            "Résumé: {passed} réussie(s), {failed} échec(s) sur {} vérification(s).",
+            results.len()
+        );
+        let _ = writeln!(
+            stdout,
+            "Corrigez les échecs ci-dessus avant d'utiliser virtum run."
+        );
+        1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_virsh_net_info_fields() {
+        let sample = r#"Name:           default
+UUID:           abc
+Active:         yes
+Persistent:     yes
+Autostart:      enable
+"#;
+        assert!(field_value(sample, "Active:")
+            .unwrap()
+            .eq_ignore_ascii_case("yes"));
+        assert_eq!(field_value(sample, "Autostart:").unwrap(), "enable");
+    }
+}
