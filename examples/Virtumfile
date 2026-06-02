@@ -1,0 +1,17 @@
+# Exemple de lab Virtum (v0.2) — `virtum up -f examples/Virtumfile`
+name: demo-lab
+
+machines:
+  web:
+    os: debian-12
+    ram: 2048
+    cpu: 2
+    disk_size: 10G
+    provision:
+      - apt-get update
+      - apt-get install -y nginx
+
+  db:
+    os: debian-12
+    ram: 1024
+    cpu: 1

@@ -6,9 +6,54 @@ use anyhow::{Context, Result};
 
 use crate::command::{path_arg, run_command};
 
+/// `/etc/profile.d` : PATH incluant `/usr/sbin` (nginx, ip, etc.) pour les shells interactifs.
+const PATH_PROFILE_SNIPPET: &str = r#"
+write_files:
+  - path: /etc/profile.d/virtum-path.sh
+    permissions: '0644'
+    content: |
+      # Virtum — PATH Debian complet pour sessions SSH interactives
+      case ":${PATH}:" in
+        *:/usr/sbin:*) ;;
+        *) export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ;;
+      esac
+"#;
+
 /// Writes `user-data` (cloud-config) with user, sudo and Virtum SSH public key.
-pub fn write_user_data(instance_dir: &Path, user: &str, public_key: &str) -> Result<PathBuf> {
+///
+/// Si `grow_root` est vrai, cloud-init agrandit la partition racine au premier boot.
+/// Les commandes `provision` ne sont pas injectées ici : exécutées via SSH après
+/// que la VM accepte les connexions (voir `ssh::run_provision_commands`).
+pub fn write_user_data(
+    instance_dir: &Path,
+    user: &str,
+    public_key: &str,
+    grow_root: bool,
+) -> Result<PathBuf> {
     let path = instance_dir.join("user-data");
+    let grow_block = if grow_root {
+        r"
+growpart:
+  mode: auto
+  devices: ['/']
+resize_rootfs: true
+"
+    } else {
+        ""
+    };
+    let (package_block, runcmd_block) = if grow_root {
+        // Pas de runcmd/apt au boot : growpart d'abord, guest-agent + provision après SSH.
+        (String::new(), String::new())
+    } else {
+        (
+            r"package_update: true
+packages:
+  - qemu-guest-agent
+"
+            .to_string(),
+            "runcmd:\n  - [ systemctl, enable, --now, qemu-guest-agent ]\n".to_string(),
+        )
+    };
     let content = format!(
         r#"#cloud-config
 users:
@@ -20,12 +65,8 @@ users:
     ssh_authorized_keys:
       - {public_key}
 ssh_pwauth: false
-package_update: true
-packages:
-  - qemu-guest-agent
-runcmd:
-  - [ systemctl, enable, --now, qemu-guest-agent ]
-"#
+{path_profile}{package_block}{grow_block}{runcmd_block}"#,
+        path_profile = PATH_PROFILE_SNIPPET,
     );
     std::fs::write(&path, content)
         .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
@@ -86,12 +127,31 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey virtum";
-        write_user_data(&dir, "virtum", key).unwrap();
+        write_user_data(&dir, "virtum", key, false).unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
         assert!(content.starts_with("#cloud-config\n"));
         assert!(content.contains("  - name: virtum\n"));
         assert!(content.contains(&format!("      - {key}")));
         assert!(content.contains("ssh_pwauth: false"));
+        assert!(content.contains("/etc/profile.d/virtum-path.sh"));
+        assert!(content.contains("package_update: true"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_data_grow_root_has_no_runcmd() {
+        let dir = std::env::temp_dir().join(format!("virtum-ci-grow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum", true).unwrap();
+        let content = fs::read_to_string(dir.join("user-data")).unwrap();
+        assert!(content.contains("growpart:"));
+        assert!(content.contains("resize_rootfs: true"));
+        assert!(!content.contains("runcmd:"));
+        assert!(!content.contains("packages:"));
+        assert!(content.contains("/etc/profile.d/virtum-path.sh"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -124,7 +184,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum").unwrap();
+        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum", false).unwrap();
         write_meta_data(&dir, "vm-test", "vm-test").unwrap();
 
         let result = build_cloud_init_iso(&dir);

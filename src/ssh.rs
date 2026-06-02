@@ -3,8 +3,8 @@
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
@@ -73,7 +73,7 @@ pub fn read_public_key(public_key_path: &Path) -> Result<String> {
 }
 
 /// SSH interactif vers une instance (étape 17) ; termine le processus avec le code SSH.
-pub fn shell_to_instance(vm_id: &str) -> Result<()> {
+pub fn shell_to_instance(reference: &str) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -83,12 +83,8 @@ pub fn shell_to_instance(vm_id: &str) -> Result<()> {
     let (private_key, user, host, port) = runtime.block_on(async {
         let paths = config::ensure_layout().await?;
         let metadata = metadata::load_metadata(&paths.metadata).await?;
-        let instance = metadata::find_instance(&metadata, vm_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Instance '{vm_id}' introuvable dans metadata.json. \
-                 Lancez `virtum run` ou vérifiez l'identifiant."
-            )
-        })?;
+        let instance = metadata::resolve_instance_ref(&metadata, reference)?;
+        let vm_id = instance.id.as_str();
 
         if instance.status != InstanceStatus::Running {
             let hint = match instance.status {
@@ -110,7 +106,7 @@ pub fn shell_to_instance(vm_id: &str) -> Result<()> {
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Aucune adresse IP enregistrée pour '{vm_id}'. \
-                     Utilisez `virtum start {vm_id}` ou `virtum run`."
+                     Utilisez `virtum start` ou `virtum run`."
                 )
             })?;
 
@@ -140,6 +136,142 @@ pub fn shell_to_instance(vm_id: &str) -> Result<()> {
     })?;
 
     exec_ssh_shell(&private_key, &user, &host, port)
+}
+
+/// Exécute des commandes de provision via SSH (après premier login).
+pub fn run_provision_commands(
+    private_key: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    commands: &[String],
+    timeout: Duration,
+) -> Result<()> {
+    use std::time::Instant;
+
+    let started = Instant::now();
+    for (i, cmd) in commands.iter().enumerate() {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if started.elapsed() > timeout {
+            bail!("Provision interrompue : délai global dépassé ({timeout:?}).");
+        }
+        eprintln!("  [{}/{}] {trimmed}", i + 1, commands.len());
+        ssh_run_provision_command(private_key, user, host, port, trimmed).with_context(|| {
+            format!(
+                "Provision échouée à l'étape {}/{}: {trimmed}",
+                i + 1,
+                commands.len()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Quote pour `sh -c '…'` (argument unique passé à SSH).
+fn shell_single_quote(script: &str) -> String {
+    format!("'{}'", script.replace('\'', "'\"'\"'"))
+}
+
+/// Commande distante complète pour la provision (`sudo -n bash -c '…'` en un seul argument SSH).
+fn remote_provision_shell_command(command: &str) -> String {
+    let mut inner = command.trim();
+    if let Some(rest) = inner.strip_prefix("sudo ") {
+        inner = rest;
+    }
+    format!("sudo -n bash -c {}", shell_single_quote(inner))
+}
+
+/// Exécute une commande distante via `sudo -n bash -c` (utilisateur cloud-init = NOPASSWD).
+pub fn ssh_run_provision_command(
+    private_key: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    command: &str,
+) -> Result<()> {
+    let remote = remote_provision_shell_command(command);
+    let key = path_arg(private_key)?;
+    let target = format!("{user}@{host}");
+    let port_str = port.to_string();
+
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-i")
+        .arg(key)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("IdentitiesOnly=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=30")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null");
+    if port != 22 {
+        cmd.arg("-p").arg(&port_str);
+    }
+    // Un seul argument commande : évite que le shell distant ne coupe sur les espaces/&&.
+    cmd.arg(&target).arg(&remote);
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Impossible d'exécuter ssh vers {target}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!(
+        "Commande distante échouée (code {}): {stderr}",
+        output.status.code().unwrap_or(-1)
+    )
+}
+
+/// Commande SSH non interactive (BatchMode), ex. `bash -lc '…'`.
+pub fn ssh_run_command(
+    private_key: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    command: &str,
+) -> Result<()> {
+    let key = path_arg(private_key)?;
+    let target = format!("{user}@{host}");
+    let port_str = port.to_string();
+
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-i")
+        .arg(key)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("IdentitiesOnly=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=30")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null");
+    if port != 22 {
+        cmd.arg("-p").arg(&port_str);
+    }
+    cmd.arg(&target).arg("bash").arg("-lc").arg(command);
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Impossible d'exécuter ssh vers {target}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    bail!(
+        "Commande distante échouée (code {}): {stderr}",
+        output.status.code().unwrap_or(-1)
+    );
 }
 
 /// Vérifie que l'authentification par clé Virtum fonctionne (cloud-init terminé).
@@ -196,7 +328,11 @@ fn exec_ssh_shell(private_key: &Path, user: &str, host: &str, port: u16) -> Resu
     if port != 22 {
         cmd.arg("-p").arg(port.to_string());
     }
-    cmd.arg(&target)
+    // Shell de connexion : charge /etc/profile.d (dont virtum-path.sh) → PATH avec /usr/sbin
+    cmd.arg("-t")
+        .arg(&target)
+        .arg("bash")
+        .arg("-l")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -220,6 +356,17 @@ fn restrict_private_key_permissions(private_key: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_provision_shell_command_quotes_and_sudo() {
+        let cmd = remote_provision_shell_command(
+            "DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y nginx",
+        );
+        assert!(cmd.starts_with("sudo -n bash -c '"));
+        assert!(cmd.ends_with('\''));
+        assert!(cmd.contains("apt-get update"));
+        assert!(cmd.contains("&&"));
+    }
 
     #[test]
     fn ensure_ssh_keypair_is_idempotent() {

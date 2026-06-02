@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -23,25 +25,43 @@ pub enum Commands {
     },
     /// Launch a headless VM
     Run(RunArgs),
+    /// Deploy all machines from a Virtumfile (default: ./Virtumfile)
+    Up {
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Stop or destroy all VMs of a lab (Virtumfile `name`)
+    Down {
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Remove VMs and instance data (like destroy), not only shut off
+        #[arg(long)]
+        destroy: bool,
+    },
     /// Open an SSH session to a running VM
     Shell {
-        /// VM identifier returned by `virtum run`
-        vm_id: String,
+        /// VM id (`vm-…`) or name (`--name` from `virtum run`)
+        vm: String,
     },
-    /// Start a previously stopped VM (same instance, no re-provisioning)
+    /// Start one or more stopped VMs (same instances, no re-provisioning)
     Start {
-        /// VM identifier
-        vm_id: String,
+        /// VM id (`vm-…`) or name (`--name` from `virtum run`)
+        #[arg(value_name = "VM", num_args = 1..)]
+        vms: Vec<String>,
     },
-    /// Shut down a VM (graceful shutdown, then force after 30s)
+    /// Shut down one or more VMs (graceful shutdown, then force after 30s)
     Stop {
-        /// VM identifier
-        vm_id: String,
+        /// VM id or name
+        #[arg(value_name = "VM", num_args = 1..)]
+        vms: Vec<String>,
     },
-    /// Remove a VM and its local instance data
+    /// Remove one or more VMs and their local instance data (orphan `vm-…` without metadata OK)
     Destroy {
-        /// VM identifier
-        vm_id: String,
+        /// VM id or name
+        #[arg(value_name = "VM", num_args = 1..)]
+        vms: Vec<String>,
     },
 }
 
@@ -63,7 +83,15 @@ pub struct RunArgs {
     #[arg(long, default_value = "virtum")]
     pub user: String,
 
-    /// Guest hostname; if omitted, the generated vm-id is used at run time
+    /// Guest hostname; default: `--name` if set, else the generated vm-id
     #[arg(long)]
     pub hostname: Option<String>,
+
+    /// Short alias for commands (`virtum shell db`). Must be unique.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Virtual disk size for the root volume (e.g. `10G`, `20G`). Requires cloud-init grow on first boot if larger than the base image.
+    #[arg(long)]
+    pub disk_size: Option<String>,
 }

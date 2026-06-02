@@ -2,15 +2,21 @@
 
 use anyhow::{Context, Result};
 
-use crate::config;
+use std::path::Path;
+
+use crate::config::{self, VirtumPaths};
+use crate::disk::{format_virtual_size_label, image_virtual_size_bytes};
 use crate::libvirt::{domain_exists, domain_state};
 use crate::metadata::{self, Instance, InstanceStatus};
 
 #[derive(Debug, Clone)]
 struct PsRow {
+    name: String,
+    lab: String,
     id: String,
     os: String,
     status: String,
+    disk: String,
     ip: String,
 }
 
@@ -37,9 +43,12 @@ async fn ps_async(all: bool) -> Result<()> {
             continue;
         }
         rows.push(PsRow {
+            name: instance.name.clone().unwrap_or_else(|| "-".to_string()),
+            lab: instance.lab_name.clone().unwrap_or_else(|| "-".to_string()),
             id: instance.id.clone(),
             os: instance.os.clone(),
             status: live,
+            disk: resolve_disk_size(instance, &paths),
             ip: format_ip(instance),
         });
     }
@@ -64,6 +73,25 @@ fn is_active_live(status: &str) -> bool {
     matches!(status, "running" | "paused" | "pmsuspended" | "blocked")
 }
 
+fn resolve_disk_size(instance: &Instance, paths: &VirtumPaths) -> String {
+    if let Some(ref label) = instance.disk_size {
+        if !label.is_empty() {
+            return label.clone();
+        }
+    }
+    let disk_path = paths.instances.join(&instance.id).join("disk.qcow2");
+    disk_size_from_path(&disk_path).unwrap_or_else(|| "-".to_string())
+}
+
+fn disk_size_from_path(disk_path: &Path) -> Option<String> {
+    if !disk_path.is_file() {
+        return None;
+    }
+    image_virtual_size_bytes(disk_path)
+        .ok()
+        .map(format_virtual_size_label)
+}
+
 fn format_ip(instance: &Instance) -> String {
     let Some(ref ip) = instance.ip else {
         return "-".to_string();
@@ -80,11 +108,14 @@ fn format_ip(instance: &Instance) -> String {
 }
 
 fn print_table(rows: &[PsRow]) {
-    println!("{:<18} {:<12} {:<12} {:<24}", "VM ID", "OS", "STATUS", "IP");
+    println!(
+        "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<24}",
+        "NAME", "LAB", "VM ID", "OS", "STATUS", "DISK", "IP"
+    );
     for row in rows {
         println!(
-            "{:<18} {:<12} {:<12} {:<24}",
-            row.id, row.os, row.status, row.ip
+            "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<24}",
+            row.name, row.lab, row.id, row.os, row.status, row.disk, row.ip
         );
     }
 }
@@ -103,14 +134,44 @@ mod tests {
     fn format_ip_with_port_forward() {
         let inst = Instance {
             id: "vm-test".into(),
+            name: None,
             os: "debian-12".into(),
             status: InstanceStatus::Running,
             ip: Some("127.0.0.1".into()),
             ssh_port: Some(22422),
             user: "virtum".into(),
             hostname: "vm-test".into(),
+            disk_size: Some("10G".into()),
+            lab_name: None,
+            machine_name: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(format_ip(&inst), "127.0.0.1:22422");
+    }
+
+    #[test]
+    fn resolve_disk_size_prefers_metadata() {
+        let paths = config::VirtumPaths {
+            root: std::path::PathBuf::from("/tmp"),
+            images: std::path::PathBuf::from("/tmp/images"),
+            instances: std::path::PathBuf::from("/tmp/instances"),
+            keys: std::path::PathBuf::from("/tmp/keys"),
+            metadata: std::path::PathBuf::from("/tmp/metadata.json"),
+        };
+        let inst = Instance {
+            id: "vm-x".into(),
+            name: None,
+            os: "debian-12".into(),
+            status: InstanceStatus::Running,
+            ip: None,
+            ssh_port: None,
+            user: "virtum".into(),
+            hostname: "vm-x".into(),
+            disk_size: Some("20G".into()),
+            lab_name: Some("my-lab".into()),
+            machine_name: Some("web".into()),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        assert_eq!(super::resolve_disk_size(&inst, &paths), "20G");
     }
 }

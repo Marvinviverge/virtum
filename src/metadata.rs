@@ -21,6 +21,9 @@ pub enum InstanceStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instance {
     pub id: String,
+    /// Alias court pour les commandes (`virtum shell db`). Unique parmi les instances actives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub os: String,
     pub status: InstanceStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,6 +33,15 @@ pub struct Instance {
     pub ssh_port: Option<u16>,
     pub user: String,
     pub hostname: String,
+    /// Taille virtuelle du disque racine (ex. `10G`), telle que passée à `virtum run --disk-size`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_size: Option<String>,
+    /// Nom du lab (`Virtumfile` → `name`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lab_name: Option<String>,
+    /// Clé machine dans le Virtumfile (`machines.web` → `web`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_name: Option<String>,
     pub created_at: String,
 }
 
@@ -94,6 +106,110 @@ pub fn find_instance<'a>(metadata: &'a Metadata, id: &str) -> Option<&'a Instanc
     metadata.instances.iter().find(|instance| instance.id == id)
 }
 
+fn find_by_name<'a>(metadata: &'a Metadata, name: &str) -> Option<&'a Instance> {
+    metadata
+        .instances
+        .iter()
+        .filter(|i| i.status != InstanceStatus::Destroyed)
+        .find(|i| i.name.as_deref() == Some(name))
+}
+
+/// Valide un nom utilisateur (`db`, `web`, …).
+pub fn validate_name(name: &str) -> Result<()> {
+    let n = name.trim();
+    if n.is_empty() {
+        bail!("Le nom de VM ne peut pas être vide.");
+    }
+    if n.len() > 32 {
+        bail!("Le nom '{name}' est trop long (max 32 caractères).");
+    }
+    if !n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        bail!("Le nom '{name}' doit commencer par une lettre ou un chiffre.");
+    }
+    if !n
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!(
+            "Le nom '{name}' n'est pas valide (autorisé : lettres, chiffres, tiret, underscore)."
+        );
+    }
+    Ok(())
+}
+
+/// Résout une référence CLI : id libvirt exact (`vm-…`) ou alias `name`.
+pub fn resolve_instance_ref<'a>(metadata: &'a Metadata, reference: &str) -> Result<&'a Instance> {
+    let reference = reference.trim();
+    if let Some(instance) = find_instance(metadata, reference) {
+        if instance.status == InstanceStatus::Destroyed {
+            bail!("L'instance '{reference}' est supprimée.");
+        }
+        return Ok(instance);
+    }
+    if let Some(instance) = find_by_name(metadata, reference) {
+        return Ok(instance);
+    }
+    bail!(
+        "Instance '{reference}' introuvable. Utilisez `virtum ps -a` pour lister les VM (id ou name)."
+    );
+}
+
+/// Id libvirt à partir d'une référence id ou name.
+pub fn resolve_instance_id(metadata: &Metadata, reference: &str) -> Result<String> {
+    Ok(resolve_instance_ref(metadata, reference)?.id.clone())
+}
+
+pub fn find_by_lab_machine<'a>(
+    metadata: &'a Metadata,
+    lab_name: &str,
+    machine_name: &str,
+) -> Option<&'a Instance> {
+    metadata.instances.iter().find(|i| {
+        i.status != InstanceStatus::Destroyed
+            && i.lab_name.as_deref() == Some(lab_name)
+            && i.machine_name.as_deref() == Some(machine_name)
+    })
+}
+
+pub fn instances_for_lab<'a>(metadata: &'a Metadata, lab_name: &str) -> Vec<&'a Instance> {
+    metadata
+        .instances
+        .iter()
+        .filter(|i| {
+            i.status != InstanceStatus::Destroyed && i.lab_name.as_deref() == Some(lab_name)
+        })
+        .collect()
+}
+
+/// Vérifie qu'aucune instance active n'utilise déjà ce nom.
+pub fn ensure_name_available(metadata: &Metadata, name: &str) -> Result<()> {
+    validate_name(name)?;
+    if find_by_name(metadata, name).is_some() {
+        bail!(
+            "Le nom '{name}' est déjà utilisé. Choisissez un autre nom ou `virtum destroy` l'instance existante."
+        );
+    }
+    Ok(())
+}
+
+/// Vérifie qu'une machine du lab n'est pas déjà déployée.
+pub fn ensure_lab_machine_available(
+    metadata: &Metadata,
+    lab_name: &str,
+    machine_name: &str,
+) -> Result<()> {
+    if let Some(existing) = find_by_lab_machine(metadata, lab_name, machine_name) {
+        bail!(
+            "La machine '{machine_name}' du lab '{lab_name}' existe déjà ({}, statut {:?}). \
+             Utilisez `virtum down` ou `virtum destroy {}`.",
+            existing.id,
+            existing.status,
+            existing.name.as_deref().unwrap_or(&existing.id)
+        );
+    }
+    ensure_name_available(metadata, machine_name)
+}
+
 /// Inserts a new instance or replaces an existing one with the same `id`.
 pub async fn upsert_instance(path: &Path, instance: Instance) -> Result<Metadata> {
     let mut metadata = load_metadata(path).await?;
@@ -138,12 +254,16 @@ mod tests {
     fn sample_instance(id: &str) -> Instance {
         Instance {
             id: id.to_string(),
+            name: None,
             os: "debian-12".to_string(),
             status: InstanceStatus::Running,
             ip: Some("192.168.122.45".to_string()),
             ssh_port: None,
             user: "virtum".to_string(),
             hostname: id.to_string(),
+            disk_size: None,
+            lab_name: None,
+            machine_name: None,
             created_at: "2026-06-02T10:00:00Z".to_string(),
         }
     }
@@ -211,5 +331,24 @@ mod tests {
         assert!(!tmp.exists());
         let loaded = load_metadata(&path).await.unwrap();
         assert_eq!(loaded.instances[0].id, "vm-tmp");
+    }
+
+    #[test]
+    fn validate_name_rejects_invalid() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("-bad").is_err());
+        assert!(validate_name("a b").is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_by_name() {
+        let (path, _state) = temp_metadata_path().await;
+        let mut inst = sample_instance("vm-abc");
+        inst.name = Some("db".into());
+        upsert_instance(&path, inst).await.unwrap();
+        let meta = load_metadata(&path).await.unwrap();
+        let resolved = resolve_instance_ref(&meta, "db").unwrap();
+        assert_eq!(resolved.id, "vm-abc");
+        assert_eq!(resolve_instance_id(&meta, "vm-abc").unwrap(), "vm-abc");
     }
 }
