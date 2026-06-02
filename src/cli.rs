@@ -15,11 +15,22 @@ pub struct Cli {
 pub enum Commands {
     /// Check that the host is ready to run VMs
     Doctor,
+    /// List VMs (like `docker ps`; use `-a` for stopped instances too)
+    Ps {
+        /// Show all instances (including shut off), not only running
+        #[arg(short = 'a', long)]
+        all: bool,
+    },
     /// Launch a headless VM
     Run(RunArgs),
     /// Open an SSH session to a running VM
     Shell {
         /// VM identifier returned by `virtum run`
+        vm_id: String,
+    },
+    /// Start a previously stopped VM (same instance, no re-provisioning)
+    Start {
+        /// VM identifier
         vm_id: String,
     },
     /// Shut down a VM (graceful shutdown, then force after 30s)

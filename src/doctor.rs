@@ -2,6 +2,8 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::process::Command;
 
+use crate::config;
+
 const KVM_DEVICE: &str = "/dev/kvm";
 
 struct CheckResult {
@@ -11,6 +13,20 @@ struct CheckResult {
 }
 
 pub fn run() -> i32 {
+    let paths = match config::ensure_layout_blocking() {
+        Ok(paths) => paths,
+        Err(err) => {
+            let mut stdout = io::stdout().lock();
+            let _ = writeln!(stdout, "Virtum doctor\n");
+            let _ = writeln!(stdout, "  [FAIL] Arborescence Virtum — {err:#}");
+            let _ = writeln!(
+                stdout,
+                "\nRésumé: impossible d'initialiser le répertoire Virtum."
+            );
+            return 1;
+        }
+    };
+
     let results = vec![
         check_binary(
             "qemu-img",
@@ -35,6 +51,7 @@ pub fn run() -> i32 {
         check_kvm(),
         check_groups(),
         check_libvirt_default_network(),
+        check_virtum_storage(&paths),
     ];
 
     print_report(&results)
@@ -139,6 +156,29 @@ fn user_groups() -> io::Result<Vec<String>> {
         .split_whitespace()
         .map(str::to_string)
         .collect())
+}
+
+fn check_virtum_storage(paths: &config::VirtumPaths) -> CheckResult {
+    const NAME: &str = "Stockage Virtum (libvirt système)";
+    if config::uses_var_lib_storage() {
+        return CheckResult {
+            name: NAME.to_string(),
+            ok: true,
+            detail: format!("Répertoire actif : {}", paths.root.display()),
+        };
+    }
+
+    CheckResult {
+        name: NAME.to_string(),
+        ok: false,
+        detail: format!(
+            "Stockage sous {} — QEMU système ne peut pas lire $HOME/.virtum (AppArmor). \
+             Exécutez une fois : sudo ./scripts/setup-var-lib.sh \
+             (crée {}/ et copie l'image si besoin).",
+            paths.root.display(),
+            config::VAR_LIB_VIRTUM
+        ),
+    }
 }
 
 fn check_libvirt_default_network() -> CheckResult {
