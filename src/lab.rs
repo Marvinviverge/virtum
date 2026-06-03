@@ -8,7 +8,7 @@ use crate::config::{self, VirtumPaths};
 use crate::lab_network;
 use crate::libvirt::{domain_exists, domain_is_active, domain_state};
 use crate::metadata::{self, Instance, InstanceStatus};
-use crate::port_forward::{self, PortForward};
+use crate::port_forward::{self, PortBind, PortForward};
 use crate::ssh::{ensure_ssh_keypair, read_public_key};
 use crate::virtumfile;
 use crate::vm::{self, cleanup_failed_run, lab_vm_id, launch_vm_inner, VmLaunchConfig};
@@ -31,20 +31,8 @@ pub fn down(file: Option<PathBuf>, destroy: bool) -> Result<()> {
         .block_on(down_async(file, destroy))
 }
 
-fn resolve_virtumfile_path(file: Option<PathBuf>) -> Result<PathBuf> {
-    let path = file.unwrap_or_else(|| PathBuf::from(virtumfile::DEFAULT_VIRTUMFILE));
-    if path.is_file() {
-        return Ok(path);
-    }
-    bail!(
-        "Virtumfile introuvable: {}. \
-         Lancez la commande depuis le répertoire du lab ou utilisez `-f /chemin/Virtumfile`.",
-        path.display()
-    );
-}
-
 async fn up_async(file: Option<PathBuf>) -> Result<()> {
-    let path = resolve_virtumfile_path(file)?;
+    let path = virtumfile::resolve_virtumfile_path(file)?;
     let lab = virtumfile::load(&path)?;
     eprintln!(
         "Lab '{}' ({} machine(s)) depuis {}…",
@@ -56,7 +44,11 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
     let paths = config::ensure_layout().await?;
     let metadata = metadata::load_metadata(&paths.metadata).await?;
 
-    let lab_net = lab_network::ensure_lab_network(&lab.name)?;
+    let lab_net = if virtumfile::lab_needs_isolated_network(&lab) {
+        Some(lab_network::ensure_lab_network(&lab.name)?)
+    } else {
+        None
+    };
 
     let port_plan: Vec<(String, Vec<PortForward>)> = lab
         .machines
@@ -69,11 +61,12 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
         if forwards.is_empty() {
             continue;
         }
+        let bind = virtumfile::effective_port_bind(&lab, machine_name);
         let vm_id = lab_vm_id(&lab.name, machine_name);
         if metadata::find_by_lab_machine(&metadata, &lab.name, machine_name).is_some() {
             continue;
         }
-        port_forward::ensure_ports_available(forwards)?;
+        port_forward::ensure_ports_available(forwards, bind)?;
         port_forward::ensure_ports_not_in_metadata(&metadata, Some(&vm_id), forwards)?;
     }
 
@@ -105,16 +98,36 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
         eprintln!("--- Machine '{machine_name}' ({vm_id}) ---");
 
         let spec_ports = virtumfile::machine_port_forwards(spec)?;
+        let port_bind = virtumfile::effective_port_bind(&lab, machine);
 
         if let Some(existing) = metadata::find_by_lab_machine(&metadata, &lab.name, machine) {
-            port_forward::ensure_forwards_match_existing(machine_name, &spec_ports, existing)?;
+            let instance_dir = paths.instances.join(&vm_id);
+            if let Ok(diff) =
+                crate::lab_diff::diff_machine(&lab, machine_name, spec, existing, &instance_dir)
+            {
+                if !diff.changes.is_empty() {
+                    bail!(
+                        "Le Virtumfile de la machine '{machine_name}' ne correspond plus à l'instance déployée. \
+                         Appliquez les changements avec : virtum apply -f {}\n\
+                         (ou `virtum down -f … --destroy` puis `virtum up` pour recréer).",
+                        path.display()
+                    );
+                }
+            }
             if !spec_ports.is_empty() {
-                port_forward::ensure_ports_available(&spec_ports)?;
+                port_forward::ensure_ports_available(&spec_ports, port_bind)?;
                 port_forward::ensure_ports_not_in_metadata(&metadata, Some(&vm_id), &spec_ports)?;
             }
             let instance_dir = paths.instances.join(&vm_id);
-            match resume_lab_machine(existing, &vm_id, machine_name, &instance_dir, &spec_ports)
-                .await
+            match resume_lab_machine(
+                existing,
+                &vm_id,
+                machine_name,
+                &instance_dir,
+                &spec_ports,
+                port_bind,
+            )
+            .await
             {
                 Ok(()) => {
                     ready += 1;
@@ -128,6 +141,18 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
             }
         }
 
+        let net_cfg = virtumfile::resolve_machine_network(&lab, machine, lab_net.as_deref())?;
+        if net_cfg.mode == virtumfile::NetworkMode::Bridge {
+            eprintln!(
+                "  Réseau : bridge (LAN) sur {}",
+                net_cfg.bridge_host_interface.as_deref().unwrap_or("?")
+            );
+        } else if net_cfg.bridge_host_interface.is_some() {
+            eprintln!(
+                "  Réseau : lab {} + bridge (LAN)",
+                net_cfg.libvirt_network.as_deref().unwrap_or("?")
+            );
+        }
         let config = VmLaunchConfig {
             os: spec.os.clone(),
             ram: spec.ram,
@@ -138,8 +163,10 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
             provision: spec.provision.clone(),
             lab_name: Some(lab.name.clone()),
             machine_name: Some(machine.to_string()),
-            port_forwards: spec_ports,
-            libvirt_network: Some(lab_net.clone()),
+            port_forwards: spec_ports.clone(),
+            port_bind,
+            libvirt_network: net_cfg.libvirt_network,
+            bridge_host_interface: net_cfg.bridge_host_interface,
         };
         let hostname = config.hostname_for_vm(&vm_id);
         let instance_dir = paths.instances.join(&vm_id);
@@ -167,6 +194,17 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
     println!("Lab '{}' prêt ({} VM).", lab.name, ready);
     println!("  virtum ps");
     println!("  virtum shell <name>   # ex. virtum shell web");
+    println!(
+        "  virtum plan -f {}   # virtum apply si le Virtumfile a changé",
+        path.display()
+    );
+    if crate::firewall::lab_needs_firewall_hint(&lab) {
+        println!(
+            "  Accès LAN (bind: lan) : ouvrez le pare-feu hôte avec :\n    \
+             virtum open -f {}",
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -177,6 +215,7 @@ async fn resume_lab_machine(
     machine_name: &str,
     instance_dir: &std::path::Path,
     spec_ports: &[PortForward],
+    port_bind: PortBind,
 ) -> Result<()> {
     if existing.id != vm_id {
         bail!(
@@ -194,9 +233,9 @@ async fn resume_lab_machine(
             let ip = existing.ip.as_deref().unwrap_or("-");
             eprintln!("Machine '{machine_name}' déjà en cours d'exécution (IP: {ip}).");
             if !spec_ports.is_empty() && ip != "-" {
-                port_forward::start_instance_proxies(instance_dir, ip, spec_ports)?;
+                port_forward::start_instance_proxies(instance_dir, ip, spec_ports, port_bind)?;
             }
-            port_forward::print_forward_lines(spec_ports);
+            port_forward::print_forward_lines(spec_ports, port_bind);
             println!("  SSH:      virtum shell {reference}");
             return Ok(());
         }
@@ -224,7 +263,7 @@ async fn rollback_lab_vms(paths: &VirtumPaths, vm_ids: &[String]) {
 }
 
 async fn down_async(file: Option<PathBuf>, destroy: bool) -> Result<()> {
-    let path = resolve_virtumfile_path(file)?;
+    let path = virtumfile::resolve_virtumfile_path(file)?;
     let lab = virtumfile::load(&path)?;
     let paths = config::ensure_layout().await?;
     let metadata = metadata::load_metadata(&paths.metadata).await?;
@@ -245,11 +284,13 @@ async fn down_async(file: Option<PathBuf>, destroy: bool) -> Result<()> {
         for reference in &refs {
             vm::destroy_vm_async(reference).await?;
         }
-        if let Err(err) = lab_network::destroy_lab_network(&lab.name) {
-            eprintln!(
-                "Avertissement: impossible de supprimer le réseau du lab '{}': {err:#}",
-                lab.name
-            );
+        if virtumfile::lab_needs_isolated_network(&lab) {
+            if let Err(err) = lab_network::destroy_lab_network(&lab.name) {
+                eprintln!(
+                    "Avertissement: impossible de supprimer le réseau du lab '{}': {err:#}",
+                    lab.name
+                );
+            }
         }
         println!("Lab '{}' supprimé.", lab.name);
     } else {

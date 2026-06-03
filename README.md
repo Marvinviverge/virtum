@@ -10,7 +10,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.2 terminé (lab-as-code)** — Virtumfile, `virtum up` / `down`, `pull`, `disk-size`, ports (`socat`), provision, réseau isolé **`virtum-lab-<name>`** : [`STEPS2.md`](./STEPS2.md), [`SPEC_TECH_V0.2.md`](./SPEC_TECH_V0.2.md). Exemple : [`examples/Virtumfile`](./examples/Virtumfile).
 
-**Roadmap v0.3** (réseau `bridge` lab / machine, NAT par défaut) : [`STEPS3.md`](./STEPS3.md), spec réseau [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md) (brouillon).
+**v0.3 terminé** — `bind: lan`, `virtum open` / `close`, `virtum plan` / `apply`, `virtum run --network bridge`, lab **`network: bridge`** et **hybride** (dual NIC), `virtum ps` (IP + LAN) : [`STEPS3.md`](./STEPS3.md) §8, [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md). Validation de référence : `make smoke-lab`.
 
 ## Documentation
 
@@ -22,6 +22,8 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`STEPS.md`](./STEPS.md) | Plan d’implémentation **v0.1** (terminé) |
 | [`STEPS2.md`](./STEPS2.md) | Plan d’implémentation **v0.2** |
 | [`SPEC_TECH_V0.2.md`](./SPEC_TECH_V0.2.md) | Contrat technique **v0.2** (lab, réseau, ports) |
+| [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md) | Contrat technique **v0.3** (bridge run, `bind: lan`, plan, pare-feu) |
+| [`STEPS3.md`](./STEPS3.md) | Plan d’implémentation **v0.3** |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 
@@ -66,7 +68,7 @@ virtum doctor
 | `setup-host.sh` | Paquets apt, `libvirtd`, groupes `libvirt`/`kvm` |
 | `install.sh` / `make install` | Compile et installe `virtum` dans `~/.cargo/bin` |
 | `setup-var-lib.sh` | Prépare `/var/lib/virtum` (stockage QEMU système) |
-| `virtum doctor` | Binaires, KVM, groupes, réseau `default`, stockage, socat |
+| `virtum doctor` | Binaires, KVM, groupes, réseau `default`, **bridge LAN**, stockage, socat |
 
 Le répertoire `~/.cargo/bin` doit être dans votre `PATH` (souvent déjà le cas avec Rust).
 
@@ -108,8 +110,14 @@ virtum pull ubuntu-24.04     # 2e OS (v0.2)
 virtum run --os debian-12 --name db   # alias optionnel (virtum shell db)
 virtum run --os debian-12 --disk-size 10G   # disque racine ~10G (cloud-init growpart)
 virtum run --os debian-12
+virtum run --os debian-12 --network bridge --name demo-lan   # IP du LAN (macvtap)
+# Si échec IP : vérifiez `ip route` puis par ex. --bridge-interface wlp3s0 (interface du partage téléphone)
+virtum plan -f examples/Virtumfile   # prévisualise create / update / resume (sans rien modifier)
+virtum apply -f examples/Virtumfile  # applique RAM, bind, ports, disk_size sur VMs existantes
 virtum up                    # crée ou relance le lab (Virtumfile) ; après `down`, relance sans recréer
-virtum up -f examples/Virtumfile   # ex. ports 18080:80 → http://127.0.0.1:18080
+virtum up -f examples/Virtumfile   # ex. bind: lan → http://<IP-PC>:18080 depuis le téléphone
+virtum open -f examples/Virtumfile # sudo ufw allow (ports bind: lan)
+virtum close -f examples/Virtumfile  # retire les règles ouvertes par virtum open
 virtum down                  # arrête toutes les VM du lab (Virtumfile `name`)
 virtum down --destroy        # supprime le lab
 virtum ps          # VM en cours (NAME, LAB, DISK, IP, …)
@@ -122,8 +130,38 @@ virtum destroy <vm-id> [vm…]   # id/name ; orphelin libvirt (`virsh list` sans
 
 Virtum utilise **libvirt système** (`qemu:///system`).
 
-- **`virtum run`** (VM seule) : réseau libvirt **`default`** (`192.168.122.x`).
-- **`virtum up`** (lab) : réseau dédié **`virtum-lab-<name>`** par lab (NAT isolé, ex. `192.168.64.0/24` selon le nom). Les machines du même lab se joignent entre elles ; les labs différents sont séparés. SSH et `ports:` depuis l’hôte restent possibles.
+- **`virtum run`** (VM seule) : réseau libvirt **`default`** (`192.168.122.x`). Option **`--network bridge`** : macvtap sur l’interface physique (IP LAN via DHCP). Voir `virtum doctor` ; Wi‑Fi / partage téléphone souvent instable.
+- **`virtum up`** (lab) : réseau dédié **`virtum-lab-<name>`** par lab (NAT isolé). Les machines du même lab se joignent entre elles.
+- **`bind: lan`** (Virtumfile) : les `ports:` écoutent sur `0.0.0.0` (joignable depuis le même Wi‑Fi/Ethernet que le PC). Ouvrez le pare-feu hôte avec **`virtum open`** après `virtum up`. **`virtum plan`** compare les ports du Virtumfile à l’état enregistré dans `firewall-<lab>.json` (aligné, absent, ou désaligné après changement de port).
+- **Virtumfile `network: bridge`** : lab entier sur le LAN (`examples/Virtumfile.bridge-lab`) ou mix web LAN + db privée (`examples/Virtumfile.bridge-mixed`, dual NIC). `virtum ps` affiche **IP** et **LAN**.
+- **VM isolée** sur le LAN : `virtum run --network bridge`.
+
+### Workflow lab recommandé (v0.3)
+
+```bash
+virtum plan -f examples/Virtumfile    # images manquantes ? virtum pull …
+                                      # pare-feu : aligné / absent / désaligné ?
+virtum apply -f examples/Virtumfile   # si ~ update (RAM, bind: lan, ports, disk_size)
+virtum pull debian-12                 # si le plan le signale
+virtum up -f examples/Virtumfile
+virtum open -f examples/Virtumfile    # si bind: lan + ports (ufw, sudo)
+```
+
+Après `virtum down`, modifier le Virtumfile (ex. plus de RAM) puis **`virtum apply`** — pas besoin de `--destroy` pour ces champs.
+
+Si vous changez un port hôte (`18080` → `18088`) : **`virtum apply`** met à jour socat, puis **`virtum close`** et **`virtum open`** pour resynchroniser ufw (le plan signale le décalage tant que le JSON n’est pas à jour).
+
+### Réseau bridge (LAN) — prérequis hôte
+
+| Sujet | Recommandation |
+| :--- | :--- |
+| **Câble** | Préférez **Ethernet** ; le Wi‑Fi est souvent incompatible ou instable avec macvtap / bridge vers le LAN. |
+| **Diagnostic** | `virtum doctor` et `virtum plan` affichent l’interface et les avertissements. |
+| **Accès LAN sans bridge lab** | `bind: lan` + `ports:` + `virtum open` (socat sur l’hôte, VM reste sur NAT lab). |
+| **Pare-feu** | `virtum open` / `close` (ufw + `firewall-<lab>.json`) ; `virtum plan` vérifie l’alignement avec le Virtumfile. |
+| **Entreprise** | DHCP filtré, VLAN invité ou isolation Wi‑Fi peuvent bloquer le LAN ; restez en `lab` NAT si besoin. |
+
+Voir [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md) et [`STEPS3.md`](./STEPS3.md).
 
 Après mise à jour réseau (étape 30), un lab déjà déployé sur `default` doit être recréé : `virtum down -f Virtumfile --destroy` puis `virtum up`.
 
@@ -160,15 +198,30 @@ chmod +x scripts/smoke-test.sh
 ./scripts/smoke-test.sh
 ```
 
-### Lab v0.2
+### Lab v0.2 / v0.3 (clôture v0.3)
 
-Parcours complet (après `make release`, lab déjà validé manuellement : ping inter-VM, `curl :18080`) :
+Validation automatique du lab NAT :
 
 ```bash
-chmod +x scripts/smoke-test-lab.sh
-./scripts/smoke-test-lab.sh
-# ping web↔db, curl :18080, puis down (ajoutez --destroy dans le script si besoin)
+make smoke-lab
 ```
+
+```bash
+virtum plan -f examples/Virtumfile
+virtum apply -f examples/Virtumfile  # si modifications sur VMs existantes
+virtum up -f examples/Virtumfile
+virtum open -f examples/Virtumfile   # si bind: lan
+```
+
+Smoke tests (après `make release`) :
+
+```bash
+make smoke-lab                    # NAT : examples/Virtumfile (ping web↔db, curl :18098)
+VIRTUM_BRIDGE_SMOKE=1 make smoke-lab-bridge   # hybride (Ethernet recommandé)
+# ou : chmod +x scripts/smoke-test-lab.sh && ./scripts/smoke-test-lab.sh
+```
+
+Parcours hybride manuel (STEPS3 §7) : `virtum up -f examples/Virtumfile.bridge-mixed` → `virtum ps` (IP + LAN) → `virtum shell web` → `ping <IP-db>`.
 
 ## Licence
 

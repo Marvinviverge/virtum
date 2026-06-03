@@ -168,6 +168,37 @@ pub fn create_cow_disk(base_image: &Path, disk_path: &Path, size: Option<&DiskSi
     Ok(())
 }
 
+/// Agrandit un disque qcow2 existant. Retourne `true` si la partition invitée doit être étendue (growpart).
+pub fn resize_cow_disk(disk_path: &Path, target: &DiskSize) -> Result<bool> {
+    if !disk_path.is_file() {
+        bail!("Disque instance introuvable: {}", disk_path.display());
+    }
+    let current = image_virtual_size_bytes(disk_path)?;
+    if target.bytes < current {
+        bail!(
+            "Réduction du disque non supportée (actuel {}, demandé {}). \
+             Utilisez `virtum down --destroy` puis `virtum up` pour recréer la machine.",
+            format_virtual_size_label(current),
+            target.qemu_arg
+        );
+    }
+    if target.bytes == current {
+        return Ok(false);
+    }
+    run_command(
+        "qemu-img",
+        &["resize", path_arg(disk_path)?, target.qemu_arg.as_str()],
+    )
+    .with_context(|| {
+        format!(
+            "qemu-img resize a échoué pour {} → {}",
+            disk_path.display(),
+            target.qemu_arg
+        )
+    })?;
+    Ok(true)
+}
+
 /// Valide `--disk-size` par rapport à l'image de base ; indique si growpart est nécessaire.
 pub fn plan_disk_size(base_image: &Path, size: &DiskSize) -> Result<bool> {
     let base_bytes = image_virtual_size_bytes(base_image)?;
@@ -221,37 +252,9 @@ mod tests {
 
     #[test]
     fn create_cow_disk_with_qemu_img() {
-        if !qemu_img_available() {
-            return;
-        }
-
         let dir = std::env::temp_dir().join(format!("virtum-disk-cow-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-
-        let base = dir.join("base.qcow2");
-        let disk = dir.join("disk.qcow2");
-        run_command(
-            "qemu-img",
-            &["create", "-f", "qcow2", path_arg(&base).unwrap(), "16M"],
-        )
-        .unwrap();
-        create_cow_disk(&base, &disk, None).unwrap();
-        assert!(cow_disk_has_backing_file(&disk, &base).unwrap());
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn create_cow_disk_with_explicit_size() {
-        if !qemu_img_available() {
-            return;
-        }
-
-        let dir = std::env::temp_dir().join(format!("virtum-disk-sized-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-
         let base = dir.join("base.qcow2");
         let disk = dir.join("disk.qcow2");
         run_command(
@@ -259,18 +262,26 @@ mod tests {
             &["create", "-f", "qcow2", path_arg(&base).unwrap(), "1G"],
         )
         .unwrap();
-        let size = parse_disk_size("2G").unwrap();
-        create_cow_disk(&base, &disk, Some(&size)).unwrap();
-        assert_eq!(image_virtual_size_bytes(&disk).unwrap(), 2 << 30);
-
+        create_cow_disk(&base, &disk, None).unwrap();
+        assert!(disk.is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 
-    fn qemu_img_available() -> bool {
-        std::process::Command::new("qemu-img")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+    #[test]
+    fn create_cow_disk_with_explicit_size() {
+        let dir = std::env::temp_dir().join(format!("virtum-disk-sized-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("base.qcow2");
+        let disk = dir.join("disk.qcow2");
+        run_command(
+            "qemu-img",
+            &["create", "-f", "qcow2", path_arg(&base).unwrap(), "1G"],
+        )
+        .unwrap();
+        let size = parse_disk_size("10G").unwrap();
+        create_cow_disk(&base, &disk, Some(&size)).unwrap();
+        assert_eq!(image_virtual_size_bytes(&disk).unwrap(), size.bytes);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -81,6 +81,16 @@ fn net_is_defined(net_name: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+/// Réseau libvirt du lab déjà défini (`virsh net-info`).
+pub fn lab_network_is_defined(net_name: &str) -> Result<bool> {
+    net_is_defined(net_name)
+}
+
+/// Réseau libvirt du lab actif (`Active: yes`).
+pub fn lab_network_is_active(net_name: &str) -> Result<bool> {
+    net_is_active(net_name)
+}
+
 fn net_is_active(net_name: &str) -> Result<bool> {
     let output = run_virsh_output(&["net-info", net_name])?;
     if !output.status.success() {

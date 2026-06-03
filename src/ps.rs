@@ -19,6 +19,7 @@ struct PsRow {
     status: String,
     disk: String,
     ip: String,
+    lan_ip: String,
     forward: String,
 }
 
@@ -52,8 +53,10 @@ async fn ps_async(all: bool) -> Result<()> {
             status: live,
             disk: resolve_disk_size(instance, &paths),
             ip: format_ip(instance),
+            lan_ip: format_lan_ip(instance),
             forward: port_forward::format_forward_list(
                 instance.port_forwards.as_deref().unwrap_or(&[]),
+                instance.port_bind.unwrap_or(port_forward::PortBind::Local),
             ),
         });
     }
@@ -97,6 +100,13 @@ fn disk_size_from_path(disk_path: &Path) -> Option<String> {
         .map(format_virtual_size_label)
 }
 
+fn format_lan_ip(instance: &Instance) -> String {
+    match &instance.lan_ip {
+        Some(ip) if !ip.is_empty() => ip.clone(),
+        _ => "-".to_string(),
+    }
+}
+
 fn format_ip(instance: &Instance) -> String {
     let Some(ref ip) = instance.ip else {
         return "-".to_string();
@@ -114,13 +124,21 @@ fn format_ip(instance: &Instance) -> String {
 
 fn print_table(rows: &[PsRow]) {
     println!(
-        "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<24} {:<28}",
-        "NAME", "LAB", "VM ID", "OS", "STATUS", "DISK", "IP", "FORWARD"
+        "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<18} {:<18} {:<28}",
+        "NAME", "LAB", "VM ID", "OS", "STATUS", "DISK", "IP", "LAN", "FORWARD"
     );
     for row in rows {
         println!(
-            "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<24} {:<28}",
-            row.name, row.lab, row.id, row.os, row.status, row.disk, row.ip, row.forward
+            "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<18} {:<18} {:<28}",
+            row.name,
+            row.lab,
+            row.id,
+            row.os,
+            row.status,
+            row.disk,
+            row.ip,
+            row.lan_ip,
+            row.forward
         );
     }
 }
@@ -150,6 +168,9 @@ mod tests {
             lab_name: None,
             machine_name: None,
             port_forwards: None,
+            port_bind: None,
+            bridge_host_interface: None,
+            lan_ip: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(format_ip(&inst), "127.0.0.1:22422");
@@ -177,6 +198,9 @@ mod tests {
             lab_name: Some("my-lab".into()),
             machine_name: Some("web".into()),
             port_forwards: None,
+            port_bind: None,
+            bridge_host_interface: None,
+            lan_ip: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(super::resolve_disk_size(&inst, &paths), "20G");

@@ -19,20 +19,90 @@ fn run_virsh(args: &[&str]) -> Result<std::process::Output> {
 
 const QEMU_MACHINE: &str = "pc-q35-7.2";
 
+/// Connexion réseau d'une NIC invitée.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VmNic {
+    /// Réseau libvirt NAT (`default`, `virtum-lab-…`).
+    LibvirtNetwork { name: String },
+    /// Macvtap en mode bridge sur l'interface physique (LAN bureau).
+    MacvtapBridge { host_interface: String },
+}
+
 pub struct DomainSpec<'a> {
     pub vm_id: &'a str,
     pub ram_mb: u32,
     pub vcpus: u32,
     pub disk_path: &'a Path,
     pub iso_path: &'a Path,
-    /// Réseau libvirt (`default` ou `virtum-lab-<name>`).
-    pub network: &'a str,
+    pub nics: Vec<VmNic>,
+    /// MAC de la première NIC (évite changement d'IP DHCP après `undefine`/`define`).
+    pub nic_mac: Option<String>,
 }
 
-/// Builds libvirt domain XML for a headless KVM guest on a libvirt NAT network.
+impl<'a> DomainSpec<'a> {
+    /// Une seule NIC sur un réseau libvirt (v0.1 / lab NAT).
+    pub fn with_libvirt_network(
+        vm_id: &'a str,
+        ram_mb: u32,
+        vcpus: u32,
+        disk_path: &'a Path,
+        iso_path: &'a Path,
+        network: &str,
+    ) -> Self {
+        Self {
+            vm_id,
+            ram_mb,
+            vcpus,
+            disk_path,
+            iso_path,
+            nics: vec![VmNic::LibvirtNetwork {
+                name: network.to_string(),
+            }],
+            nic_mac: None,
+        }
+    }
+}
+
+fn render_interface_xml(nic: &VmNic, mac: Option<&str>) -> String {
+    let mac_line = mac
+        .map(|m| format!("\n      <mac address='{}'/>", xml_escape(m)))
+        .unwrap_or_default();
+    match nic {
+        VmNic::LibvirtNetwork { name } => format!(
+            r#"    <interface type='network'>{mac_line}
+      <source network='{}'/>
+      <model type='virtio'/>
+    </interface>"#,
+            xml_escape(name)
+        ),
+        VmNic::MacvtapBridge { host_interface } => format!(
+            r#"    <interface type='direct'>{mac_line}
+      <source dev='{}' mode='bridge'/>
+      <model type='virtio'/>
+    </interface>"#,
+            xml_escape(host_interface)
+        ),
+    }
+}
+
+/// Builds libvirt domain XML for a headless KVM guest.
 pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
+    if spec.nics.is_empty() {
+        bail!("DomainSpec nécessite au moins une interface réseau.");
+    }
     let disk = absolute_path(spec.disk_path)?;
     let iso = absolute_path(spec.iso_path)?;
+    let mac = spec.nic_mac.as_deref();
+    let interfaces: String = spec
+        .nics
+        .iter()
+        .enumerate()
+        .map(|(i, nic)| {
+            let nic_mac = if i == 0 { mac } else { None };
+            render_interface_xml(nic, nic_mac)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(format!(
         r#"<domain type='kvm'>
   <name>{name}</name>
@@ -63,10 +133,7 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
       <target dev='sda' bus='sata'/>
       <readonly/>
     </disk>
-    <interface type='network'>
-      <source network='{network}'/>
-      <model type='virtio'/>
-    </interface>
+{interfaces}
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
@@ -85,22 +152,175 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
         machine = QEMU_MACHINE,
         disk = xml_escape(&disk),
         iso = xml_escape(&iso),
-        network = xml_escape(spec.network),
+        interfaces = interfaces,
     ))
 }
 
-/// Lit le réseau libvirt depuis `config.xml` (NIC type `network`).
-pub fn parse_network_from_xml(xml: &str) -> Option<String> {
+/// Lit `<mac address='…'/>` depuis un XML de domaine.
+pub fn parse_mac_address_from_xml(xml: &str) -> Option<String> {
     for line in xml.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("<source network=") {
-            let rest = trimmed.strip_prefix("<source network=")?;
-            let quoted = rest.trim_start_matches('\'').trim_start_matches('"');
-            let end = quoted.find(['\'', '"'])?;
-            return Some(quoted[..end].to_string());
+        if trimmed.starts_with("<mac ") {
+            if let Some(mac) = xml_attribute_value(trimmed, "address") {
+                let mac = mac.to_lowercase();
+                if mac.len() == 17 && mac.matches(':').count() == 5 {
+                    return Some(mac);
+                }
+            }
         }
     }
     None
+}
+
+/// Conserve la MAC de la VM (config.xml ou domaine libvirt existant).
+pub fn resolve_nic_mac(instance_dir: &Path, vm_id: &str) -> Option<String> {
+    let xml_path = instance_dir.join("config.xml");
+    if xml_path.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&xml_path) {
+            if let Some(mac) = parse_mac_address_from_xml(&content) {
+                return Some(mac);
+            }
+        }
+    }
+    if domain_exists(vm_id) {
+        if let Ok(output) = run_virsh(&["domiflist", vm_id]) {
+            if let Some(mac) =
+                parse_mac_from_domiflist(String::from_utf8_lossy(&output.stdout).as_ref())
+            {
+                return Some(mac);
+            }
+        }
+    }
+    None
+}
+
+/// Lit le réseau libvirt depuis `config.xml` (première NIC type `network`).
+pub fn parse_network_from_xml(xml: &str) -> Option<String> {
+    parse_nics_from_xml(xml)
+        .into_iter()
+        .find_map(|nic| match nic {
+            VmNic::LibvirtNetwork { name } => Some(name),
+            VmNic::MacvtapBridge { .. } => None,
+        })
+}
+
+/// Lit la première interface macvtap (`type='direct'`) depuis `config.xml`.
+pub fn parse_macvtap_interface_from_xml(xml: &str) -> Option<String> {
+    parse_nics_from_xml(xml)
+        .into_iter()
+        .find_map(|nic| match nic {
+            VmNic::MacvtapBridge { host_interface } => Some(host_interface),
+            VmNic::LibvirtNetwork { .. } => None,
+        })
+}
+
+/// Parse les blocs `<interface>` du domain XML.
+pub fn parse_nics_from_xml(xml: &str) -> Vec<VmNic> {
+    let mut nics = Vec::new();
+    let mut in_interface = false;
+    let mut iface_type: Option<String> = None;
+    let mut network: Option<String> = None;
+    let mut direct_dev: Option<String> = None;
+    let mut direct_mode: Option<String> = None;
+
+    let flush = |nics: &mut Vec<VmNic>,
+                 in_interface: &mut bool,
+                 iface_type: &mut Option<String>,
+                 network: &mut Option<String>,
+                 direct_dev: &mut Option<String>,
+                 direct_mode: &mut Option<String>| {
+        if !*in_interface {
+            return;
+        }
+        match iface_type.as_deref() {
+            Some("network") => {
+                if let Some(name) = network.take() {
+                    nics.push(VmNic::LibvirtNetwork { name });
+                }
+            }
+            Some("direct") => {
+                if let (Some(dev), Some(mode)) = (direct_dev.take(), direct_mode.take()) {
+                    if mode == "bridge" {
+                        nics.push(VmNic::MacvtapBridge {
+                            host_interface: dev,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        *in_interface = false;
+        *iface_type = None;
+    };
+
+    for line in xml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("<interface ") {
+            flush(
+                &mut nics,
+                &mut in_interface,
+                &mut iface_type,
+                &mut network,
+                &mut direct_dev,
+                &mut direct_mode,
+            );
+            in_interface = true;
+            if let Some(t) = trimmed
+                .strip_prefix("<interface type=")
+                .and_then(parse_xml_quoted_value)
+            {
+                iface_type = Some(t);
+            }
+            continue;
+        }
+        if !in_interface {
+            continue;
+        }
+        if trimmed.starts_with("</interface>") {
+            flush(
+                &mut nics,
+                &mut in_interface,
+                &mut iface_type,
+                &mut network,
+                &mut direct_dev,
+                &mut direct_mode,
+            );
+            continue;
+        }
+        if trimmed.starts_with("<source ") {
+            if let Some(name) = xml_attribute_value(trimmed, "network") {
+                network = Some(name);
+            }
+            if let Some(dev) = xml_attribute_value(trimmed, "dev") {
+                direct_dev = Some(dev);
+            }
+            if let Some(mode) = xml_attribute_value(trimmed, "mode") {
+                direct_mode = Some(mode);
+            }
+        }
+    }
+    flush(
+        &mut nics,
+        &mut in_interface,
+        &mut iface_type,
+        &mut network,
+        &mut direct_dev,
+        &mut direct_mode,
+    );
+    nics
+}
+
+fn parse_xml_quoted_value(rest: &str) -> Option<String> {
+    let quoted = rest.trim_start_matches('=').trim();
+    let quoted = quoted.trim_start_matches('\'').trim_start_matches('"');
+    let end = quoted.find(['\'', '"'])?;
+    Some(quoted[..end].to_string())
+}
+
+fn xml_attribute_value(line: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=");
+    let rest = line.split(&needle).nth(1)?;
+    parse_xml_quoted_value(rest)
 }
 
 pub fn write_domain_xml(instance_dir: &Path, spec: &DomainSpec<'_>) -> Result<PathBuf> {
@@ -111,40 +331,84 @@ pub fn write_domain_xml(instance_dir: &Path, spec: &DomainSpec<'_>) -> Result<Pa
     Ok(xml_path)
 }
 
-/// Réécrit `config.xml` (une seule NIC) en conservant RAM/CPU si le fichier existe déjà.
+/// Réécrit `config.xml` en conservant RAM/CPU ; réseau selon les arguments ou l'existant.
 pub fn refresh_domain_xml(
     instance_dir: &Path,
     vm_id: &str,
-    network: Option<&str>,
+    libvirt_network: Option<&str>,
+    bridge_host_interface: Option<&str>,
 ) -> Result<PathBuf> {
     let xml_path = instance_dir.join("config.xml");
     let disk_path = instance_dir.join("disk.qcow2");
     let iso_path = instance_dir.join("cloud-init.iso");
-    let (ram_mb, vcpus, network_name) = if xml_path.is_file() {
+
+    let (ram_mb, vcpus) = if xml_path.is_file() {
         let content = std::fs::read_to_string(&xml_path)
             .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
-        let (ram, cpu) = parse_ram_vcpu_from_xml(&content).unwrap_or((2048, 2));
-        let net = network
-            .map(str::to_string)
-            .or_else(|| parse_network_from_xml(&content))
-            .unwrap_or_else(|| LIBVIRT_DEFAULT_NETWORK.to_string());
-        (ram, cpu, net)
+        parse_ram_vcpu_from_xml(&content).unwrap_or((2048, 2))
     } else {
-        (
-            2048,
-            2,
-            network.unwrap_or(LIBVIRT_DEFAULT_NETWORK).to_string(),
-        )
+        (2048, 2)
     };
+
+    let nics = nics_from_refresh_args(libvirt_network, bridge_host_interface, &xml_path)?;
+    let nic_mac = resolve_nic_mac(instance_dir, vm_id);
     let spec = DomainSpec {
         vm_id,
         ram_mb,
         vcpus,
         disk_path: &disk_path,
         iso_path: &iso_path,
-        network: &network_name,
+        nics,
+        nic_mac,
     };
     write_domain_xml(instance_dir, &spec)
+}
+
+fn nics_from_refresh_args(
+    libvirt_network: Option<&str>,
+    bridge_host_interface: Option<&str>,
+    xml_path: &Path,
+) -> Result<Vec<VmNic>> {
+    if let (Some(net), Some(iface)) = (libvirt_network, bridge_host_interface) {
+        return Ok(vec![
+            VmNic::LibvirtNetwork {
+                name: net.to_string(),
+            },
+            VmNic::MacvtapBridge {
+                host_interface: iface.to_string(),
+            },
+        ]);
+    }
+    if let Some(iface) = bridge_host_interface {
+        return Ok(vec![VmNic::MacvtapBridge {
+            host_interface: iface.to_string(),
+        }]);
+    }
+    if let Some(net) = libvirt_network {
+        return Ok(vec![VmNic::LibvirtNetwork {
+            name: net.to_string(),
+        }]);
+    }
+    if xml_path.is_file() {
+        let content = std::fs::read_to_string(xml_path)
+            .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
+        let parsed = parse_nics_from_xml(&content);
+        if !parsed.is_empty() {
+            return Ok(parsed);
+        }
+    }
+    Ok(vec![VmNic::LibvirtNetwork {
+        name: LIBVIRT_DEFAULT_NETWORK.to_string(),
+    }])
+}
+
+/// RAM (MiB) et vCPU lus depuis `config.xml` d'une instance.
+pub fn read_ram_vcpu_from_instance(instance_dir: &Path) -> Result<(u32, u32)> {
+    let xml_path = instance_dir.join("config.xml");
+    let content = std::fs::read_to_string(&xml_path)
+        .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
+    parse_ram_vcpu_from_xml(&content)
+        .ok_or_else(|| anyhow::anyhow!("Impossible de lire RAM/vCPU dans {}", xml_path.display()))
 }
 
 fn parse_ram_vcpu_from_xml(xml: &str) -> Option<(u32, u32)> {
@@ -155,6 +419,53 @@ fn parse_ram_vcpu_from_xml(xml: &str) -> Option<(u32, u32)> {
     Some((ram, vcpu))
 }
 
+/// Réécrit `config.xml` avec RAM/CPU demandés et redéfinit le domaine libvirt (VM arrêtée).
+pub fn redefine_domain_resources(
+    instance_dir: &Path,
+    vm_id: &str,
+    ram_mb: u32,
+    vcpus: u32,
+    libvirt_network: Option<&str>,
+    bridge_host_interface: Option<&str>,
+) -> Result<()> {
+    let xml_path = refresh_domain_xml_with_resources(
+        instance_dir,
+        vm_id,
+        ram_mb,
+        vcpus,
+        libvirt_network,
+        bridge_host_interface,
+    )?;
+    define_or_replace_domain(vm_id, &xml_path)
+}
+
+/// Comme [`refresh_domain_xml`] mais avec RAM/CPU explicites.
+pub fn refresh_domain_xml_with_resources(
+    instance_dir: &Path,
+    vm_id: &str,
+    ram_mb: u32,
+    vcpus: u32,
+    libvirt_network: Option<&str>,
+    bridge_host_interface: Option<&str>,
+) -> Result<PathBuf> {
+    let xml_path = instance_dir.join("config.xml");
+    let disk_path = instance_dir.join("disk.qcow2");
+    let iso_path = instance_dir.join("cloud-init.iso");
+
+    let nics = nics_from_refresh_args(libvirt_network, bridge_host_interface, &xml_path)?;
+    let nic_mac = resolve_nic_mac(instance_dir, vm_id);
+    let spec = DomainSpec {
+        vm_id,
+        ram_mb,
+        vcpus,
+        disk_path: &disk_path,
+        iso_path: &iso_path,
+        nics,
+        nic_mac,
+    };
+    write_domain_xml(instance_dir, &spec)
+}
+
 pub fn domain_exists(vm_id: &str) -> bool {
     run_virsh(&["dominfo", vm_id])
         .map(|output| output.status.success())
@@ -163,6 +474,16 @@ pub fn domain_exists(vm_id: &str) -> bool {
 
 pub fn define_domain(xml_path: &Path) -> Result<()> {
     run_virsh(&["define", path_arg(xml_path)?]).map(|_| ())
+}
+
+/// `virsh define` en remplaçant une définition existante (après `down`, `apply`, etc.).
+pub fn define_or_replace_domain(vm_id: &str, xml_path: &Path) -> Result<()> {
+    if domain_exists(vm_id) {
+        destroy_domain(vm_id)?;
+        undefine_domain(vm_id)?;
+    }
+    define_domain(xml_path)?;
+    Ok(())
 }
 
 pub fn start_domain(vm_id: &str) -> Result<()> {
@@ -254,14 +575,43 @@ pub fn net_dhcp_leases(network: &str) -> Result<String> {
 }
 
 pub fn parse_ipv4_from_domifaddr(output: &str) -> Option<String> {
-    let ips: Vec<String> = output
+    select_best_guest_ipv4(parse_all_ipv4_from_domifaddr(output), false)
+}
+
+/// Toutes les IPv4 invitées trouvées dans la sortie `domifaddr`.
+pub fn parse_all_ipv4_from_domifaddr(output: &str) -> Vec<String> {
+    output
         .lines()
         .filter(|line| {
             !line.trim().is_empty() && !line.starts_with("---") && !line.starts_with(" Name")
         })
         .filter_map(extract_ipv4_token)
-        .collect();
-    select_best_guest_ipv4(ips)
+        .collect()
+}
+
+/// Meilleure IP pour le mode bridge (préfère le sous-réseau de la route par défaut hôte).
+pub fn select_best_bridge_ipv4(ips: Vec<String>) -> Option<String> {
+    select_best_guest_ipv4(ips, true)
+}
+
+/// Cherche une IPv4 voisine (ARP) pour le MAC de la VM (`ip neigh show`).
+pub fn neighbor_ipv4_for_mac(mac: &str) -> Option<String> {
+    use std::process::Command;
+    let mac = mac.to_lowercase();
+    let output = Command::new("ip").args(["neigh", "show"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let lower = line.to_lowercase();
+        if !lower.contains(&mac) {
+            continue;
+        }
+        if let Some(ip) = extract_ipv4_token(line) {
+            return Some(ip);
+        }
+    }
+    None
 }
 
 pub fn guest_network_ipv4_from_agent(vm_id: &str) -> Option<String> {
@@ -278,12 +628,18 @@ pub fn guest_network_ipv4_from_agent(vm_id: &str) -> Option<String> {
     parse_guest_network_interfaces_json(stdout.trim())
 }
 
-pub fn parse_guest_network_interfaces_json(raw: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(raw).ok()?;
+pub fn parse_all_ipv4_from_guest_agent_json(raw: &str) -> Vec<String> {
+    let value: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
     if value.get("error").is_some() {
-        return None;
+        return Vec::new();
     }
-    let interfaces = value.get("return")?.as_array()?;
+    let interfaces = match value.get("return").and_then(|r| r.as_array()) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
     let mut ips = Vec::new();
     for iface in interfaces {
         let name = iface.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -302,14 +658,78 @@ pub fn parse_guest_network_interfaces_json(raw: &str) -> Option<String> {
             }
         }
     }
-    select_best_guest_ipv4(ips)
+    ips
 }
 
-fn select_best_guest_ipv4(ips: Vec<String>) -> Option<String> {
+pub fn parse_guest_network_interfaces_json(raw: &str) -> Option<String> {
+    select_best_guest_ipv4(parse_all_ipv4_from_guest_agent_json(raw), false)
+}
+
+pub fn guest_network_bridge_ipv4_from_agent(vm_id: &str) -> Option<String> {
+    let output = run_virsh(&[
+        "qemu-agent-command",
+        vm_id,
+        r#"{"execute":"guest-network-get-interfaces"}"#,
+    ])
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    select_best_bridge_ipv4(parse_all_ipv4_from_guest_agent_json(stdout.trim()))
+}
+
+fn select_best_guest_ipv4(ips: Vec<String>, bridge_lan: bool) -> Option<String> {
+    if bridge_lan {
+        if let Some(host_prefix) = host_lan_prefix() {
+            if let Some(ip) = ips
+                .iter()
+                .find(|ip| ip.starts_with(&host_prefix) && is_usable_guest_ipv4(ip))
+            {
+                return Some(ip.clone());
+            }
+        }
+        return ips
+            .into_iter()
+            .find(|ip| is_usable_guest_ipv4(ip) && !ip.starts_with("192.168.122."));
+    }
     ips.iter()
         .find(|ip| ip.starts_with("10.0.2.") || ip.starts_with("192.168."))
         .cloned()
         .or_else(|| ips.into_iter().find(|ip| is_usable_guest_ipv4(ip)))
+}
+
+/// Préfixe « a.b.c. » de l'IP source de la route par défaut (réseau actif du bureau / partage).
+fn host_lan_prefix() -> Option<String> {
+    use std::process::Command;
+    let output = Command::new("ip")
+        .args(["-4", "route", "show", "default"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if !line.trim().starts_with("default ") {
+            continue;
+        }
+        if let Some(src_idx) = line.split_whitespace().position(|t| t == "src") {
+            let parts: Vec<_> = line.split_whitespace().collect();
+            if let Some(src) = parts.get(src_idx + 1) {
+                return ipv4_prefix_three_octets(src);
+            }
+        }
+    }
+    None
+}
+
+fn ipv4_prefix_three_octets(ip: &str) -> Option<String> {
+    let mut octets = ip.split('.');
+    let a = octets.next()?;
+    let b = octets.next()?;
+    let c = octets.next()?;
+    Some(format!("{a}.{b}.{c}."))
 }
 
 fn is_usable_guest_ipv4(ip: &str) -> bool {
@@ -445,6 +865,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_mac_address_from_xml_ok() {
+        let xml = r#"<interface type='network'>
+      <mac address='52:54:00:12:34:56'/>
+      <source network='virtum-lab-demo-lab'/>
+    </interface>"#;
+        assert_eq!(
+            parse_mac_address_from_xml(xml).as_deref(),
+            Some("52:54:00:12:34:56")
+        );
+    }
+
+    #[test]
+    fn generate_xml_embeds_mac() {
+        let disk = std::env::temp_dir().join("virtum-xml-mac-disk.qcow2");
+        let iso = std::env::temp_dir().join("virtum-xml-mac.iso");
+        std::fs::write(&disk, b"").unwrap();
+        std::fs::write(&iso, b"").unwrap();
+        let spec = DomainSpec {
+            vm_id: "vm-mac",
+            ram_mb: 512,
+            vcpus: 1,
+            disk_path: &disk,
+            iso_path: &iso,
+            nics: vec![VmNic::LibvirtNetwork {
+                name: "virtum-lab-x".into(),
+            }],
+            nic_mac: Some("52:54:00:ab:cd:ef".into()),
+        };
+        let xml = generate_domain_xml(&spec).unwrap();
+        assert!(xml.contains("52:54:00:ab:cd:ef"));
+        let _ = std::fs::remove_file(disk);
+        let _ = std::fs::remove_file(iso);
+    }
+
+    #[test]
     fn parses_network_from_domain_xml() {
         let xml = r#"<interface type='network'>
       <source network='virtum-lab-demo-lab'/>
@@ -462,20 +917,94 @@ mod tests {
         std::fs::write(&disk, b"").unwrap();
         std::fs::write(&iso, b"").unwrap();
 
-        let spec = DomainSpec {
-            vm_id: "vm-testxml",
-            ram_mb: 2048,
-            vcpus: 2,
-            disk_path: &disk,
-            iso_path: &iso,
-            network: "virtum-lab-demo-lab",
-        };
+        let spec = DomainSpec::with_libvirt_network(
+            "vm-testxml",
+            2048,
+            2,
+            &disk,
+            &iso,
+            "virtum-lab-demo-lab",
+        );
         let xml = generate_domain_xml(&spec).unwrap();
         assert!(xml.contains("<name>vm-testxml</name>"));
         assert!(xml.contains("network='virtum-lab-demo-lab'"));
         assert!(!xml.contains("<graphics"));
         assert!(xml.contains("type='network'"));
         assert!(!xml.contains("qemu:commandline"));
+
+        let _ = std::fs::remove_file(disk);
+        let _ = std::fs::remove_file(iso);
+    }
+
+    #[test]
+    fn select_best_bridge_ipv4_prefers_host_subnet() {
+        let ips = vec!["192.168.122.10".to_string(), "192.168.43.55".to_string()];
+        // Sans route hôte en test, prend la première IP hors 192.168.122.
+        let ip = select_best_bridge_ipv4(ips).unwrap();
+        assert_eq!(ip, "192.168.43.55");
+    }
+
+    #[test]
+    fn generate_xml_dual_nic_lab_and_bridge() {
+        let dir = std::env::temp_dir().join(format!("virtum-dual-nic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let disk = dir.join("disk.qcow2");
+        let iso = dir.join("cloud-init.iso");
+        std::fs::write(&disk, b"").unwrap();
+        std::fs::write(&iso, b"").unwrap();
+        let spec = DomainSpec {
+            vm_id: "vm-dual",
+            ram_mb: 1024,
+            vcpus: 1,
+            disk_path: &disk,
+            iso_path: &iso,
+            nics: vec![
+                VmNic::LibvirtNetwork {
+                    name: "virtum-lab-demo".into(),
+                },
+                VmNic::MacvtapBridge {
+                    host_interface: "enp3s0".into(),
+                },
+            ],
+            nic_mac: Some("52:54:00:ab:cd:ef".into()),
+        };
+        let xml = generate_domain_xml(&spec).unwrap();
+        assert!(xml.contains("network='virtum-lab-demo'"));
+        assert!(xml.contains("mode='bridge'"));
+        assert!(xml.contains("52:54:00:ab:cd:ef"));
+    }
+
+    #[test]
+    fn generate_xml_macvtap_bridge() {
+        let disk = std::env::temp_dir().join("virtum-xml-br-disk.qcow2");
+        let iso = std::env::temp_dir().join("virtum-xml-br.iso");
+        std::fs::write(&disk, b"").unwrap();
+        std::fs::write(&iso, b"").unwrap();
+
+        let spec = DomainSpec {
+            vm_id: "vm-bridge",
+            ram_mb: 2048,
+            vcpus: 2,
+            disk_path: &disk,
+            iso_path: &iso,
+            nics: vec![VmNic::MacvtapBridge {
+                host_interface: "enp3s0".to_string(),
+            }],
+            nic_mac: None,
+        };
+        let xml = generate_domain_xml(&spec).unwrap();
+        assert!(xml.contains("type='direct'"));
+        assert!(xml.contains("dev='enp3s0'"));
+        assert!(xml.contains("mode='bridge'"));
+
+        let parsed = parse_nics_from_xml(&xml);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0],
+            VmNic::MacvtapBridge {
+                host_interface: "enp3s0".to_string()
+            }
+        );
 
         let _ = std::fs::remove_file(disk);
         let _ = std::fs::remove_file(iso);

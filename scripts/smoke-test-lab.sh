@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Parcours lab v0.2 (STEPS2 §35) — nécessite KVM, libvirt, socat, réseau default actif.
+# Parcours lab NAT v0.2/v0.3 (STEPS2 §35, STEPS3 §43) — KVM, libvirt, socat.
+# Port HTTP : aligné sur examples/Virtumfile (18098 par défaut).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,8 +37,9 @@ SSH_BASE=(-i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKno
 ssh "${SSH_BASE[@]}" "virtum@${WEB_IP}" ping -c1 -W2 "$DB_IP"
 ssh "${SSH_BASE[@]}" "virtum@${DB_IP}" ping -c1 -W2 "$WEB_IP"
 
-echo "== HTTP port forward (18080) =="
-curl -sf --max-time 5 http://127.0.0.1:18080/ | head -c 200
+HTTP_PORT="${LAB_HTTP_PORT:-18098}"
+echo "== HTTP port forward (127.0.0.1:${HTTP_PORT}) =="
+curl -sf --max-time 5 "http://127.0.0.1:${HTTP_PORT}/" | head -c 200
 echo
 
 echo "== virtum down -f $VIRTUMFILE =="

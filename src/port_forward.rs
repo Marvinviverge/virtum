@@ -1,4 +1,4 @@
-//! Port mapping hôte → invité (STEPS2 étape 31) via `socat` sur 127.0.0.1.
+//! Port mapping hôte → invité (STEPS2 étape 31, v0.3 `bind: lan`) via `socat`.
 //!
 //! Les proxies tournent en processus séparé (survit à la fin de `virtum up`).
 
@@ -9,9 +9,20 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::bridge_network;
 use crate::metadata::{Instance, InstanceStatus, Metadata};
 
 const FORWARD_PID_FILE: &str = "port-forwards.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PortBind {
+    /// `127.0.0.1` uniquement (défaut v0.2).
+    #[default]
+    Local,
+    /// Toutes les interfaces — joignable depuis le LAN (Wi‑Fi, partage téléphone, Ethernet).
+    Lan,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortForward {
@@ -23,6 +34,7 @@ pub struct PortForward {
 struct ForwardPid {
     host_port: u16,
     guest_port: u16,
+    bind: PortBind,
     pid: u32,
 }
 
@@ -30,13 +42,24 @@ fn pid_file(instance_dir: &Path) -> PathBuf {
     instance_dir.join(FORWARD_PID_FILE)
 }
 
-/// Vérifie que le port hôte n'est pas déjà pris sur 127.0.0.1.
-pub fn ensure_host_port_available(host_port: u16) -> Result<()> {
+fn listen_bind_address(bind: PortBind) -> &'static str {
+    match bind {
+        PortBind::Local => "127.0.0.1",
+        PortBind::Lan => "0.0.0.0",
+    }
+}
+
+/// Vérifie que le port hôte n'est pas déjà pris sur l'adresse d'écoute.
+pub fn ensure_host_port_available(host_port: u16, bind: PortBind) -> Result<()> {
     use std::net::TcpListener;
-    let addr = format!("127.0.0.1:{host_port}");
+    let addr = format!("{}:{host_port}", listen_bind_address(bind));
     TcpListener::bind(&addr).with_context(|| {
+        let scope = match bind {
+            PortBind::Local => "127.0.0.1",
+            PortBind::Lan => "0.0.0.0 (LAN)",
+        };
         format!(
-            "Le port hôte {host_port} est déjà utilisé sur 127.0.0.1. \
+            "Le port hôte {host_port} est déjà utilisé sur {scope}. \
              Choisissez un autre port dans le Virtumfile (ex. 18080:80) \
              ou arrêtez le processus qui l'occupe."
         )
@@ -44,9 +67,9 @@ pub fn ensure_host_port_available(host_port: u16) -> Result<()> {
     Ok(())
 }
 
-pub fn ensure_ports_available(forwards: &[PortForward]) -> Result<()> {
+pub fn ensure_ports_available(forwards: &[PortForward], bind: PortBind) -> Result<()> {
     for pf in forwards {
-        ensure_host_port_available(pf.host_port)?;
+        ensure_host_port_available(pf.host_port, bind)?;
     }
     Ok(())
 }
@@ -122,20 +145,35 @@ pub fn start_instance_proxies(
     instance_dir: &Path,
     guest_ip: &str,
     forwards: &[PortForward],
+    bind: PortBind,
 ) -> Result<()> {
     stop_instance_proxies(instance_dir);
     if forwards.is_empty() {
         return Ok(());
     }
     ensure_socat()?;
-    ensure_ports_available(forwards)?;
+    ensure_ports_available(forwards, bind)?;
+
+    if bind == PortBind::Lan {
+        if let Some(ip) = bridge_network::host_primary_ipv4() {
+            eprintln!("Ports exposés sur le LAN (écoute 0.0.0.0) — IP hôte typique : {ip}");
+        } else {
+            eprintln!(
+                "Ports exposés sur le LAN (0.0.0.0) ; impossible de détecter l'IP hôte (ip route)."
+            );
+        }
+        eprintln!(
+            "Si un pare-feu bloque l'accès (ufw), autorisez le port ou testez depuis le même réseau."
+        );
+    }
 
     let mut records = Vec::new();
     for &pf in forwards {
-        let pid = spawn_socat_forward(guest_ip, pf)?;
+        let pid = spawn_socat_forward(guest_ip, pf, bind)?;
         records.push(ForwardPid {
             host_port: pf.host_port,
             guest_port: pf.guest_port,
+            bind,
             pid,
         });
     }
@@ -147,8 +185,12 @@ pub fn start_instance_proxies(
     Ok(())
 }
 
-fn spawn_socat_forward(guest_ip: &str, pf: PortForward) -> Result<u32> {
-    let listen = format!("TCP-LISTEN:{},bind=127.0.0.1,reuseaddr,fork", pf.host_port);
+fn spawn_socat_forward(guest_ip: &str, pf: PortForward, bind: PortBind) -> Result<u32> {
+    let listen_addr = listen_bind_address(bind);
+    let listen = format!(
+        "TCP-LISTEN:{},bind={listen_addr},reuseaddr,fork",
+        pf.host_port
+    );
     let target = format!("TCP:{guest_ip}:{}", pf.guest_port);
     let child = Command::new("socat")
         .arg(&listen)
@@ -159,7 +201,7 @@ fn spawn_socat_forward(guest_ip: &str, pf: PortForward) -> Result<u32> {
         .spawn()
         .with_context(|| {
             format!(
-                "Impossible de lancer socat pour 127.0.0.1:{} → {guest_ip}:{}",
+                "Impossible de lancer socat pour {listen_addr}:{} → {guest_ip}:{}",
                 pf.host_port, pf.guest_port
             )
         })?;
@@ -188,23 +230,47 @@ fn signal_pid(pid: u32) {
         .status();
 }
 
-pub fn format_forward_list(forwards: &[PortForward]) -> String {
+pub fn format_forward_list(forwards: &[PortForward], bind: PortBind) -> String {
     if forwards.is_empty() {
         return "-".to_string();
     }
+    let host_ip = bridge_network::host_primary_ipv4();
     forwards
         .iter()
-        .map(|pf| format!("127.0.0.1:{}→{}", pf.host_port, pf.guest_port))
+        .map(|pf| match bind {
+            PortBind::Local => format!("127.0.0.1:{}→{}", pf.host_port, pf.guest_port),
+            PortBind::Lan => {
+                if let Some(ref ip) = host_ip {
+                    format!("{ip}:{}→{}", pf.host_port, pf.guest_port)
+                } else {
+                    format!("LAN:{}→{}", pf.host_port, pf.guest_port)
+                }
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-pub fn print_forward_lines(forwards: &[PortForward]) {
+pub fn print_forward_lines(forwards: &[PortForward], bind: PortBind) {
+    let lan_ip = bridge_network::host_primary_ipv4();
     for pf in forwards {
         println!(
-            "  Forward:  http://127.0.0.1:{} → invité :{}",
+            "  Forward (local): http://127.0.0.1:{} → invité :{}",
             pf.host_port, pf.guest_port
         );
+        if bind == PortBind::Lan {
+            if let Some(ref ip) = lan_ip {
+                println!(
+                    "  Forward (LAN):   http://{ip}:{} → invité :{}  (téléphone / collègue même réseau)",
+                    pf.host_port, pf.guest_port
+                );
+            } else {
+                println!(
+                    "  Forward (LAN):   http://<IP-hôte>:{} → invité :{}  (écoute 0.0.0.0, voir `ip route`)",
+                    pf.host_port, pf.guest_port
+                );
+            }
+        }
     }
 }
 
@@ -212,27 +278,29 @@ pub fn print_forward_lines(forwards: &[PortForward]) {
 pub fn ensure_forwards_match_existing(
     machine_name: &str,
     spec_ports: &[PortForward],
+    spec_bind: PortBind,
     existing: &Instance,
 ) -> Result<()> {
     let stored = existing.port_forwards.as_deref().unwrap_or(&[]);
-    if stored == spec_ports {
+    let stored_bind = existing.port_bind.unwrap_or(PortBind::Local);
+    if stored == spec_ports && stored_bind == spec_bind {
         return Ok(());
     }
     if stored.is_empty() && !spec_ports.is_empty() {
         bail!(
             "La machine '{machine_name}' existe sans mapping de ports. \
-             Ajoutez les ports au Virtumfile nécessite `virtum down -f <file> --destroy` puis `virtum up`."
+             Utilisez `virtum apply -f <Virtumfile>` ou `virtum down --destroy` puis `virtum up`."
         );
     }
     if !stored.is_empty() && spec_ports.is_empty() {
         bail!(
             "La machine '{machine_name}' a des ports mappés mais le Virtumfile n'en définit plus. \
-             Utilisez `virtum down -f <file> --destroy` puis `virtum up`."
+             Utilisez `virtum apply -f <Virtumfile>` ou `virtum down --destroy` puis `virtum up`."
         );
     }
     bail!(
-        "Les ports du Virtumfile ne correspondent pas à l'instance '{machine_name}' ({id}). \
-         Utilisez `virtum down -f <file> --destroy` puis `virtum up`.",
+        "Les ports ou `bind` du Virtumfile ne correspondent pas à l'instance '{machine_name}' ({id}). \
+         Utilisez `virtum apply -f <Virtumfile>`.",
         id = existing.id
     );
 }
@@ -240,6 +308,12 @@ pub fn ensure_forwards_match_existing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listen_bind_address_local_and_lan() {
+        assert_eq!(listen_bind_address(PortBind::Local), "127.0.0.1");
+        assert_eq!(listen_bind_address(PortBind::Lan), "0.0.0.0");
+    }
 
     #[test]
     fn validate_lab_port_uniqueness_rejects_duplicate() {

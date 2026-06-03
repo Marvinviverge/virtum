@@ -1,14 +1,18 @@
-# Exemple de lab Virtum (v0.2) — `virtum up -f examples/Virtumfile`
+# Exemple lab Virtum (v0.2/v0.3)
+#   virtum plan -f examples/Virtumfile   # prévisualise + vérifie firewall-demo-lab.json
+#   virtum up → virtum open              # ufw + état pare-feu si bind: lan
 name: demo-lab
+# Expose les ports sur le LAN (téléphone / collègue même Wi‑Fi) — v0.3
+bind: lan
 
 machines:
   web:
     os: debian-12
-    ram: 2048
+    ram: 4096
     cpu: 2
-    disk_size: 10G
+    disk_size: 20G
     ports:
-      - "18080:80"
+      - "18098:80"
     provision:
       - apt-get update
       - apt-get install -y nginx

@@ -7,7 +7,7 @@ DEBUG_BIN := $(TARGET_DIR)/debug/virtum
 INSTALL_DIR ?= $(HOME)/.cargo/bin
 INSTALLED_BIN := $(INSTALL_DIR)/virtum
 
-.PHONY: all release build debug install test fmt clippy check clean help setup-host setup-var-lib
+.PHONY: all release build debug install test fmt clippy check clean help setup-host setup-var-lib smoke-lab smoke-lab-bridge
 
 all: release
 
@@ -39,6 +39,16 @@ clippy:
 ## fmt + clippy + tests
 check: fmt clippy test
 
+## Smoke lab NAT (examples/Virtumfile) — nécessite make release + images
+smoke-lab: release
+	@test -f scripts/smoke-test-lab.sh || { echo "scripts/smoke-test-lab.sh introuvable"; exit 1; }
+	bash scripts/smoke-test-lab.sh
+
+## Smoke lab hybride bridge — VIRTUM_BRIDGE_SMOKE=1 + Ethernet recommandé
+smoke-lab-bridge: release
+	@test -f scripts/smoke-test-lab-bridge.sh || { echo "scripts/smoke-test-lab-bridge.sh introuvable"; exit 1; }
+	VIRTUM_BRIDGE_SMOKE=1 bash scripts/smoke-test-lab-bridge.sh
+
 clean:
 	$(CARGO) clean
 
@@ -62,3 +72,5 @@ help:
 	@echo "  make clean     — cargo clean"
 	@echo "  make setup-host    — sudo scripts/setup-host.sh (apt, libvirt, socat)"
 	@echo "  make setup-var-lib — sudo scripts/setup-var-lib.sh"
+	@echo "  make smoke-lab         — scripts/smoke-test-lab.sh (NAT)"
+	@echo "  make smoke-lab-bridge — hybride (VIRTUM_BRIDGE_SMOKE=1)"

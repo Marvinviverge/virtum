@@ -1,15 +1,20 @@
+pub mod apply;
+pub mod bridge_network;
 pub mod cli;
 pub mod cloud_init;
 pub mod command;
 pub mod config;
 pub mod disk;
 pub mod doctor;
+pub mod firewall;
 pub mod images;
 pub mod lab;
+pub mod lab_diff;
 pub mod lab_network;
 pub mod libvirt;
 pub mod libvirt_access;
 pub mod metadata;
+pub mod plan;
 pub mod port_forward;
 pub mod ps;
 pub mod ssh;
@@ -35,6 +40,10 @@ fn dispatch(command: Commands) -> Result<()> {
         Commands::Start { vms } => run_for_each_vm(&vms, vm::start_vm)?,
         Commands::Stop { vms } => run_for_each_vm(&vms, vm::stop_vm)?,
         Commands::Destroy { vms } => run_for_each_vm(&vms, vm::destroy_vm)?,
+        Commands::Open { file } => firewall::open(file)?,
+        Commands::Close { file } => firewall::close(file)?,
+        Commands::Plan { file } => plan::plan(file)?,
+        Commands::Apply { file } => apply::apply(file)?,
         Commands::Up { file } => lab::up(file)?,
         Commands::Down { file, destroy } => lab::down(file, destroy)?,
     };

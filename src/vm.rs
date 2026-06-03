@@ -8,7 +8,8 @@ use tokio::fs;
 use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::cli::RunArgs;
+use crate::bridge_network;
+use crate::cli::{RunArgs, RunNetworkMode};
 use crate::cloud_init::{build_cloud_init_iso, write_meta_data, write_user_data};
 use crate::config::{self, VirtumPaths};
 use crate::disk::{
@@ -18,8 +19,9 @@ use crate::disk::{
 use crate::images::{ensure_image, resolve_image};
 use crate::lab_network;
 use crate::libvirt::{
-    self, define_domain, destroy_domain, domain_exists, domain_is_active, domain_state,
-    shutdown_domain, start_domain, undefine_domain, write_domain_xml, DomainSpec,
+    self, define_domain, define_or_replace_domain, destroy_domain, domain_exists, domain_is_active,
+    domain_state, shutdown_domain, start_domain, undefine_domain, write_domain_xml, DomainSpec,
+    VmNic,
 };
 use crate::libvirt_access;
 use crate::metadata::{self, Instance, InstanceStatus};
@@ -28,7 +30,10 @@ use crate::ssh::{ensure_ssh_keypair, read_public_key, run_provision_commands, ss
 
 const IP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const IP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Premier boot + DHCP macvtap + guest-agent : plus long que le réseau libvirt NAT.
+const IP_TIMEOUT_BRIDGE: Duration = Duration::from_secs(180);
 const IP_BOOT_GRACE: Duration = Duration::from_secs(5);
+const IP_BOOT_GRACE_BRIDGE: Duration = Duration::from_secs(15);
 const SSH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const SSH_TIMEOUT: Duration = Duration::from_secs(120);
 const SSH_TIMEOUT_GROW_ROOT: Duration = Duration::from_secs(300);
@@ -51,8 +56,11 @@ pub struct VmLaunchConfig {
     pub lab_name: Option<String>,
     pub machine_name: Option<String>,
     pub port_forwards: Vec<PortForward>,
+    pub port_bind: port_forward::PortBind,
     /// Réseau libvirt (`virtum-lab-…` pour un lab, sinon `default` via `None`).
     pub libvirt_network: Option<String>,
+    /// Interface hôte macvtap (`virtum run --network bridge`).
+    pub bridge_host_interface: Option<String>,
 }
 
 impl VmLaunchConfig {
@@ -68,7 +76,9 @@ impl VmLaunchConfig {
             lab_name: None,
             machine_name: None,
             port_forwards: Vec::new(),
+            port_bind: port_forward::PortBind::Local,
             libvirt_network: None,
+            bridge_host_interface: None,
         }
     }
 
@@ -118,7 +128,16 @@ pub async fn run_vm_async(args: RunArgs) -> Result<()> {
         );
     }
 
-    let config = VmLaunchConfig::from_run_args(&args);
+    let mut config = VmLaunchConfig::from_run_args(&args);
+    if args.network == RunNetworkMode::Bridge {
+        let iface =
+            bridge_network::resolve_bridge_interface(args.bridge_interface.as_deref())
+                .with_context(|| {
+                    "Impossible d'utiliser `--network bridge`. Lancez `virtum doctor` pour diagnostiquer l'hôte."
+                })?;
+        eprintln!("Réseau bridge (macvtap) sur l'interface hôte {iface}…");
+        config.bridge_host_interface = Some(iface);
+    }
     let hostname = args
         .hostname
         .clone()
@@ -216,23 +235,21 @@ pub async fn launch_vm_inner(
     )?;
 
     if !config.port_forwards.is_empty() {
-        port_forward::ensure_ports_available(&config.port_forwards)?;
+        port_forward::ensure_ports_available(&config.port_forwards, config.port_bind)?;
         let metadata = metadata::load_metadata(&paths.metadata).await?;
         port_forward::ensure_ports_not_in_metadata(&metadata, Some(vm_id), &config.port_forwards)?;
     }
 
-    let libvirt_network = config
-        .libvirt_network
-        .as_deref()
-        .unwrap_or(libvirt::LIBVIRT_DEFAULT_NETWORK);
-    let spec = DomainSpec {
+    let network_attach = resolve_network_attach(config)?;
+    let spec = build_domain_spec(
+        instance_dir,
         vm_id,
-        ram_mb: config.ram,
-        vcpus: config.cpu,
-        disk_path: &disk_path,
-        iso_path: &iso_path,
-        network: libvirt_network,
-    };
+        config.ram,
+        config.cpu,
+        &disk_path,
+        &iso_path,
+        &network_attach,
+    );
     let xml_path = write_domain_xml(instance_dir, &spec)?;
 
     define_domain(&xml_path).with_context(|| {
@@ -254,16 +271,34 @@ pub async fn launch_vm_inner(
         bail!("La VM {vm_id} n'est pas en état running (état actuel: {state}).");
     }
 
+    let ip_timeout = network_attach.ip_timeout();
     eprintln!(
-        "Attente de l'adresse IP (réseau {}, max {} s)…",
-        libvirt_network,
-        IP_TIMEOUT.as_secs()
+        "Attente de l'adresse IP ({}, max {} s)…",
+        network_attach.label(),
+        ip_timeout.as_secs()
     );
-    let ip = wait_for_ip(vm_id, hostname, libvirt_network, IP_TIMEOUT).await?;
-    if !is_usable_ssh_ip(&ip) {
+    let ip = match wait_for_ip(vm_id, hostname, &network_attach, ip_timeout, None).await {
+        Ok(ip) => ip,
+        Err(err) => {
+            if config.bridge_host_interface.is_some() {
+                *retain_vm_on_error = true;
+                eprintln!(
+                    "La VM '{vm_id}' reste démarrée pour diagnostic bridge. \
+                     Essayez `virsh domifaddr {vm_id}` puis `virtum destroy {vm_id}`."
+                );
+            }
+            return Err(err);
+        }
+    };
+    let lan_ip = if network_attach.discover_lan_after_ssh() {
+        try_discover_ip_bridge(vm_id).ok().flatten()
+    } else {
+        None
+    };
+    if !is_usable_ssh_ip(&ip, network_attach.prefer_non_libvirt_default()) {
         bail!(
             "Adresse IP invalide pour '{vm_id}': {ip}. \
-             Attendu une IP du réseau libvirt (ex. 192.168.122.x)."
+             Vérifiez `virsh domifaddr {vm_id}` et le DHCP du réseau cible."
         );
     }
 
@@ -357,12 +392,33 @@ pub async fn launch_vm_inner(
         } else {
             Some(config.port_forwards.clone())
         },
+        port_bind: if config.port_forwards.is_empty() {
+            None
+        } else {
+            Some(config.port_bind)
+        },
+        bridge_host_interface: config.bridge_host_interface.clone(),
+        lan_ip: lan_ip.clone(),
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
     if !config.port_forwards.is_empty() {
-        port_forward::start_instance_proxies(instance_dir, &ip, &config.port_forwards)?;
+        port_forward::start_instance_proxies(
+            instance_dir,
+            &ip,
+            &config.port_forwards,
+            config.port_bind,
+        )?;
+    }
+
+    if let Err(err) = libvirt::refresh_domain_xml(
+        instance_dir,
+        vm_id,
+        config.libvirt_network.as_deref(),
+        config.bridge_host_interface.as_deref(),
+    ) {
+        eprintln!("Avertissement: impossible d'enregistrer la MAC dans config.xml: {err:#}");
     }
 
     let shell_ref = config.name.as_deref().unwrap_or(vm_id);
@@ -374,24 +430,185 @@ pub async fn launch_vm_inner(
         println!("  Lab:      {lab}");
     }
     println!("  OS:       {}", config.os);
-    println!("  IP:       {ip}");
-    port_forward::print_forward_lines(&config.port_forwards);
+    match &network_attach {
+        NetworkAttach::MacvtapBridge { .. } => println!("  Réseau:   bridge (LAN)"),
+        NetworkAttach::LabAndBridge { .. } => println!("  Réseau:   lab + bridge (LAN)"),
+        NetworkAttach::LibvirtNetwork { name } => {
+            if config.lab_name.is_some() {
+                println!("  Réseau:   {name}");
+            }
+        }
+    }
+    if let Some(ref lan) = lan_ip {
+        println!("  IP (lab): {ip}");
+        println!("  IP (LAN): {lan}");
+    } else {
+        println!("  IP:       {ip}");
+    }
+    port_forward::print_forward_lines(&config.port_forwards, config.port_bind);
     println!("  SSH:      virtum shell {shell_ref}");
     Ok(())
 }
 
-pub async fn wait_for_ip(
+/// Contexte de découverte d'IP selon le type de NIC.
+#[derive(Debug, Clone)]
+enum NetworkAttach {
+    LibvirtNetwork {
+        name: String,
+    },
+    MacvtapBridge {
+        host_interface: String,
+    },
+    /// NIC lab (SSH) + macvtap LAN (`virtum ps` affiche les deux IP).
+    LabAndBridge {
+        lab_network: String,
+        host_interface: String,
+    },
+}
+
+impl NetworkAttach {
+    fn label(&self) -> String {
+        match self {
+            Self::LibvirtNetwork { name } => format!("libvirt {name}"),
+            Self::MacvtapBridge { host_interface } => {
+                format!("bridge macvtap sur {host_interface} (LAN)")
+            }
+            Self::LabAndBridge {
+                lab_network,
+                host_interface,
+            } => format!("lab {lab_network} + bridge macvtap sur {host_interface} (LAN)"),
+        }
+    }
+
+    fn prefer_non_libvirt_default(&self) -> bool {
+        matches!(self, Self::MacvtapBridge { .. })
+    }
+
+    fn libvirt_network_name(&self) -> Option<&str> {
+        match self {
+            Self::LibvirtNetwork { name } => Some(name.as_str()),
+            Self::LabAndBridge { lab_network, .. } => Some(lab_network.as_str()),
+            Self::MacvtapBridge { .. } => None,
+        }
+    }
+
+    fn ip_timeout(&self) -> Duration {
+        match self {
+            Self::MacvtapBridge { .. } => IP_TIMEOUT_BRIDGE,
+            Self::LabAndBridge { .. } => Duration::from_secs(120),
+            Self::LibvirtNetwork { .. } => IP_TIMEOUT,
+        }
+    }
+
+    fn ip_boot_grace(&self) -> Duration {
+        match self {
+            Self::MacvtapBridge { .. } => IP_BOOT_GRACE_BRIDGE,
+            Self::LabAndBridge { .. } => IP_BOOT_GRACE,
+            Self::LibvirtNetwork { .. } => IP_BOOT_GRACE,
+        }
+    }
+
+    fn discover_lan_after_ssh(&self) -> bool {
+        matches!(self, Self::LabAndBridge { .. })
+    }
+}
+
+fn resolve_network_attach(config: &VmLaunchConfig) -> Result<NetworkAttach> {
+    if let (Some(lab_net), Some(iface)) = (
+        config.libvirt_network.as_ref(),
+        config.bridge_host_interface.as_ref(),
+    ) {
+        return Ok(NetworkAttach::LabAndBridge {
+            lab_network: lab_net.clone(),
+            host_interface: iface.clone(),
+        });
+    }
+    if let Some(iface) = &config.bridge_host_interface {
+        return Ok(NetworkAttach::MacvtapBridge {
+            host_interface: iface.clone(),
+        });
+    }
+    let name = config
+        .libvirt_network
+        .clone()
+        .unwrap_or_else(|| libvirt::LIBVIRT_DEFAULT_NETWORK.to_string());
+    Ok(NetworkAttach::LibvirtNetwork { name })
+}
+
+fn build_domain_spec<'a>(
+    instance_dir: &Path,
+    vm_id: &'a str,
+    ram_mb: u32,
+    vcpus: u32,
+    disk_path: &'a Path,
+    iso_path: &'a Path,
+    attach: &NetworkAttach,
+) -> DomainSpec<'a> {
+    let nics = match attach {
+        NetworkAttach::LibvirtNetwork { name } => {
+            vec![VmNic::LibvirtNetwork { name: name.clone() }]
+        }
+        NetworkAttach::MacvtapBridge { host_interface } => vec![VmNic::MacvtapBridge {
+            host_interface: host_interface.clone(),
+        }],
+        NetworkAttach::LabAndBridge {
+            lab_network,
+            host_interface,
+        } => vec![
+            VmNic::LibvirtNetwork {
+                name: lab_network.clone(),
+            },
+            VmNic::MacvtapBridge {
+                host_interface: host_interface.clone(),
+            },
+        ],
+    };
+    DomainSpec {
+        vm_id,
+        ram_mb,
+        vcpus,
+        disk_path,
+        iso_path,
+        nics,
+        nic_mac: libvirt::resolve_nic_mac(instance_dir, vm_id),
+    }
+}
+
+/// Contexte pour réutiliser une IP connue au redémarrage (metadata).
+struct ResumeIpHint<'a> {
+    known_ip: &'a str,
+    private_key: &'a Path,
+    user: &'a str,
+    ssh_port: u16,
+}
+
+async fn wait_for_ip(
     vm_id: &str,
     hostname: &str,
-    libvirt_network: &str,
+    attach: &NetworkAttach,
     timeout: Duration,
+    resume_hint: Option<ResumeIpHint<'_>>,
 ) -> Result<String> {
     let started = Instant::now();
-    sleep(IP_BOOT_GRACE).await;
+    let grace = if resume_hint.is_some() {
+        Duration::from_secs(2)
+    } else {
+        attach.ip_boot_grace()
+    };
+    sleep(grace).await;
 
     loop {
-        if let Some(ip) = try_discover_ip(vm_id, hostname, libvirt_network)? {
+        if let Some(ip) = try_discover_ip(vm_id, hostname, attach)? {
             return Ok(ip);
+        }
+
+        if let Some(hint) = resume_hint.as_ref() {
+            if is_usable_ssh_ip(hint.known_ip, attach.prefer_non_libvirt_default())
+                && ssh_auth_probe(hint.private_key, hint.user, hint.known_ip, hint.ssh_port)
+            {
+                eprintln!("IP réutilisée (metadata / SSH) : {}", hint.known_ip);
+                return Ok(hint.known_ip.to_string());
+            }
         }
 
         if started.elapsed() >= timeout {
@@ -400,39 +617,58 @@ pub async fn wait_for_ip(
         sleep(IP_POLL_INTERVAL).await;
     }
 
+    let dhcp_hint = match attach {
+        NetworkAttach::LibvirtNetwork { name } | NetworkAttach::LabAndBridge { lab_network: name, .. } => {
+            format!("- Vérifiez `virsh domifaddr {vm_id}` et `virsh net-dhcp-leases {name}`\n")
+        }
+        NetworkAttach::MacvtapBridge { host_interface } => format!(
+            "- Interface hôte : {host_interface} (doit être celle de la route par défaut : `ip route`)\n\
+             - Partage téléphone / Wi‑Fi : macvtap échoue souvent ; essayez `--bridge-interface <iface>`\n\
+             - Vérifiez `virsh domifaddr {vm_id}` et `ip neigh` après ~2 min (cloud-init)\n"
+        ),
+    };
+
     bail!(
         "Aucune adresse IP trouvée pour '{vm_id}' après {} secondes.\n\
          Suggestions:\n\
-         - Exécutez `virtum doctor` (réseau libvirt actif)\n\
-         - Vérifiez `virsh domifaddr {vm_id}` et `virsh net-dhcp-leases {libvirt_network}`\n\
-         - Attendez la fin de cloud-init puis réessayez",
+         - Exécutez `virtum doctor`\n\
+         {dhcp_hint}\
+         - Relancez avec `--bridge-interface` si le partage n'utilise pas l'interface détectée",
         timeout.as_secs()
     );
 }
 
-fn try_discover_ip(vm_id: &str, hostname: &str, libvirt_network: &str) -> Result<Option<String>> {
+fn try_discover_ip(vm_id: &str, hostname: &str, attach: &NetworkAttach) -> Result<Option<String>> {
+    if matches!(attach, NetworkAttach::MacvtapBridge { .. }) {
+        return try_discover_ip_bridge(vm_id);
+    }
+
+    let prefer_lan = false;
+
     for output in libvirt::domifaddr_all_sources(vm_id) {
         if let Some(ip) = libvirt::parse_ipv4_from_domifaddr(&output) {
-            if is_usable_ssh_ip(&ip) {
+            if is_usable_ssh_ip(&ip, prefer_lan) {
                 return Ok(Some(ip));
             }
         }
     }
 
     if let Some(ip) = libvirt::guest_network_ipv4_from_agent(vm_id) {
-        if is_usable_ssh_ip(&ip) {
+        if is_usable_ssh_ip(&ip, prefer_lan) {
             return Ok(Some(ip));
         }
     }
 
-    let mac = libvirt::domiflist(vm_id)
-        .ok()
-        .and_then(|output| libvirt::parse_mac_from_domiflist(&output));
+    if let Some(net) = attach.libvirt_network_name() {
+        let mac = libvirt::domiflist(vm_id)
+            .ok()
+            .and_then(|output| libvirt::parse_mac_from_domiflist(&output));
 
-    if let (Some(mac), Ok(leases)) = (mac.as_ref(), libvirt::net_dhcp_leases(libvirt_network)) {
-        if let Some(ip) = libvirt::parse_ipv4_from_dhcp_leases(&leases, mac) {
-            if is_usable_ssh_ip(&ip) && dhcp_lease_mac_matches(&leases, &ip, mac) {
-                return Ok(Some(ip));
+        if let (Some(mac), Ok(leases)) = (mac.as_ref(), libvirt::net_dhcp_leases(net)) {
+            if let Some(ip) = libvirt::parse_ipv4_from_dhcp_leases(&leases, mac) {
+                if is_usable_ssh_ip(&ip, prefer_lan) && dhcp_lease_mac_matches(&leases, &ip, mac) {
+                    return Ok(Some(ip));
+                }
             }
         }
     }
@@ -440,6 +676,35 @@ fn try_discover_ip(vm_id: &str, hostname: &str, libvirt_network: &str) -> Result
     // Pas de recherche par hostname : réutiliser `--name disk-test` reprendrait
     // une lease DHCP périmée et ferait attendre SSH sur la mauvaise IP.
     let _ = hostname;
+
+    Ok(None)
+}
+
+fn try_discover_ip_bridge(vm_id: &str) -> Result<Option<String>> {
+    for output in libvirt::domifaddr_all_sources(vm_id) {
+        let ips = libvirt::parse_all_ipv4_from_domifaddr(&output);
+        if let Some(ip) = libvirt::select_best_bridge_ipv4(ips) {
+            if is_usable_ssh_ip(&ip, true) {
+                return Ok(Some(ip));
+            }
+        }
+    }
+
+    if let Some(ip) = libvirt::guest_network_bridge_ipv4_from_agent(vm_id) {
+        if is_usable_ssh_ip(&ip, true) {
+            return Ok(Some(ip));
+        }
+    }
+
+    if let Ok(output) = libvirt::domiflist(vm_id) {
+        if let Some(mac) = libvirt::parse_mac_from_domiflist(&output) {
+            if let Some(ip) = libvirt::neighbor_ipv4_for_mac(&mac) {
+                if is_usable_ssh_ip(&ip, true) {
+                    return Ok(Some(ip));
+                }
+            }
+        }
+    }
 
     Ok(None)
 }
@@ -456,11 +721,21 @@ fn dhcp_lease_mac_matches(leases: &str, ip: &str, mac: &str) -> bool {
     false
 }
 
-fn is_usable_ssh_ip(ip: &str) -> bool {
-    !ip.starts_with("127.")
-        && ip != libvirt::SLIRP_GUEST_IPV4
-        && ip != "0.0.0.0"
-        && !ip.starts_with("169.254.")
+/// IP du réseau libvirt `default` (NAT 192.168.122.0/24).
+const LIBVIRT_DEFAULT_SUBNET: &str = "192.168.122.";
+
+fn is_usable_ssh_ip(ip: &str, bridge_lan: bool) -> bool {
+    if ip.starts_with("127.")
+        || ip == libvirt::SLIRP_GUEST_IPV4
+        || ip == "0.0.0.0"
+        || ip.starts_with("169.254.")
+    {
+        return false;
+    }
+    if bridge_lan && ip.starts_with(LIBVIRT_DEFAULT_SUBNET) {
+        return false;
+    }
+    true
 }
 
 pub async fn wait_for_ssh_login(
@@ -552,9 +827,18 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
 
     let disk_path = instance_dir.join("disk.qcow2");
     let iso_path = instance_dir.join("cloud-init.iso");
-    let libvirt_network = lab_network::network_for_lab(instance.lab_name.as_deref())?;
-    let xml_path =
-        libvirt::refresh_domain_xml(&instance_dir, &vm_id, Some(libvirt_network.as_str()))?;
+    let (libvirt_network, bridge_iface) =
+        resolve_instance_network_for_refresh(&instance_dir, &instance)?;
+    let xml_path = libvirt::refresh_domain_xml(
+        &instance_dir,
+        &vm_id,
+        libvirt_network.as_deref(),
+        bridge_iface.as_deref(),
+    )?;
+    if let Some(ref mac) = libvirt::parse_mac_address_from_xml(&std::fs::read_to_string(&xml_path)?)
+    {
+        eprintln!("  Interface MAC conservée : {mac}");
+    }
     for path in [&disk_path, &iso_path, &xml_path] {
         if !path.is_file() {
             bail!(
@@ -576,7 +860,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         &iso_path,
     )?;
 
-    define_domain(&xml_path).with_context(|| {
+    define_or_replace_domain(&vm_id, &xml_path).with_context(|| {
         format!(
             "virsh define a échoué pour {vm_id}. \
              Vérifiez {} et virtum doctor.",
@@ -596,55 +880,144 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         bail!("La VM {vm_id} n'est pas en état running (état actuel: {state}).");
     }
 
-    eprintln!(
-        "Attente de l'adresse IP (réseau {}, max {} s)…",
-        libvirt_network,
-        IP_TIMEOUT.as_secs()
-    );
+    let network_attach =
+        network_attach_from_resume(libvirt_network.as_deref(), bridge_iface.as_deref())?;
+    let keys = ensure_ssh_keypair(&paths.keys)?;
+    let ssh_port = instance.ssh_port.unwrap_or(SSH_PORT);
+    let resume_hint = instance.ip.as_deref().and_then(|known_ip| {
+        if is_usable_ssh_ip(known_ip, network_attach.prefer_non_libvirt_default()) {
+            Some(ResumeIpHint {
+                known_ip,
+                private_key: &keys.private_key,
+                user: &instance.user,
+                ssh_port,
+            })
+        } else {
+            None
+        }
+    });
+    if resume_hint.is_some() {
+        eprintln!(
+            "Attente de l'adresse IP ({}, max {} s, réutilisation metadata si joignable)…",
+            network_attach.label(),
+            IP_TIMEOUT.as_secs()
+        );
+    } else {
+        eprintln!(
+            "Attente de l'adresse IP ({}, max {} s)…",
+            network_attach.label(),
+            IP_TIMEOUT.as_secs()
+        );
+    }
+    let ip_timeout = network_attach.ip_timeout();
     let ip = wait_for_ip(
         &vm_id,
         &instance.hostname,
-        libvirt_network.as_str(),
-        IP_TIMEOUT,
+        &network_attach,
+        ip_timeout,
+        resume_hint,
     )
     .await?;
-    if !is_usable_ssh_ip(&ip) {
+    if !is_usable_ssh_ip(&ip, network_attach.prefer_non_libvirt_default()) {
         bail!(
             "Adresse IP invalide pour '{vm_id}': {ip}. \
-             Attendu une IP du réseau libvirt (ex. 192.168.122.x)."
+             Vérifiez `virsh domifaddr {vm_id}`."
         );
     }
 
     eprintln!("Attente de SSH sur {ip} (max {} s)…", SSH_TIMEOUT.as_secs());
-    let keys = ensure_ssh_keypair(&paths.keys)?;
     wait_for_ssh_login(
         &keys.private_key,
         &instance.user,
         &ip,
-        instance.ssh_port.unwrap_or(SSH_PORT),
+        ssh_port,
         SSH_TIMEOUT,
     )
     .await?;
 
+    let lan_ip = if network_attach.discover_lan_after_ssh() {
+        try_discover_ip_bridge(&vm_id).ok().flatten()
+    } else {
+        None
+    };
+
     let shell_ref = instance.name.clone().unwrap_or_else(|| vm_id.clone());
     let forwards_snapshot = instance.port_forwards.clone();
+    let port_bind = instance.port_bind.unwrap_or(port_forward::PortBind::Local);
     instance.status = InstanceStatus::Running;
     instance.ip = Some(ip.clone());
+    instance.lan_ip = lan_ip.clone();
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
     if let Some(ref forwards) = forwards_snapshot {
         let metadata = metadata::load_metadata(&paths.metadata).await?;
         port_forward::ensure_ports_not_in_metadata(&metadata, Some(&vm_id), forwards)?;
-        port_forward::start_instance_proxies(&instance_dir, &ip, forwards)?;
+        port_forward::start_instance_proxies(&instance_dir, &ip, forwards, port_bind)?;
     }
 
     println!("VM démarrée: {vm_id}");
-    println!("  IP:       {ip}");
+    if let Some(ref lan) = lan_ip {
+        println!("  IP (lab): {ip}");
+        println!("  IP (LAN): {lan}");
+    } else {
+        println!("  IP:       {ip}");
+    }
     if let Some(ref forwards) = forwards_snapshot {
-        port_forward::print_forward_lines(forwards);
+        port_forward::print_forward_lines(forwards, port_bind);
     }
     println!("  SSH:      virtum shell {shell_ref}");
     Ok(())
+}
+
+fn resolve_instance_network_for_refresh(
+    instance_dir: &Path,
+    instance: &Instance,
+) -> Result<(Option<String>, Option<String>)> {
+    let xml_path = instance_dir.join("config.xml");
+    if xml_path.is_file() {
+        let xml = std::fs::read_to_string(&xml_path)
+            .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
+        let nics = libvirt::parse_nics_from_xml(&xml);
+        let lab_net = nics.iter().find_map(|nic| match nic {
+            VmNic::LibvirtNetwork { name } => Some(name.clone()),
+            VmNic::MacvtapBridge { .. } => None,
+        });
+        let bridge = nics.iter().find_map(|nic| match nic {
+            VmNic::MacvtapBridge { host_interface } => Some(host_interface.clone()),
+            VmNic::LibvirtNetwork { .. } => None,
+        });
+        if lab_net.is_some() || bridge.is_some() {
+            return Ok((lab_net, bridge));
+        }
+    }
+    let bridge = instance.bridge_host_interface.clone();
+    let lab_net = if bridge.is_none() || instance.lan_ip.is_some() {
+        lab_network::network_for_lab(instance.lab_name.as_deref()).ok()
+    } else {
+        None
+    };
+    Ok((lab_net, bridge))
+}
+
+fn network_attach_from_resume(
+    libvirt_network: Option<&str>,
+    bridge_iface: Option<&str>,
+) -> Result<NetworkAttach> {
+    if let (Some(lab), Some(iface)) = (libvirt_network, bridge_iface) {
+        return Ok(NetworkAttach::LabAndBridge {
+            lab_network: lab.to_string(),
+            host_interface: iface.to_string(),
+        });
+    }
+    if let Some(iface) = bridge_iface {
+        return Ok(NetworkAttach::MacvtapBridge {
+            host_interface: iface.to_string(),
+        });
+    }
+    let name = libvirt_network
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| libvirt::LIBVIRT_DEFAULT_NETWORK.to_string());
+    Ok(NetworkAttach::LibvirtNetwork { name })
 }
 
 pub fn stop_vm(reference: &str) -> Result<()> {
@@ -826,9 +1199,11 @@ mod tests {
 
     #[test]
     fn is_usable_ssh_ip_filters_loopback_and_slirp() {
-        assert!(is_usable_ssh_ip("192.168.122.45"));
-        assert!(!is_usable_ssh_ip("127.0.0.1"));
-        assert!(!is_usable_ssh_ip("10.0.2.15"));
+        assert!(is_usable_ssh_ip("192.168.122.45", false));
+        assert!(is_usable_ssh_ip("192.168.1.50", true));
+        assert!(!is_usable_ssh_ip("192.168.122.45", true));
+        assert!(!is_usable_ssh_ip("127.0.0.1", false));
+        assert!(!is_usable_ssh_ip("10.0.2.15", false));
     }
 
     #[test]

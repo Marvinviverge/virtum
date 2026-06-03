@@ -2,6 +2,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::process::Command;
 
+use crate::bridge_network;
 use crate::config;
 
 const KVM_DEVICE: &str = "/dev/kvm";
@@ -56,6 +57,7 @@ pub fn run() -> i32 {
         check_kvm(),
         check_groups(),
         check_libvirt_default_network(),
+        check_bridge_lan(),
         check_virtum_storage(&paths),
     ];
 
@@ -186,6 +188,50 @@ fn check_virtum_storage(paths: &config::VirtumPaths) -> CheckResult {
     }
 }
 
+fn check_bridge_lan() -> CheckResult {
+    const NAME: &str = "Réseau bridge (LAN physique)";
+    let cap = bridge_network::scan_bridge_capability();
+
+    if let Some(iface) = &cap.recommended_interface {
+        let route_hint = bridge_network::default_route_interface()
+            .map(|d| format!(" (route par défaut : {d})"))
+            .unwrap_or_default();
+        let mut detail = format!("Interface recommandée : {iface}{route_hint}");
+        if !cap.ethernet_interfaces.is_empty() {
+            detail.push_str(&format!(
+                " (Ethernet : {})",
+                cap.ethernet_interfaces.join(", ")
+            ));
+        }
+        for w in &cap.warnings {
+            detail.push_str(&format!(". {w}"));
+        }
+        return CheckResult {
+            name: NAME.to_string(),
+            ok: true,
+            detail,
+        };
+    }
+
+    let mut detail = cap.warnings.join(". ");
+    if detail.is_empty() {
+        detail = "Aucune interface Ethernet détectée. Branchez un câble ou définissez \
+                  `bridge_interface:` dans le Virtumfile. Le Wi‑Fi est souvent incompatible \
+                  avec le bridge libvirt vers le LAN."
+            .to_string();
+    }
+    detail.push_str(
+        " Vérifiez aussi les groupes libvirt/kvm et un pare-feu local si les collègues \
+          ne joignent pas la VM (étape 38+).",
+    );
+
+    CheckResult {
+        name: NAME.to_string(),
+        ok: false,
+        detail,
+    }
+}
+
 fn check_libvirt_default_network() -> CheckResult {
     const NAME: &str = "Réseau libvirt « default »";
     let output = match Command::new("virsh").args(["net-info", "default"]).output() {
@@ -264,7 +310,11 @@ fn print_report(results: &[CheckResult]) -> i32 {
 
     for result in results {
         if result.ok {
-            let _ = writeln!(stdout, "  [ok]   {}", result.name);
+            if result.detail.is_empty() {
+                let _ = writeln!(stdout, "  [ok]   {}", result.name);
+            } else {
+                let _ = writeln!(stdout, "  [ok]   {} — {}", result.name, result.detail);
+            }
         } else {
             let _ = writeln!(stdout, "  [FAIL] {} — {}", result.name, result.detail);
         }

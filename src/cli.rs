@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -30,8 +30,32 @@ pub enum Commands {
     },
     /// Launch a headless VM
     Run(RunArgs),
+    /// Apply Virtumfile changes to existing lab VMs (RAM, bind, ports, disk_size)
+    Apply {
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Preview lab deploy (create/resume, updates, warnings) without changes
+    Plan {
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
     /// Deploy all machines from a Virtumfile (default: ./Virtumfile)
     Up {
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Open host firewall (ufw) for `bind: lan` ports in a Virtumfile
+    Open {
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Remove Virtum-added ufw rules for a lab (`virtum open`)
+    Close {
         /// Path to Virtumfile
         #[arg(short, long)]
         file: Option<PathBuf>,
@@ -99,4 +123,22 @@ pub struct RunArgs {
     /// Virtual disk size for the root volume (e.g. `10G`, `20G`). Requires cloud-init grow on first boot if larger than the base image.
     #[arg(long)]
     pub disk_size: Option<String>,
+
+    /// Réseau pour la VM isolée : `default` (libvirt NAT 192.168.122.x) ou `bridge` (LAN physique, macvtap).
+    #[arg(long, value_enum, default_value_t = RunNetworkMode::Default)]
+    pub network: RunNetworkMode,
+
+    /// Interface hôte pour `--network bridge` (sinon route par défaut / `virtum doctor`).
+    #[arg(long)]
+    pub bridge_interface: Option<String>,
+}
+
+/// Réseau `virtum run` (hors Virtumfile).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum RunNetworkMode {
+    /// Réseau libvirt `default` (comportement v0.1/v0.2).
+    #[default]
+    Default,
+    /// Une NIC sur le LAN du bureau (nécessite Ethernet recommandé ; voir `virtum doctor`).
+    Bridge,
 }

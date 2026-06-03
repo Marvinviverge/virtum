@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-use crate::port_forward::PortForward;
+use crate::port_forward::{PortBind, PortForward};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,9 +44,18 @@ pub struct Instance {
     /// Clé machine dans le Virtumfile (`machines.web` → `web`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_name: Option<String>,
-    /// Redirections TCP 127.0.0.1:hôte → invité:port (Virtumfile `ports:`).
+    /// Interface hôte macvtap (`virtum run --network bridge` ou lab bridge / dual NIC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bridge_host_interface: Option<String>,
+    /// IP sur le LAN physique (dual NIC ou lab entièrement en `network: bridge`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_ip: Option<String>,
+    /// Redirections TCP hôte → invité (Virtumfile `ports:`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_forwards: Option<Vec<PortForward>>,
+    /// Écoute `local` (127.0.0.1) ou `lan` (0.0.0.0) pour les `ports:`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_bind: Option<PortBind>,
     pub created_at: String,
 }
 
@@ -270,6 +279,9 @@ mod tests {
             lab_name: None,
             machine_name: None,
             port_forwards: None,
+            port_bind: None,
+            bridge_host_interface: None,
+            lan_ip: None,
             created_at: "2026-06-02T10:00:00Z".to_string(),
         }
     }
