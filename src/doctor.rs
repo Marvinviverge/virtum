@@ -54,6 +54,8 @@ pub fn run() -> i32 {
             &["-V"],
             "Requis pour `ports:` dans le Virtumfile (ex. sudo apt install socat).",
         ),
+        check_virtiofsd(),
+        check_apparmor_virtiofs(),
         check_kvm(),
         check_groups(),
         check_libvirt_default_network(),
@@ -86,6 +88,93 @@ fn check_binary(name: &str, version_args: &[&str], install_hint: &str) -> CheckR
             ok: false,
             detail: format!("Impossible d'exécuter {name}: {e}"),
         },
+    }
+}
+
+fn check_virtiofsd() -> CheckResult {
+    const NAME: &str = "virtiofsd";
+    let Some(path) = crate::mounts::resolve_virtiofsd_path() else {
+        return CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: format!(
+                "{NAME} introuvable. Installez le paquet (sudo apt install virtiofsd). \
+                 Sur Debian/Ubuntu le binaire est souvent dans /usr/libexec/virtiofsd, \
+                 pas dans le PATH — Virtum le détecte automatiquement une fois installé."
+            ),
+        };
+    };
+    match Command::new(&path).arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let mut detail = String::new();
+            if !std::path::Path::new("/usr/bin/newuidmap").exists() {
+                detail = "Paquet uidmap absent : Virtum lance virtiofsd avec --sandbox=none."
+                    .to_string();
+            }
+            CheckResult {
+                name: format!("{NAME} ({})", path.display()),
+                ok: true,
+                detail,
+            }
+        }
+        Ok(_) => CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: format!(
+                "{} est présent ({}) mais `--version` a échoué.",
+                NAME,
+                path.display()
+            ),
+        },
+        Err(e) => CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: format!("Impossible d'exécuter {} : {e}", path.display()),
+        },
+    }
+}
+
+fn check_apparmor_virtiofs() -> CheckResult {
+    const NAME: &str = "AppArmor virtiofs (Virtum)";
+    if !config::uses_var_lib_storage() {
+        return CheckResult {
+            name: NAME.to_string(),
+            ok: true,
+            detail: "Stockage sous ~/.virtum — règle dédiée non requise.".to_string(),
+        };
+    }
+    let snippet =
+        std::path::Path::new("/etc/apparmor.d/abstractions/libvirt-qemu.d/virtum-virtiofs");
+    if !snippet.is_file() {
+        return CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: format!(
+                "Les sockets virtiofsd sous /var/lib/virtum sont bloqués par AppArmor \
+                 tant que la règle n'est pas installée :\n\
+                   sudo {}/scripts/setup-apparmor-virtiofs.sh",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+        };
+    }
+    let content = std::fs::read_to_string(snippet).unwrap_or_default();
+    if content.contains("/var/lib/virtum/instances") && content.contains("virtiofs-") {
+        CheckResult {
+            name: NAME.to_string(),
+            ok: true,
+            detail: snippet.display().to_string(),
+        }
+    } else {
+        CheckResult {
+            name: NAME.to_string(),
+            ok: false,
+            detail: format!(
+                "{} existe mais ne contient pas la règle Virtum attendue. \
+                 Réinstallez : sudo {}/scripts/setup-apparmor-virtiofs.sh",
+                snippet.display(),
+                env!("CARGO_MANIFEST_DIR")
+            ),
+        }
     }
 }
 

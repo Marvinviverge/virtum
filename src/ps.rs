@@ -171,6 +171,7 @@ mod tests {
             port_bind: None,
             bridge_host_interface: None,
             lan_ip: None,
+            mounts: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(format_ip(&inst), "127.0.0.1:22422");
@@ -201,6 +202,7 @@ mod tests {
             port_bind: None,
             bridge_host_interface: None,
             lan_ip: None,
+            mounts: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(super::resolve_disk_size(&inst, &paths), "20G");

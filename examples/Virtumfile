@@ -12,7 +12,7 @@ machines:
     cpu: 2
     disk_size: 20G
     ports:
-      - "18098:80"
+      - "18088:80"
     provision:
       - apt-get update
       - apt-get install -y nginx

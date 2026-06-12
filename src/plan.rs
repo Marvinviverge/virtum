@@ -55,7 +55,12 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    errors.extend(crate::lab_diff::collect_lab_blocking_errors(&lab));
+    errors.extend(crate::lab_diff::collect_lab_blocking_errors(
+        &lab,
+        &virtumfile_path,
+        &metadata,
+    ));
+    warnings.extend(crate::lab_diff::collect_mount_warnings(&lab, &metadata));
 
     let port_plan: Vec<(String, Vec<PortForward>)> = lab
         .machines
@@ -240,6 +245,12 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
         );
         if m.provision_steps > 0 {
             println!("      provision: {} commande(s)", m.provision_steps);
+        }
+        let mount_list = crate::mounts::format_mount_list(
+            &crate::virtumfile::effective_mount_specs(&lab, &m.name),
+        );
+        if mount_list != "-" {
+            println!("      mounts: {mount_list}");
         }
         for line in &m.updates {
             println!("      → {line}");

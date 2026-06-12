@@ -10,6 +10,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::port_forward::{PortBind, PortForward};
+use crate::virtumfile::MountSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -56,6 +57,9 @@ pub struct Instance {
     /// Écoute `local` (127.0.0.1) ou `lan` (0.0.0.0) pour les `ports:`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_bind: Option<PortBind>,
+    /// Volumes virtiofs actifs (chemins relatifs au Virtumfile).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mounts: Option<Vec<MountSpec>>,
     pub created_at: String,
 }
 
@@ -282,6 +286,7 @@ mod tests {
             port_bind: None,
             bridge_host_interface: None,
             lan_ip: None,
+            mounts: None,
             created_at: "2026-06-02T10:00:00Z".to_string(),
         }
     }

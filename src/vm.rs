@@ -21,10 +21,11 @@ use crate::lab_network;
 use crate::libvirt::{
     self, define_domain, define_or_replace_domain, destroy_domain, domain_exists, domain_is_active,
     domain_state, shutdown_domain, start_domain, undefine_domain, write_domain_xml, DomainSpec,
-    VmNic,
+    VirtiofsSpec, VmNic,
 };
 use crate::libvirt_access;
 use crate::metadata::{self, Instance, InstanceStatus};
+use crate::mounts::{self, ResolvedMount};
 use crate::port_forward::{self, PortForward};
 use crate::ssh::{ensure_ssh_keypair, read_public_key, run_provision_commands, ssh_auth_probe};
 
@@ -61,6 +62,8 @@ pub struct VmLaunchConfig {
     pub libvirt_network: Option<String>,
     /// Interface hôte macvtap (`virtum run --network bridge`).
     pub bridge_host_interface: Option<String>,
+    /// Volumes virtiofs résolus (lab `virtum up` uniquement en v0.4).
+    pub resolved_mounts: Vec<ResolvedMount>,
 }
 
 impl VmLaunchConfig {
@@ -79,6 +82,7 @@ impl VmLaunchConfig {
             port_bind: port_forward::PortBind::Local,
             libvirt_network: None,
             bridge_host_interface: None,
+            resolved_mounts: Vec::new(),
         }
     }
 
@@ -214,7 +218,18 @@ pub async fn launch_vm_inner(
         false
     };
 
-    write_user_data(instance_dir, &config.user, public_key, grow_root)?;
+    let mut resolved_mounts = config.resolved_mounts.clone();
+    if !resolved_mounts.is_empty() {
+        mounts::ensure_virtiofs_servers(instance_dir, &mut resolved_mounts)?;
+    }
+
+    write_user_data(
+        instance_dir,
+        &config.user,
+        public_key,
+        grow_root,
+        &resolved_mounts,
+    )?;
 
     let disk_size_label = if let Some(ref size_str) = config.disk_size {
         size_str.clone()
@@ -233,6 +248,9 @@ pub async fn launch_vm_inner(
         &disk_path,
         &iso_path,
     )?;
+    if !resolved_mounts.is_empty() {
+        libvirt_access::refresh_virtiofs_sockets_in_dir(instance_dir)?;
+    }
 
     if !config.port_forwards.is_empty() {
         port_forward::ensure_ports_available(&config.port_forwards, config.port_bind)?;
@@ -249,6 +267,7 @@ pub async fn launch_vm_inner(
         &disk_path,
         &iso_path,
         &network_attach,
+        &resolved_mounts,
     );
     let xml_path = write_domain_xml(instance_dir, &spec)?;
 
@@ -258,6 +277,12 @@ pub async fn launch_vm_inner(
              Vérifiez libvirt avec virtum doctor."
         )
     })?;
+
+    if !resolved_mounts.is_empty() {
+        mounts::ensure_virtiofs_servers(instance_dir, &mut resolved_mounts).with_context(|| {
+            "virtiofsd n'est plus joignable avant virsh start (socket orphelin ?)"
+        })?;
+    }
 
     start_domain(vm_id).with_context(|| {
         format!(
@@ -399,6 +424,11 @@ pub async fn launch_vm_inner(
         },
         bridge_host_interface: config.bridge_host_interface.clone(),
         lan_ip: lan_ip.clone(),
+        mounts: if resolved_mounts.is_empty() {
+            None
+        } else {
+            Some(mounts::mounts_to_instance_specs(&resolved_mounts))
+        },
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
     metadata::upsert_instance(&paths.metadata, instance).await?;
@@ -535,6 +565,7 @@ fn resolve_network_attach(config: &VmLaunchConfig) -> Result<NetworkAttach> {
     Ok(NetworkAttach::LibvirtNetwork { name })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_domain_spec<'a>(
     instance_dir: &Path,
     vm_id: &'a str,
@@ -543,6 +574,7 @@ fn build_domain_spec<'a>(
     disk_path: &'a Path,
     iso_path: &'a Path,
     attach: &NetworkAttach,
+    resolved_mounts: &[ResolvedMount],
 ) -> DomainSpec<'a> {
     let nics = match attach {
         NetworkAttach::LibvirtNetwork { name } => {
@@ -563,6 +595,13 @@ fn build_domain_spec<'a>(
             },
         ],
     };
+    let filesystems = resolved_mounts
+        .iter()
+        .map(|m| VirtiofsSpec {
+            tag: m.name.clone(),
+            socket_path: m.socket_path.clone(),
+        })
+        .collect();
     DomainSpec {
         vm_id,
         ram_mb,
@@ -571,6 +610,7 @@ fn build_domain_spec<'a>(
         iso_path,
         nics,
         nic_mac: libvirt::resolve_nic_mac(instance_dir, vm_id),
+        filesystems,
     }
 }
 
@@ -829,6 +869,17 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     let iso_path = instance_dir.join("cloud-init.iso");
     let (libvirt_network, bridge_iface) =
         resolve_instance_network_for_refresh(&instance_dir, &instance)?;
+    let mut mount_state = mounts::load_mounts_state(&instance_dir)?;
+    if mount_state.is_empty() {
+        if instance.mounts.as_ref().is_some_and(|m| !m.is_empty()) {
+            eprintln!(
+                "Avertissement: metadata contient des mounts mais mounts-state.json est absent. \
+                 Les partages virtiofs peuvent être incomplets."
+            );
+        }
+    } else if let Err(err) = mounts::ensure_virtiofs_servers(&instance_dir, &mut mount_state) {
+        eprintln!("Avertissement: virtiofsd : {err:#}");
+    }
     let xml_path = libvirt::refresh_domain_xml(
         &instance_dir,
         &vm_id,
@@ -1061,16 +1112,16 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn destroy_vm(reference: &str) -> Result<()> {
+pub fn destroy_vm(reference: &str, purge_mounts: bool) -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .context("Impossible de démarrer le runtime Tokio")?
-        .block_on(destroy_vm_async(reference))
+        .block_on(destroy_vm_async(reference, purge_mounts))
 }
 
-pub async fn destroy_vm_async(reference: &str) -> Result<()> {
+pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()> {
     let paths = config::ensure_layout().await?;
     let (vm_id, orphan) = resolve_destroy_target(&paths, reference).await?;
     let instance_dir = paths.instances.join(&vm_id);
@@ -1091,10 +1142,25 @@ pub async fn destroy_vm_async(reference: &str) -> Result<()> {
         eprintln!("Avertissement: le domaine libvirt '{vm_id}' est déjà absent.");
     }
 
+    let purge_dirs = if purge_mounts && instance_dir.is_dir() {
+        mounts::host_dirs_from_instance(&instance_dir)
+    } else {
+        Vec::new()
+    };
+
     if instance_dir.exists() {
+        mounts::teardown_virtiofs(&instance_dir);
         fs::remove_dir_all(&instance_dir)
             .await
             .with_context(|| format!("Impossible de supprimer {}", instance_dir.display()))?;
+    }
+
+    if purge_mounts && !purge_dirs.is_empty() {
+        let root = mounts::infer_mount_purge_root(&purge_dirs)?;
+        let n = mounts::purge_host_mount_dirs(&purge_dirs, &root)?;
+        if n == 0 {
+            eprintln!("Avertissement: --purge n'a supprimé aucun dossier (déjà absents).");
+        }
     }
 
     let metadata = metadata::load_metadata(&paths.metadata).await?;
@@ -1128,7 +1194,8 @@ async fn resolve_destroy_target(paths: &VirtumPaths, reference: &str) -> Result<
 
     bail!(
         "Instance '{reference}' introuvable. Utilisez `virtum ps -a` pour lister les VM (id ou name), \
-         ou `virtum destroy vm-…` si le domaine apparaît dans `virsh list --all`."
+         `virtum destroy vm-…` si un déploiement a échoué à mi-chemin, ou relancez `virtum up` \
+         (les répertoires orphelins sont nettoyés automatiquement)."
     );
 }
 
@@ -1164,6 +1231,7 @@ async fn wait_for_domain_inactive(vm_id: &str, timeout: Duration) -> bool {
 
 pub async fn cleanup_failed_run(vm_id: &str, instance_dir: &Path) {
     eprintln!("Nettoyage après échec de virtum run pour '{vm_id}'…");
+    mounts::teardown_virtiofs(instance_dir);
     port_forward::stop_instance_proxies(instance_dir);
     if let Err(err) = destroy_domain(vm_id) {
         eprintln!("  avertissement destroy: {err:#}");

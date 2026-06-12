@@ -23,5 +23,10 @@ if [[ -f "$LEGACY_IMAGE" && ! -f "$ROOT/images/debian-12.qcow2" ]]; then
   chmod 664 "$ROOT/images/debian-12.qcow2"
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -x "$SCRIPT_DIR/setup-apparmor-virtiofs.sh" ]]; then
+  "$SCRIPT_DIR/setup-apparmor-virtiofs.sh"
+fi
+
 echo "OK — Virtum utilisera $ROOT (préféré à ~/.virtum)."
 echo "Relancez : virtum doctor && virtum run --os debian-12"

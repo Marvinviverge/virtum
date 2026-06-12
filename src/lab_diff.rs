@@ -16,9 +16,10 @@ use crate::libvirt::{
     redefine_domain_resources, undefine_domain,
 };
 use crate::metadata::{self, Instance};
+use crate::mounts::{self, ResolvedMount};
 use crate::port_forward::{self, PortBind, PortForward};
 use crate::ssh::{ensure_ssh_keypair, run_provision_commands};
-use crate::virtumfile::{self, MachineSpec, Virtumfile};
+use crate::virtumfile::{self, MachineSpec, MountSpec, Virtumfile};
 use crate::vm::{self, lab_vm_id};
 
 const SSH_PORT: u16 = 22;
@@ -53,6 +54,10 @@ pub enum MachineChange {
         from: String,
         to: String,
     },
+    /// Nouveaux volumes virtiofs à ajouter (virtum apply).
+    MountsAdd {
+        volumes: Vec<MountSpec>,
+    },
 }
 
 impl MachineChange {
@@ -73,13 +78,20 @@ impl MachineChange {
                 format!("ports: {} → {}", format_ports(from), format_ports(to))
             }
             Self::Os { from, to } => format!("os: {from} → {to} (non applicable)"),
+            Self::MountsAdd { volumes } => {
+                format!(
+                    "mounts: +{} ({})",
+                    volumes.len(),
+                    mounts::format_mount_list(volumes)
+                )
+            }
         }
     }
 
     fn needs_guest_stop(&self) -> bool {
         matches!(
             self,
-            Self::Memory { .. } | Self::Cpu { .. } | Self::DiskSize { .. }
+            Self::Memory { .. } | Self::Cpu { .. } | Self::DiskSize { .. } | Self::MountsAdd { .. }
         )
     }
 
@@ -122,9 +134,45 @@ pub fn format_ports(forwards: &[PortForward]) -> String {
         .join(", ")
 }
 
-/// Erreurs bloquantes communes à `plan` et `apply` (réservé extensions futures).
-pub fn collect_lab_blocking_errors(_lab: &Virtumfile) -> Vec<String> {
-    Vec::new()
+/// Erreurs bloquantes communes à `plan` et `apply`.
+pub fn collect_lab_blocking_errors(
+    lab: &Virtumfile,
+    virtumfile_path: &Path,
+    metadata: &metadata::Metadata,
+) -> Vec<String> {
+    let dir = virtumfile::virtumfile_dir(virtumfile_path);
+    let mut errors = Vec::new();
+    for machine_name in lab.machines.keys() {
+        if let Err(e) = mounts::resolve_machine_mounts(lab, machine_name, &dir) {
+            errors.push(format!("Machine '{machine_name}' : {e:#}"));
+        }
+        if let Some(inst) = metadata::find_by_lab_machine(metadata, &lab.name, machine_name) {
+            let stored = inst.mounts.clone().unwrap_or_default();
+            let desired = virtumfile::effective_mount_specs(lab, machine_name);
+            for msg in mounts::mounts_changed_blocking(&stored, &desired) {
+                errors.push(format!("Machine '{machine_name}' : {msg}"));
+            }
+        }
+    }
+    errors
+}
+
+/// Avertissements mounts retirés du Virtumfile mais encore actifs en metadata.
+pub fn collect_mount_warnings(lab: &Virtumfile, metadata: &metadata::Metadata) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for machine_name in lab.machines.keys() {
+        let Some(inst) = metadata::find_by_lab_machine(metadata, &lab.name, machine_name) else {
+            continue;
+        };
+        let stored = inst.mounts.clone().unwrap_or_default();
+        let desired = virtumfile::effective_mount_specs(lab, machine_name);
+        for name in mounts::mounts_removed_from_file(&stored, &desired) {
+            warnings.push(format!(
+                "Machine '{machine_name}' : volume mount '{name}' retiré du Virtumfile mais toujours actif sur la VM (destroy pour retirer)."
+            ));
+        }
+    }
+    warnings
 }
 
 pub fn diff_machine(
@@ -200,6 +248,16 @@ pub fn diff_machine(
         });
     }
 
+    let desired_mounts = virtumfile::effective_mount_specs(lab, machine_name);
+    let stored_mounts = instance.mounts.clone().unwrap_or_default();
+    let additions: Vec<MountSpec> = mounts::mounts_to_add(&desired_mounts, &stored_mounts)
+        .into_iter()
+        .cloned()
+        .collect();
+    if !additions.is_empty() {
+        changes.push(MachineChange::MountsAdd { volumes: additions });
+    }
+
     Ok(MachineDiff {
         machine_name: machine_name.to_string(),
         vm_id,
@@ -218,7 +276,7 @@ fn disk_size_differs(disk_path: &Path, desired: &DiskSize) -> Result<bool> {
 pub async fn build_lab_diff(virtumfile_path: PathBuf, lab: Virtumfile) -> Result<LabDiff> {
     let paths = crate::config::ensure_layout().await?;
     let metadata = metadata::load_metadata(&paths.metadata).await?;
-    let mut blocking_errors = collect_lab_blocking_errors(&lab);
+    let mut blocking_errors = collect_lab_blocking_errors(&lab, &virtumfile_path, &metadata);
     let mut creates = Vec::new();
     let mut machine_diffs = Vec::new();
 
@@ -320,7 +378,16 @@ pub async fn apply_lab(file: Option<PathBuf>) -> Result<()> {
         }
 
         let spec = &lab.machines[&md.machine_name];
-        apply_machine(&paths, &lab, &lab.name, lab_net.as_deref(), spec, md).await?;
+        apply_machine(
+            &paths,
+            &lab,
+            &lab.name,
+            lab_net.as_deref(),
+            spec,
+            md,
+            &virtumfile_path,
+        )
+        .await?;
 
         if md.changes.iter().any(|c| {
             matches!(
@@ -354,6 +421,7 @@ async fn apply_machine(
     lab_net: Option<&str>,
     spec: &MachineSpec,
     md: &MachineDiff,
+    virtumfile_path: &Path,
 ) -> Result<()> {
     let metadata = metadata::load_metadata(&paths.metadata).await?;
     let instance = metadata::find_by_lab_machine(&metadata, lab_name, &md.machine_name)
@@ -379,6 +447,7 @@ async fn apply_machine(
 
     let mut grow_guest = false;
     let mut new_disk_label: Option<String> = None;
+    let mut mounts_added_ssh: Vec<ResolvedMount> = Vec::new();
 
     for change in &md.changes {
         match change {
@@ -394,6 +463,11 @@ async fn apply_machine(
                 new_disk_label = Some(to_label.clone());
             }
             MachineChange::PortBind { .. } | MachineChange::PortForwards { .. } => {}
+            MachineChange::MountsAdd { volumes } => {
+                mounts_added_ssh =
+                    apply_mounts_add(paths, lab, lab_net, spec, md, volumes, virtumfile_path)
+                        .await?;
+            }
             MachineChange::Os { .. } => unreachable!(),
         }
     }
@@ -440,6 +514,12 @@ async fn apply_machine(
     } else if spec.disk_size.is_some() {
         updated.disk_size = spec.disk_size.clone();
     }
+    let desired_mounts = virtumfile::effective_mount_specs(lab, &md.machine_name);
+    updated.mounts = if desired_mounts.is_empty() {
+        None
+    } else {
+        Some(desired_mounts)
+    };
     metadata::upsert_instance(&paths.metadata, updated).await?;
 
     if was_running && needs_stop {
@@ -498,7 +578,80 @@ async fn apply_machine(
         }
     }
 
+    if !mounts_added_ssh.is_empty() {
+        let meta = metadata::load_metadata(&paths.metadata).await?;
+        let inst = metadata::find_by_lab_machine(&meta, lab_name, &md.machine_name)
+            .context("metadata pour mounts SSH")?;
+        if let Some(ref ip) = inst.ip {
+            if domain_exists(vm_id)
+                && domain_state(vm_id)
+                    .map(|s| domain_is_active(&s))
+                    .unwrap_or(false)
+            {
+                let keys = ensure_ssh_keypair(&paths.keys)?;
+                eprintln!(
+                    "  Montage virtiofs dans la VM ({} volume(s))…",
+                    mounts_added_ssh.len()
+                );
+                let cmds: Vec<String> = mounts::ssh_mount_commands(&mounts_added_ssh);
+                run_provision_commands(
+                    &keys.private_key,
+                    &inst.user,
+                    ip,
+                    SSH_PORT,
+                    &cmds,
+                    std::time::Duration::from_secs(120),
+                )?;
+            }
+        }
+    }
+
     Ok(())
+}
+
+async fn apply_mounts_add(
+    paths: &VirtumPaths,
+    lab: &Virtumfile,
+    lab_net: Option<&str>,
+    spec: &MachineSpec,
+    md: &MachineDiff,
+    additions: &[MountSpec],
+    virtumfile_path: &Path,
+) -> Result<Vec<ResolvedMount>> {
+    let vf_dir = virtumfile::virtumfile_dir(virtumfile_path);
+    let instance_dir = paths.instances.join(&md.vm_id);
+    let vm_id = &md.vm_id;
+
+    let mut state = mounts::load_mounts_state(&instance_dir)?;
+    let mut newly_added = Vec::new();
+    for add in additions {
+        if state.iter().any(|m| m.name == add.name) {
+            continue;
+        }
+        let mut resolved = mounts::resolve_mount_spec(add, &vf_dir)?;
+        resolved.socket_path = mounts::socket_path_for(&instance_dir, &resolved.name);
+        newly_added.push(resolved.clone());
+        state.push(resolved);
+    }
+    if newly_added.is_empty() {
+        return Ok(Vec::new());
+    }
+    mounts::ensure_virtiofs_servers(&instance_dir, &mut state)?;
+
+    let net_cfg = virtumfile::resolve_machine_network(lab, &md.machine_name, lab_net)?;
+    redefine_domain_resources(
+        &instance_dir,
+        vm_id,
+        spec.ram,
+        spec.cpu,
+        net_cfg.libvirt_network.as_deref(),
+        net_cfg.bridge_host_interface.as_deref(),
+    )?;
+    eprintln!(
+        "  Domaine '{vm_id}' redéfini ({} nouveau(x) mount(s) virtiofs).",
+        newly_added.len()
+    );
+    Ok(newly_added)
 }
 
 #[cfg(test)]
@@ -524,6 +677,7 @@ mod tests {
             network: None,
             bridge_interface: None,
             bind: Some(PortBind::Lan),
+            mounts: None,
             machines: BTreeMap::from([(
                 "db".into(),
                 MachineSpec {
@@ -536,6 +690,7 @@ mod tests {
                     ports: vec![],
                     bind: None,
                     provision: vec![],
+                    mounts: None,
                 },
             )]),
         };
@@ -555,6 +710,7 @@ mod tests {
             lan_ip: None,
             port_forwards: None,
             port_bind: Some(PortBind::Local),
+            mounts: None,
             created_at: "2020-01-01T00:00:00Z".into(),
         };
         let dir = std::env::temp_dir().join(format!("virtum-diff-bind-{}", std::process::id()));
@@ -578,6 +734,7 @@ mod tests {
             network: None,
             bridge_interface: None,
             bind: Some(PortBind::Lan),
+            mounts: None,
             machines: BTreeMap::from([(
                 "web".into(),
                 MachineSpec {
@@ -590,6 +747,7 @@ mod tests {
                     ports: vec!["18080:80".into()],
                     bind: None,
                     provision: vec![],
+                    mounts: None,
                 },
             )]),
         };
@@ -612,6 +770,7 @@ mod tests {
                 guest_port: 80,
             }]),
             port_bind: Some(PortBind::Local),
+            mounts: None,
             created_at: "2020-01-01T00:00:00Z".into(),
         };
         let dir = std::env::temp_dir().join(format!("virtum-diff-bind2-{}", std::process::id()));

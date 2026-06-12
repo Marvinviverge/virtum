@@ -10,7 +10,11 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.2 terminé (lab-as-code)** — Virtumfile, `virtum up` / `down`, `pull`, `disk-size`, ports (`socat`), provision, réseau isolé **`virtum-lab-<name>`** : [`STEPS2.md`](./STEPS2.md), [`SPEC_TECH_V0.2.md`](./SPEC_TECH_V0.2.md). Exemple : [`examples/Virtumfile`](./examples/Virtumfile).
 
-**v0.3 terminé** — `bind: lan`, `virtum open` / `close`, `virtum plan` / `apply`, `virtum run --network bridge`, lab **`network: bridge`** et **hybride** (dual NIC), `virtum ps` (IP + LAN) : [`STEPS3.md`](./STEPS3.md) §8, [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md). Validation de référence : `make smoke-lab`.
+**v0.3 terminé** — `bind: lan`, `virtum open` / `close`, `virtum plan` / `apply`, `virtum run --network bridge`, lab **`network: bridge`** et **hybride** (dual NIC), `virtum ps` (IP + LAN) : [`STEPS3.md`](./STEPS3.md) §8, [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md). Validation : `make smoke-lab`.
+
+**v0.4 terminé** — `mounts:` dossiers partagés hôte ↔ VM (**virtiofs**) : [`STEPS4.md`](./STEPS4.md) §7, [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md). Exemple : [`examples/Virtumfile.mounts`](./examples/Virtumfile.mounts).
+
+**v0.5 (à définir)** — prochaine phase via Spec Kit.
 
 ## Documentation
 
@@ -22,8 +26,10 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`STEPS.md`](./STEPS.md) | Plan d’implémentation **v0.1** (terminé) |
 | [`STEPS2.md`](./STEPS2.md) | Plan d’implémentation **v0.2** |
 | [`SPEC_TECH_V0.2.md`](./SPEC_TECH_V0.2.md) | Contrat technique **v0.2** (lab, réseau, ports) |
-| [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md) | Contrat technique **v0.3** (bridge run, `bind: lan`, plan, pare-feu) |
-| [`STEPS3.md`](./STEPS3.md) | Plan d’implémentation **v0.3** |
+| [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md) | Contrat technique **v0.3** (bridge, `bind: lan`, plan, pare-feu) |
+| [`STEPS3.md`](./STEPS3.md) | Plan d’implémentation **v0.3** (terminé) |
+| [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md) | Contrat technique **v0.4** (`mounts:`, virtiofs) |
+| [`STEPS4.md`](./STEPS4.md) | Plan d’implémentation **v0.4** (terminé) |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 
@@ -120,6 +126,8 @@ virtum open -f examples/Virtumfile # sudo ufw allow (ports bind: lan)
 virtum close -f examples/Virtumfile  # retire les règles ouvertes par virtum open
 virtum down                  # arrête toutes les VM du lab (Virtumfile `name`)
 virtum down --destroy        # supprime le lab
+virtum up -f examples/Virtumfile.mounts   # lab v0.4 avec mounts virtiofs
+virtum down -f examples/Virtumfile.mounts --destroy --purge  # + dossiers hôte mounts
 virtum ps          # VM en cours (NAME, LAB, DISK, IP, …)
 virtum ps -a       # toutes les VM connues (y compris arrêtées)
 virtum shell <vm-id>
@@ -222,6 +230,20 @@ VIRTUM_BRIDGE_SMOKE=1 make smoke-lab-bridge   # hybride (Ethernet recommandé)
 ```
 
 Parcours hybride manuel (STEPS3 §7) : `virtum up -f examples/Virtumfile.bridge-mixed` → `virtum ps` (IP + LAN) → `virtum shell web` → `ping <IP-db>`.
+
+### Mounts v0.4 (clôture)
+
+Validation manuelle du partage hôte ↔ VM :
+
+```bash
+virtum doctor
+virtum plan -f examples/Virtumfile.mounts
+virtum up -f examples/Virtumfile.mounts
+virtum shell web    # ls ~/app ; echo test > ~/app/foo  → visible dans examples/backend/
+virtum down -f examples/Virtumfile.mounts --destroy --purge
+```
+
+Voir [`STEPS4.md`](./STEPS4.md) §7 et [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md).
 
 ## Licence
 

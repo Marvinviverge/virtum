@@ -1,7 +1,7 @@
 //! Permissions pour que QEMU système (`libvirt-qemu`) lise les disques Virtum.
 
 use std::fs::{self, Permissions};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -10,6 +10,8 @@ use crate::command::{path_arg, run_command};
 use crate::config::{self, VirtumPaths};
 
 pub const LIBVIRT_GROUP: &str = "libvirt";
+/// Groupe partagé par l'utilisateur Virtum et `libvirt-qemu` (sockets virtiofs).
+pub const KVM_GROUP: &str = "kvm";
 const LIBVIRT_QEMU_USER: &str = "libvirt-qemu";
 
 /// Prépare arborescence + disques avant `virsh start` (réseau `default`, QEMU système).
@@ -31,9 +33,15 @@ pub fn prepare_storage_for_system_qemu(
 pub fn permission_denied_hint(paths: &VirtumPaths) -> String {
     if config::uses_var_lib_storage() {
         return format!(
-            "QEMU système ne peut pas lire les fichiers sous {}.\n\
-             Vérifiez : sudo chown -R \"$USER:libvirt\" {}\n\
-             Puis relancez virtum run.",
+            "QEMU système (libvirt-qemu) ne peut pas accéder aux fichiers ou sockets virtiofs sous {}.\n\
+             Sur Ubuntu/Debian, AppArmor bloque souvent les sockets virtiofsd externes :\n\
+               sudo {}/scripts/setup-apparmor-virtiofs.sh\n\
+             Puis vérifiez les groupes libvirt et kvm (virtum doctor). Si besoin :\n\
+               sudo chown -R \"$USER:libvirt\" {}\n\
+               sudo chgrp -R kvm {}/instances\n\
+             Relancez ensuite virtum up.",
+            paths.root.display(),
+            env!("CARGO_MANIFEST_DIR"),
             paths.root.display(),
             paths.root.display()
         );
@@ -57,11 +65,33 @@ fn prepare_var_lib_storage(
     disk_path: &Path,
     iso_path: &Path,
 ) -> Result<()> {
-    for dir in [&paths.root, &paths.images, &paths.instances, instance_dir] {
+    for dir in [&paths.root, &paths.images, &paths.instances] {
         set_libvirt_group_readable(dir, true)?;
     }
     for file in [base_image, disk_path, iso_path] {
         set_libvirt_group_readable(file, false)?;
+    }
+    // Ne pas passer instance_dir en groupe « libvirt » : libvirt-qemu n'y est pas.
+    if config::uses_var_lib_storage() {
+        ensure_qemu_can_traverse(&paths.root)?;
+        ensure_qemu_can_traverse(&paths.instances)?;
+    }
+    prepare_instance_dir_for_virtiofs(instance_dir)?;
+    refresh_virtiofs_sockets_in_dir(instance_dir)?;
+    Ok(())
+}
+
+/// Réapplique kvm + ACL sur les sockets après d'autres chmod/chgrp.
+pub fn refresh_virtiofs_sockets_in_dir(instance_dir: &Path) -> Result<()> {
+    prepare_instance_dir_for_virtiofs(instance_dir)?;
+    let Ok(entries) = std::fs::read_dir(instance_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path_is_socket(&path) {
+            prepare_virtiofs_socket(&path)?;
+        }
     }
     Ok(())
 }
@@ -121,10 +151,14 @@ fn prepare_data_file_for_qemu(path: &Path) -> Result<()> {
     }
 
     let _ = grant_qemu_acl(path, false);
-    set_libvirt_group_readable(path, false)
+    set_group_access(path, LIBVIRT_GROUP, false, false)
 }
 
 fn set_libvirt_group_readable(path: &Path, is_dir: bool) -> Result<()> {
+    set_group_access(path, LIBVIRT_GROUP, is_dir, false)
+}
+
+fn set_group_access(path: &Path, group: &str, is_dir: bool, is_socket: bool) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
     let meta = fs::metadata(path)
@@ -135,15 +169,21 @@ fn set_libvirt_group_readable(path: &Path, is_dir: bool) -> Result<()> {
         return Ok(());
     }
 
-    run_command("chgrp", &[LIBVIRT_GROUP, path_arg(path)?]).with_context(|| {
+    run_command("chgrp", &[group, path_arg(path)?]).with_context(|| {
         format!(
-            "chgrp {LIBVIRT_GROUP} a échoué sur {}. \
-             Ajoutez-vous au groupe libvirt (virtum doctor).",
+            "chgrp {group} a échoué sur {}. \
+             Ajoutez-vous aux groupes libvirt et kvm (virtum doctor).",
             path.display()
         )
     })?;
 
-    let mode = if is_dir { 0o775 } else { 0o664 };
+    let mode = if is_dir {
+        0o775
+    } else if is_socket {
+        0o660
+    } else {
+        0o664
+    };
     let mut perms = meta.permissions();
     perms.set_mode(mode);
     fs::set_permissions(path, perms)
@@ -160,7 +200,36 @@ fn grant_qemu_acl(path: &Path, is_dir: bool) -> Result<()> {
     } else {
         format!("u:{LIBVIRT_QEMU_USER}:r")
     };
-    run_command("setfacl", &["-m", &spec, path_arg(path)?]).map(|_| ())
+    run_command("setfacl", &["-m", &spec, path_arg(path)?]).with_context(|| {
+        format!(
+            "setfacl {spec} a échoué sur {}. \
+             libvirt-qemu doit traverser ce chemin pour virtiofs.",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// ACL lecture+écriture sur un socket vhost-user (connexion QEMU).
+fn grant_qemu_socket_acl(path: &Path) -> Result<()> {
+    if !setfacl_available() {
+        return Ok(());
+    }
+    let spec = format!("u:{LIBVIRT_QEMU_USER}:rw");
+    run_command("setfacl", &["-m", &spec, path_arg(path)?]).with_context(|| {
+        format!(
+            "setfacl {spec} a échoué sur {}. \
+             QEMU (libvirt-qemu) ne pourra pas se connecter au socket virtiofs.",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// libvirt-qemu n'est pas dans le groupe « libvirt » : traversée + ACL sur les répertoires.
+fn ensure_qemu_can_traverse(dir: &Path) -> Result<()> {
+    ensure_others_traverse(dir)?;
+    grant_qemu_acl(dir, true)
 }
 
 fn set_default_qemu_acl(dir: &Path) -> Result<()> {
@@ -195,6 +264,42 @@ fn ensure_others_traverse(dir: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Répertoire instance avant virtiofsd : QEMU système doit atteindre les sockets.
+pub fn prepare_instance_dir_for_virtiofs(instance_dir: &Path) -> Result<()> {
+    if config::uses_var_lib_storage() {
+        // libvirt-qemu n'est pas dans le groupe « libvirt », seulement « kvm ».
+        if let Some(instances) = instance_dir.parent() {
+            ensure_qemu_can_traverse(instances)?;
+            if let Some(root) = instances.parent() {
+                ensure_qemu_can_traverse(root)?;
+            }
+        }
+        set_group_access(instance_dir, KVM_GROUP, true, false)?;
+        ensure_qemu_can_traverse(instance_dir)?;
+        return Ok(());
+    }
+    if instance_dir.is_dir() {
+        ensure_others_traverse(instance_dir)?;
+        let _ = grant_qemu_acl(instance_dir, true);
+    }
+    Ok(())
+}
+
+/// Socket vhost-user (0660, groupe kvm + ACL libvirt-qemu).
+pub fn prepare_virtiofs_socket(socket_path: &Path) -> Result<()> {
+    if !path_is_socket(socket_path) {
+        return Ok(());
+    }
+    set_group_access(socket_path, KVM_GROUP, false, true)?;
+    grant_qemu_socket_acl(socket_path)
+}
+
+fn path_is_socket(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
 }
 
 /// Image de base (après téléchargement).

@@ -28,6 +28,13 @@ pub enum VmNic {
     MacvtapBridge { host_interface: String },
 }
 
+/// Partage virtiofs (socket virtiofsd + tag invité).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtiofsSpec {
+    pub tag: String,
+    pub socket_path: PathBuf,
+}
+
 pub struct DomainSpec<'a> {
     pub vm_id: &'a str,
     pub ram_mb: u32,
@@ -37,6 +44,7 @@ pub struct DomainSpec<'a> {
     pub nics: Vec<VmNic>,
     /// MAC de la première NIC (évite changement d'IP DHCP après `undefine`/`define`).
     pub nic_mac: Option<String>,
+    pub filesystems: Vec<VirtiofsSpec>,
 }
 
 impl<'a> DomainSpec<'a> {
@@ -59,8 +67,22 @@ impl<'a> DomainSpec<'a> {
                 name: network.to_string(),
             }],
             nic_mac: None,
+            filesystems: Vec::new(),
         }
     }
+}
+
+fn render_filesystem_xml(fs: &VirtiofsSpec) -> Result<String> {
+    let socket = absolute_path(&fs.socket_path)?;
+    Ok(format!(
+        r#"    <filesystem type='mount' accessmode='mapped'>
+      <driver type='virtiofs' queue='1024'/>
+      <source socket='{}'/>
+      <target dir='{}'/>
+    </filesystem>"#,
+        xml_escape(&socket),
+        xml_escape(&fs.tag)
+    ))
 }
 
 fn render_interface_xml(nic: &VmNic, mac: Option<&str>) -> String {
@@ -103,12 +125,35 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let filesystems: String = spec
+        .filesystems
+        .iter()
+        .map(render_filesystem_xml)
+        .collect::<Result<Vec<_>>>()?
+        .join("\n");
+    let fs_block = if filesystems.is_empty() {
+        String::new()
+    } else {
+        format!("{filesystems}\n")
+    };
+    // virtiofs exige de la RAM partagée hôte↔invité (libvirt/QEMU).
+    let (memory_backing, seclabel) = if spec.filesystems.is_empty() {
+        (String::new(), String::new())
+    } else {
+        // Les profils AppArmor dynamiques de libvirt listent disque/ISO mais pas le socket
+        // virtiofsd ; sans cela QEMU obtient « Permission denied » sur le chardev socket.
+        (
+            "  <memoryBacking>\n    <source type='memfd'/>\n    <access mode='shared'/>\n  </memoryBacking>\n"
+                .to_string(),
+            "  <seclabel type='none' model='none'/>\n".to_string(),
+        )
+    };
     Ok(format!(
         r#"<domain type='kvm'>
   <name>{name}</name>
   <memory unit='MiB'>{ram}</memory>
   <vcpu>{vcpus}</vcpu>
-  <os>
+{seclabel}{memory_backing}  <os>
     <type arch='x86_64' machine='{machine}'>hvm</type>
     <boot dev='hd'/>
   </os>
@@ -134,6 +179,7 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
       <readonly/>
     </disk>
 {interfaces}
+{filesystems}
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
@@ -149,11 +195,71 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
         name = xml_escape(spec.vm_id),
         ram = spec.ram_mb,
         vcpus = spec.vcpus,
+        seclabel = seclabel,
+        memory_backing = memory_backing,
         machine = QEMU_MACHINE,
         disk = xml_escape(&disk),
         iso = xml_escape(&iso),
         interfaces = interfaces,
+        filesystems = fs_block,
     ))
+}
+
+/// Lit les entrées virtiofs depuis un XML de domaine.
+pub fn parse_filesystems_from_xml(xml: &str) -> Vec<VirtiofsSpec> {
+    let mut out = Vec::new();
+    let mut in_fs = false;
+    let mut tag = None;
+    let mut socket = None;
+    for line in xml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("<filesystem ") {
+            in_fs = true;
+            tag = None;
+            socket = None;
+            continue;
+        }
+        if in_fs {
+            if trimmed.starts_with("<target ") {
+                tag = xml_attribute_value(trimmed, "dir");
+            }
+            if trimmed.starts_with("<source ") {
+                socket = xml_attribute_value(trimmed, "socket");
+            }
+            if trimmed == "</filesystem>" {
+                if let (Some(tag), Some(socket)) = (tag.take(), socket.take()) {
+                    out.push(VirtiofsSpec {
+                        tag,
+                        socket_path: PathBuf::from(socket),
+                    });
+                }
+                in_fs = false;
+            }
+        }
+    }
+    out
+}
+
+fn filesystems_for_instance(instance_dir: &Path) -> Result<Vec<VirtiofsSpec>> {
+    let mounts = crate::mounts::load_mounts_state(instance_dir)?;
+    if !mounts.is_empty() {
+        return Ok(mounts
+            .iter()
+            .map(|m| VirtiofsSpec {
+                tag: m.name.clone(),
+                socket_path: m.socket_path.clone(),
+            })
+            .collect());
+    }
+    let xml_path = instance_dir.join("config.xml");
+    if xml_path.is_file() {
+        let content = std::fs::read_to_string(&xml_path)?;
+        let parsed = parse_filesystems_from_xml(&content);
+        if !parsed.is_empty() {
+            return Ok(parsed);
+        }
+    }
+    Ok(Vec::new())
 }
 
 /// Lit `<mac address='…'/>` depuis un XML de domaine.
@@ -352,6 +458,7 @@ pub fn refresh_domain_xml(
 
     let nics = nics_from_refresh_args(libvirt_network, bridge_host_interface, &xml_path)?;
     let nic_mac = resolve_nic_mac(instance_dir, vm_id);
+    let filesystems = filesystems_for_instance(instance_dir)?;
     let spec = DomainSpec {
         vm_id,
         ram_mb,
@@ -360,6 +467,7 @@ pub fn refresh_domain_xml(
         iso_path: &iso_path,
         nics,
         nic_mac,
+        filesystems,
     };
     write_domain_xml(instance_dir, &spec)
 }
@@ -454,6 +562,7 @@ pub fn refresh_domain_xml_with_resources(
 
     let nics = nics_from_refresh_args(libvirt_network, bridge_host_interface, &xml_path)?;
     let nic_mac = resolve_nic_mac(instance_dir, vm_id);
+    let filesystems = filesystems_for_instance(instance_dir)?;
     let spec = DomainSpec {
         vm_id,
         ram_mb,
@@ -462,6 +571,7 @@ pub fn refresh_domain_xml_with_resources(
         iso_path: &iso_path,
         nics,
         nic_mac,
+        filesystems,
     };
     write_domain_xml(instance_dir, &spec)
 }
@@ -892,6 +1002,7 @@ mod tests {
                 name: "virtum-lab-x".into(),
             }],
             nic_mac: Some("52:54:00:ab:cd:ef".into()),
+            filesystems: Vec::new(),
         };
         let xml = generate_domain_xml(&spec).unwrap();
         assert!(xml.contains("52:54:00:ab:cd:ef"));
@@ -967,6 +1078,7 @@ mod tests {
                 },
             ],
             nic_mac: Some("52:54:00:ab:cd:ef".into()),
+            filesystems: Vec::new(),
         };
         let xml = generate_domain_xml(&spec).unwrap();
         assert!(xml.contains("network='virtum-lab-demo'"));
@@ -991,6 +1103,7 @@ mod tests {
                 host_interface: "enp3s0".to_string(),
             }],
             nic_mac: None,
+            filesystems: Vec::new(),
         };
         let xml = generate_domain_xml(&spec).unwrap();
         assert!(xml.contains("type='direct'"));
@@ -1008,5 +1121,38 @@ mod tests {
 
         let _ = std::fs::remove_file(disk);
         let _ = std::fs::remove_file(iso);
+    }
+
+    #[test]
+    fn generate_xml_virtiofs_includes_shared_memory_backing() {
+        let dir = std::env::temp_dir().join(format!("virtum-fs-xml-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let disk = dir.join("disk.qcow2");
+        let iso = dir.join("cloud-init.iso");
+        let sock = dir.join("virtiofs-app.sock");
+        std::fs::write(&disk, b"").unwrap();
+        std::fs::write(&iso, b"").unwrap();
+        std::fs::write(&sock, b"").unwrap();
+        let spec = DomainSpec {
+            vm_id: "vm-fs",
+            ram_mb: 1024,
+            vcpus: 1,
+            disk_path: &disk,
+            iso_path: &iso,
+            nics: vec![VmNic::LibvirtNetwork {
+                name: "default".into(),
+            }],
+            nic_mac: None,
+            filesystems: vec![VirtiofsSpec {
+                tag: "app".into(),
+                socket_path: sock,
+            }],
+        };
+        let xml = generate_domain_xml(&spec).unwrap();
+        assert!(xml.contains("type='virtiofs'"));
+        assert!(xml.contains("<access mode='shared'/>"));
+        assert!(xml.contains("<source type='memfd'/>"));
+        assert!(xml.contains("seclabel type='none'"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

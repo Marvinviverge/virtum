@@ -68,6 +68,9 @@ pub enum Commands {
         /// Remove VMs and instance data (like destroy), not only shut off
         #[arg(long)]
         destroy: bool,
+        /// With `--destroy`: also delete host directories declared in `mounts:` (under the Virtumfile)
+        #[arg(long)]
+        purge: bool,
     },
     /// Open an SSH session to a running VM
     Shell {
@@ -91,6 +94,9 @@ pub enum Commands {
         /// VM id or name
         #[arg(value_name = "VM", num_args = 1..)]
         vms: Vec<String>,
+        /// Also delete host `mounts:` directories for the destroyed VM(s)
+        #[arg(long)]
+        purge: bool,
     },
 }
 

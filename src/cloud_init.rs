@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::command::{path_arg, run_command};
+use crate::mounts::ResolvedMount;
 
 /// `/etc/profile.d` : PATH incluant `/usr/sbin` (nginx, ip, etc.) pour les shells interactifs.
 const PATH_PROFILE_SNIPPET: &str = r#"
@@ -24,11 +25,31 @@ write_files:
 /// Si `grow_root` est vrai, cloud-init agrandit la partition racine au premier boot.
 /// Les commandes `provision` ne sont pas injectées ici : exécutées via SSH après
 /// que la VM accepte les connexions (voir `ssh::run_provision_commands`).
+fn mount_runcmd_block(mounts: &[ResolvedMount]) -> String {
+    if mounts.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    for m in mounts {
+        lines.push(format!("  - [ mkdir, -p, {} ]", m.guest_path));
+        lines.push(format!(
+            "  - [ mount, -t, virtiofs, {}, {} ]",
+            m.name, m.guest_path
+        ));
+        lines.push(format!(
+            "  - [ chown, -R, virtum:virtum, {} ]",
+            m.guest_path
+        ));
+    }
+    format!("runcmd:\n{}\n", lines.join("\n"))
+}
+
 pub fn write_user_data(
     instance_dir: &Path,
     user: &str,
     public_key: &str,
     grow_root: bool,
+    mounts: &[ResolvedMount],
 ) -> Result<PathBuf> {
     let path = instance_dir.join("user-data");
     let grow_block = if grow_root {
@@ -41,10 +62,11 @@ resize_rootfs: true
     } else {
         ""
     };
+    let mount_block = mount_runcmd_block(mounts);
     let (package_block, runcmd_block) = if grow_root {
-        // Pas de runcmd/apt au boot : growpart d'abord, guest-agent + provision après SSH.
-        (String::new(), String::new())
-    } else {
+        // Pas de runcmd/apt au boot : growpart d'abord ; mounts via runcmd dédié si présents.
+        (String::new(), mount_block)
+    } else if mounts.is_empty() {
         (
             r"package_update: true
 packages:
@@ -52,6 +74,21 @@ packages:
 "
             .to_string(),
             "runcmd:\n  - [ systemctl, enable, --now, qemu-guest-agent ]\n".to_string(),
+        )
+    } else {
+        let mut runcmd =
+            String::from("runcmd:\n  - [ systemctl, enable, --now, qemu-guest-agent ]\n");
+        for line in mount_block.lines().skip(1) {
+            runcmd.push_str(line);
+            runcmd.push('\n');
+        }
+        (
+            r"package_update: true
+packages:
+  - qemu-guest-agent
+"
+            .to_string(),
+            runcmd,
         )
     };
     let content = format!(
@@ -127,7 +164,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey virtum";
-        write_user_data(&dir, "virtum", key, false).unwrap();
+        write_user_data(&dir, "virtum", key, false, &[]).unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
         assert!(content.starts_with("#cloud-config\n"));
         assert!(content.contains("  - name: virtum\n"));
@@ -145,7 +182,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum", true).unwrap();
+        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum", true, &[]).unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
         assert!(content.contains("growpart:"));
         assert!(content.contains("resize_rootfs: true"));
@@ -170,6 +207,35 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn user_data_includes_mount_runcmd() {
+        let dir = std::env::temp_dir().join(format!("virtum-ci-mount-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mounts = vec![crate::mounts::ResolvedMount {
+            name: "app".into(),
+            host: "./app".into(),
+            guest: "~/app".into(),
+            host_abs: dir.join("app"),
+            guest_path: "/home/virtum/app".into(),
+            socket_path: dir.join("virtiofs-app.sock"),
+            virtiofsd_pid: None,
+        }];
+        write_user_data(
+            &dir,
+            "virtum",
+            "ssh-ed25519 AAAATEST virtum",
+            false,
+            &mounts,
+        )
+        .unwrap();
+        let content = fs::read_to_string(dir.join("user-data")).unwrap();
+        assert!(content.contains("/home/virtum/app"));
+        assert!(content.contains("virtiofs"));
+        assert!(content.contains("app"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn cloud_localds_available() -> bool {
         std::process::Command::new("cloud-localds")
             .arg("--help")
@@ -184,7 +250,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum", false).unwrap();
+        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum", false, &[]).unwrap();
         write_meta_data(&dir, "vm-test", "vm-test").unwrap();
 
         let result = build_cloud_init_iso(&dir);

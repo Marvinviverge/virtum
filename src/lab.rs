@@ -8,6 +8,7 @@ use crate::config::{self, VirtumPaths};
 use crate::lab_network;
 use crate::libvirt::{domain_exists, domain_is_active, domain_state};
 use crate::metadata::{self, Instance, InstanceStatus};
+use crate::mounts;
 use crate::port_forward::{self, PortBind, PortForward};
 use crate::ssh::{ensure_ssh_keypair, read_public_key};
 use crate::virtumfile;
@@ -22,17 +23,23 @@ pub fn up(file: Option<PathBuf>) -> Result<()> {
         .block_on(up_async(file))
 }
 
-pub fn down(file: Option<PathBuf>, destroy: bool) -> Result<()> {
+pub fn down(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result<()> {
+    if purge && !destroy {
+        anyhow::bail!(
+            "`--purge` nécessite `--destroy` (suppression des VM et des dossiers mounts hôte)."
+        );
+    }
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .context("Impossible de démarrer le runtime Tokio")?
-        .block_on(down_async(file, destroy))
+        .block_on(down_async(file, destroy, purge))
 }
 
 async fn up_async(file: Option<PathBuf>) -> Result<()> {
     let path = virtumfile::resolve_virtumfile_path(file)?;
+    let vf_dir = virtumfile::virtumfile_dir(&path);
     let lab = virtumfile::load(&path)?;
     eprintln!(
         "Lab '{}' ({} machine(s)) depuis {}…",
@@ -75,11 +82,10 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
         if metadata::find_by_lab_machine(&metadata, &lab.name, machine_name).is_some() {
             continue;
         }
-        if domain_exists(&vm_id) {
-            eprintln!(
-                "Domaine orphelin '{vm_id}' (machine '{machine_name}') : nettoyage avant déploiement…"
-            );
-            let instance_dir = paths.instances.join(&vm_id);
+        let instance_dir = paths.instances.join(&vm_id);
+        let orphan_instance = instance_dir.join("disk.qcow2").is_file();
+        if domain_exists(&vm_id) || orphan_instance {
+            eprintln!("Nettoyage avant déploiement de '{machine_name}' ({vm_id})…");
             cleanup_failed_run(&vm_id, &instance_dir).await;
         }
         metadata::ensure_lab_machine_available(&metadata, &lab.name, machine_name)?;
@@ -153,6 +159,8 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
                 net_cfg.libvirt_network.as_deref().unwrap_or("?")
             );
         }
+        let resolved_mounts = crate::mounts::resolve_machine_mounts(&lab, machine, &vf_dir)
+            .with_context(|| format!("Machine '{machine_name}' : résolution des mounts"))?;
         let config = VmLaunchConfig {
             os: spec.os.clone(),
             ram: spec.ram,
@@ -167,6 +175,7 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
             port_bind,
             libvirt_network: net_cfg.libvirt_network,
             bridge_host_interface: net_cfg.bridge_host_interface,
+            resolved_mounts,
         };
         let hostname = config.hostname_for_vm(&vm_id);
         let instance_dir = paths.instances.join(&vm_id);
@@ -184,6 +193,7 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
         .await
         {
             eprintln!("Échec sur la machine '{machine_name}': {err:#}");
+            cleanup_failed_run(&vm_id, &instance_dir).await;
             rollback_lab_vms(&paths, &created_this_run).await;
             return Err(err);
         }
@@ -262,9 +272,10 @@ async fn rollback_lab_vms(paths: &VirtumPaths, vm_ids: &[String]) {
     }
 }
 
-async fn down_async(file: Option<PathBuf>, destroy: bool) -> Result<()> {
+async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result<()> {
     let path = virtumfile::resolve_virtumfile_path(file)?;
     let lab = virtumfile::load(&path)?;
+    let vf_dir = virtumfile::virtumfile_dir(&path);
     let paths = config::ensure_layout().await?;
     let metadata = metadata::load_metadata(&paths.metadata).await?;
     let instances = metadata::instances_for_lab(&metadata, &lab.name);
@@ -281,8 +292,22 @@ async fn down_async(file: Option<PathBuf>, destroy: bool) -> Result<()> {
 
     if destroy {
         eprintln!("Suppression de {} VM du lab '{}'…", refs.len(), lab.name);
+        let purge_dirs = if purge {
+            mounts::collect_host_dirs_for_lab(&lab, &vf_dir)?
+        } else {
+            Vec::new()
+        };
         for reference in &refs {
-            vm::destroy_vm_async(reference).await?;
+            vm::destroy_vm_async(reference, false).await?;
+        }
+        if purge {
+            let n = mounts::purge_host_mount_dirs(&purge_dirs, &vf_dir)?;
+            if n > 0 {
+                eprintln!(
+                    "Dossiers mounts hôte supprimés ({n}) sous {}.",
+                    vf_dir.display()
+                );
+            }
         }
         if virtumfile::lab_needs_isolated_network(&lab) {
             if let Err(err) = lab_network::destroy_lab_network(&lab.name) {

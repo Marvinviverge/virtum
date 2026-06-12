@@ -14,6 +14,7 @@ pub mod lab_network;
 pub mod libvirt;
 pub mod libvirt_access;
 pub mod metadata;
+pub mod mounts;
 pub mod plan;
 pub mod port_forward;
 pub mod ps;
@@ -39,18 +40,44 @@ fn dispatch(command: Commands) -> Result<()> {
         Commands::Shell { vm } => ssh::shell_to_instance(&vm)?,
         Commands::Start { vms } => run_for_each_vm(&vms, vm::start_vm)?,
         Commands::Stop { vms } => run_for_each_vm(&vms, vm::stop_vm)?,
-        Commands::Destroy { vms } => run_for_each_vm(&vms, vm::destroy_vm)?,
+        Commands::Destroy { vms, purge } => run_for_each_vm_destroy(&vms, purge)?,
         Commands::Open { file } => firewall::open(file)?,
         Commands::Close { file } => firewall::close(file)?,
         Commands::Plan { file } => plan::plan(file)?,
         Commands::Apply { file } => apply::apply(file)?,
         Commands::Up { file } => lab::up(file)?,
-        Commands::Down { file, destroy } => lab::down(file, destroy)?,
+        Commands::Down {
+            file,
+            destroy,
+            purge,
+        } => lab::down(file, destroy, purge)?,
     };
     Ok(())
 }
 
 /// Exécute une opération sur chaque référence VM ; continue après échec, puis résume les erreurs.
+fn run_for_each_vm_destroy(refs: &[String], purge: bool) -> Result<()> {
+    let mut failures = Vec::new();
+    for reference in refs {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            continue;
+        }
+        if let Err(err) = vm::destroy_vm(reference, purge) {
+            eprintln!("error [{reference}]: {err:#}");
+            failures.push(reference.to_string());
+        }
+    }
+    if failures.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{} opération(s) ont échoué sur {} VM.",
+        failures.len(),
+        refs.len()
+    );
+}
+
 fn run_for_each_vm(refs: &[String], op: fn(&str) -> Result<()>) -> Result<()> {
     let mut failures = Vec::new();
     for reference in refs {

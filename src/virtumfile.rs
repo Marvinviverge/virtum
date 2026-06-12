@@ -10,7 +10,9 @@ use crate::bridge_network;
 use crate::disk::parse_disk_size;
 use crate::images::resolve_image;
 use crate::metadata::validate_name;
+use crate::mounts::{self, parse_mount_entries};
 use crate::port_forward::{self, PortBind, PortForward};
+use serde::Deserializer;
 
 pub const DEFAULT_VIRTUMFILE: &str = "Virtumfile";
 
@@ -81,7 +83,32 @@ pub struct Virtumfile {
     /// Écoute des `ports:` : `local` (127.0.0.1) ou `lan` (0.0.0.0, même réseau Wi‑Fi/Ethernet).
     #[serde(default)]
     pub bind: Option<PortBind>,
+    /// Dossiers partagés hérités par toutes les machines (v0.4 virtiofs).
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_mounts_field")]
+    pub mounts: Option<Vec<MountSpec>>,
     pub machines: BTreeMap<String, MachineSpec>,
+}
+
+/// Volume virtiofs déclaré dans le Virtumfile.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MountSpec {
+    pub name: String,
+    pub host: String,
+    pub guest: String,
+}
+
+fn deserialize_mounts_field<'de, D>(deserializer: D) -> Result<Option<Vec<MountSpec>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: Option<Vec<serde_yaml::Value>> = Option::deserialize(deserializer)?;
+    match raw {
+        None => Ok(None),
+        Some(entries) => parse_mount_entries(&entries)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -103,6 +130,14 @@ pub struct MachineSpec {
     pub bind: Option<PortBind>,
     #[serde(default)]
     pub provision: Vec<String>,
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_mounts_field")]
+    pub mounts: Option<Vec<MountSpec>>,
+}
+
+/// Mounts effectifs pour une machine (lab + surcharge machine).
+pub fn effective_mount_specs(lab: &Virtumfile, machine_name: &str) -> Vec<MountSpec> {
+    mounts::effective_mount_specs(lab, machine_name)
 }
 
 fn default_ram() -> u32 {
@@ -229,17 +264,31 @@ pub fn lab_bridge_interface_for_validation(lab: &Virtumfile) -> Option<&str> {
 pub fn load(path: &Path) -> Result<Virtumfile> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Impossible de lire {}", path.display()))?;
-    load_from_str(&content).with_context(|| format!("Virtumfile invalide: {}", path.display()))
+    let lab = load_from_str(&content)
+        .with_context(|| format!("Virtumfile invalide: {}", path.display()))?;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    validate(&lab, dir)?;
+    Ok(lab)
+}
+
+/// Répertoire parent du Virtumfile (racine des chemins `host:`).
+pub fn virtumfile_dir(path: &Path) -> std::path::PathBuf {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 pub fn load_from_str(content: &str) -> Result<Virtumfile> {
     let lab: Virtumfile = serde_yaml::from_str(content)
         .context("YAML invalide (vérifiez `network:` — valeurs acceptées : lab, bridge)")?;
-    validate(&lab)?;
     Ok(lab)
 }
 
-pub fn validate(lab: &Virtumfile) -> Result<()> {
+pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
     validate_name(&lab.name).context("Champ `name` (nom du lab) invalide")?;
     if lab.machines.is_empty() {
         bail!("Le Virtumfile doit définir au moins une machine sous `machines`.");
@@ -278,6 +327,8 @@ pub fn validate(lab: &Virtumfile) -> Result<()> {
             });
         }
         port_machines.push((machine_name.clone(), forwards));
+        mounts::resolve_machine_mounts(lab, machine_name, virtumfile_dir)
+            .with_context(|| format!("Machine '{machine_name}' : mounts invalides"))?;
     }
     port_forward::validate_lab_port_uniqueness(&port_machines)?;
 
@@ -360,6 +411,7 @@ machines:
     #[test]
     fn loads_valid_lab() {
         let lab = load_from_str(SAMPLE).unwrap();
+        validate(&lab, Path::new("/tmp")).unwrap();
         assert_eq!(lab.name, "web-stack-lab");
         assert_eq!(lab.machines.len(), 2);
         assert_eq!(lab.machines["web"].disk_size.as_deref(), Some("10G"));
@@ -376,7 +428,8 @@ machines:
   a:
     os: arch-linux
 "#;
-        assert!(load_from_str(yaml).is_err());
+        let lab = load_from_str(yaml).unwrap();
+        assert!(validate(&lab, Path::new("/tmp")).is_err());
     }
 
     #[test]
@@ -557,6 +610,7 @@ machines:
       - "18080:80"
 "#;
         let lab = load_from_str(yaml).unwrap();
+        validate(&lab, Path::new("/tmp")).unwrap();
         let forwards = machine_port_forwards(&lab.machines["web"]).unwrap();
         assert_eq!(forwards[0].host_port, 18080);
     }
@@ -575,7 +629,8 @@ machines:
     ports:
       - "18080:8080"
 "#;
-        assert!(load_from_str(yaml).is_err());
+        let lab = load_from_str(yaml).unwrap();
+        assert!(validate(&lab, Path::new("/tmp")).is_err());
     }
 
     #[test]
@@ -593,12 +648,39 @@ machines:
   a:
     os: debian-12
 "#;
-        let err = load_from_str(yaml).unwrap_err();
+        let lab = load_from_str(yaml).unwrap();
+        let err = validate(&lab, Path::new("/tmp")).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("introuvable") || msg.contains("nonexistent_iface"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn parses_mounts_shortcut_and_inheritance() {
+        let dir = std::env::temp_dir().join(format!("virtum-vf-mounts-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("backend")).unwrap();
+        std::fs::create_dir_all(dir.join("common")).unwrap();
+        let yaml = r#"
+name: m
+mounts:
+  - ./common:~/shared
+machines:
+  web:
+    os: debian-12
+    mounts:
+      - name: app
+        host: ./backend
+        guest: ~/app
+"#;
+        let lab = load_from_str(yaml).unwrap();
+        validate(&lab, &dir).unwrap();
+        let eff = effective_mount_specs(&lab, "web");
+        assert_eq!(eff.len(), 2);
+        assert!(eff.iter().any(|m| m.name == "app"));
+        assert!(eff.iter().any(|m| m.name == "common"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -610,6 +692,7 @@ machines:
   a:
     os: debian-12
 "#;
-        assert!(load_from_str(yaml).is_err());
+        let lab = load_from_str(yaml).unwrap();
+        assert!(validate(&lab, Path::new("/tmp")).is_err());
     }
 }
