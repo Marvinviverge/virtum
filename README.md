@@ -14,7 +14,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.4 terminé** — `mounts:` dossiers partagés hôte ↔ VM (**virtiofs**) : [`STEPS4.md`](./STEPS4.md) §7, [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md). Exemple : [`examples/Virtumfile.mounts`](./examples/Virtumfile.mounts).
 
-**v0.5 (à définir)** — prochaine phase via Spec Kit.
+**v0.5 (en cours)** — durcissement sécurité V-001–V-006 : [`STEPS5.md`](./STEPS5.md), [`SPEC_TECH_V0.5.md`](./SPEC_TECH_V0.5.md), [`specs/001-security-hardening/spec.md`](./specs/001-security-hardening/spec.md).
 
 ## Documentation
 
@@ -29,7 +29,9 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`SPEC_TECH_V0.3.md`](./SPEC_TECH_V0.3.md) | Contrat technique **v0.3** (bridge, `bind: lan`, plan, pare-feu) |
 | [`STEPS3.md`](./STEPS3.md) | Plan d’implémentation **v0.3** (terminé) |
 | [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md) | Contrat technique **v0.4** (`mounts:`, virtiofs) |
-| [`STEPS4.md`](./STEPS4.md) | Plan d’implémentation **v0.4** (terminé) |
+| [`SPEC_TECH_V0.5.md`](./SPEC_TECH_V0.5.md) | Contrat technique **v0.5** (security hardening) |
+| [`STEPS5.md`](./STEPS5.md) | Plan d’implémentation **v0.5** |
+| [`specs/001-security-hardening/spec.md`](./specs/001-security-hardening/spec.md) | Spec Kit feature v0.5 |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 
