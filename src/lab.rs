@@ -14,13 +14,13 @@ use crate::ssh::{ensure_ssh_keypair, read_public_key};
 use crate::virtumfile;
 use crate::vm::{self, cleanup_failed_run, lab_vm_id, launch_vm_inner, VmLaunchConfig};
 
-pub fn up(file: Option<PathBuf>) -> Result<()> {
+pub fn up(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .context("Impossible de démarrer le runtime Tokio")?
-        .block_on(up_async(file))
+        .block_on(up_async(file, insecure_ssh, yes_lan))
 }
 
 pub fn down(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result<()> {
@@ -37,7 +37,7 @@ pub fn down(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result<()> {
         .block_on(down_async(file, destroy, purge))
 }
 
-async fn up_async(file: Option<PathBuf>) -> Result<()> {
+async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> Result<()> {
     let path = virtumfile::resolve_virtumfile_path(file)?;
     let vf_dir = virtumfile::virtumfile_dir(&path);
     let lab = virtumfile::load(&path)?;
@@ -47,6 +47,10 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
         lab.machines.len(),
         path.display()
     );
+
+    if virtumfile::lab_requires_lan_consent(&lab)? && !yes_lan {
+        confirm_lan_deploy()?;
+    }
 
     let paths = config::ensure_layout().await?;
     let metadata = metadata::load_metadata(&paths.metadata).await?;
@@ -176,6 +180,7 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
             libvirt_network: net_cfg.libvirt_network,
             bridge_host_interface: net_cfg.bridge_host_interface,
             resolved_mounts,
+            insecure_ssh,
         };
         let hostname = config.hostname_for_vm(&vm_id);
         let instance_dir = paths.instances.join(&vm_id);
@@ -216,6 +221,32 @@ async fn up_async(file: Option<PathBuf>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn confirm_lan_deploy() -> Result<()> {
+    use std::io::{self, IsTerminal, Write};
+
+    if !io::stdin().is_terminal() {
+        bail!(
+            "Refus du déploiement : bind: lan avec ports mappés sans terminal interactif. \
+             Relancez avec --yes-lan si vous acceptez l'exposition sur le réseau local (0.0.0.0)."
+        );
+    }
+    eprint!(
+        "ATTENTION: bind: lan expose les ports mappés sur le réseau local (0.0.0.0). Continuer ? [y/N] "
+    );
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        eprintln!("\nDéploiement annulé.");
+        std::process::exit(0);
+    }
+    let answer = line.trim();
+    if answer == "y" || answer == "Y" {
+        return Ok(());
+    }
+    eprintln!("Déploiement annulé.");
+    std::process::exit(0);
 }
 
 /// Relance une machine de lab déjà enregistrée (après `virtum down` sans `--destroy`).

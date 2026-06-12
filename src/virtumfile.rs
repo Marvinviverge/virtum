@@ -245,6 +245,19 @@ pub fn effective_port_bind(lab: &Virtumfile, machine_name: &str) -> PortBind {
     spec.bind.or(lab.bind).unwrap_or(PortBind::Local)
 }
 
+/// True si `virtum up` doit demander confirmation (bind: lan + au moins un port mappé).
+pub fn lab_requires_lan_consent(lab: &Virtumfile) -> Result<bool> {
+    for (machine_name, spec) in &lab.machines {
+        if effective_port_bind(lab, machine_name) != PortBind::Lan {
+            continue;
+        }
+        if !spec.ports.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Interface explicite à valider en priorité (lab puis machines en bridge).
 pub fn lab_bridge_interface_for_validation(lab: &Virtumfile) -> Option<&str> {
     if lab.network == Some(NetworkMode::Bridge) {

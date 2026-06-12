@@ -108,7 +108,8 @@ fn check_virtiofsd() -> CheckResult {
         Ok(output) if output.status.success() => {
             let mut detail = String::new();
             if !std::path::Path::new("/usr/bin/newuidmap").exists() {
-                detail = "Paquet uidmap absent : Virtum lance virtiofsd avec --sandbox=none."
+                detail = "Paquet uidmap absent : Virtum lance virtiofsd avec --sandbox=none \
+                          (isolation réduite — installez uidmap pour le sandbox virtiofsd)."
                     .to_string();
             }
             CheckResult {

@@ -14,7 +14,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.4 terminé** — `mounts:` dossiers partagés hôte ↔ VM (**virtiofs**) : [`STEPS4.md`](./STEPS4.md) §7, [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md). Exemple : [`examples/Virtumfile.mounts`](./examples/Virtumfile.mounts).
 
-**v0.5 (en cours)** — durcissement sécurité V-001–V-006 : [`STEPS5.md`](./STEPS5.md), [`SPEC_TECH_V0.5.md`](./SPEC_TECH_V0.5.md), [`specs/001-security-hardening/spec.md`](./specs/001-security-hardening/spec.md).
+**v0.5 terminée** — durcissement sécurité V-001–V-006 (guest mounts, cloud-init, SSH `known_hosts`, `--insecure-ssh`, confirmation `bind: lan`, `cargo audit`) : [`STEPS5.md`](./STEPS5.md), [`SPEC_TECH_V0.5.md`](./SPEC_TECH_V0.5.md).
 
 ## Documentation
 
@@ -38,6 +38,7 @@ Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’
 ## Prérequis hôte (Linux)
 
 - **Rust** (toolchain stable + `cargo`) — [rustup.rs](https://rustup.rs) ; requis pour compiler via `install.sh`.
+- **cargo-audit** (optionnel en dev, recommandé CI) — `cargo install cargo-audit` ; intégré dans `make check` (avertissement si absent).
 - Virtualisation **KVM** activée (BIOS/UEFI).
 
 ### Debian / Ubuntu (recommandé)
@@ -246,6 +247,23 @@ virtum down -f examples/Virtumfile.mounts --destroy --purge
 ```
 
 Voir [`STEPS4.md`](./STEPS4.md) §7 et [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md).
+
+**Prérequis mounts** : paquet `virtiofsd` ; sans `uidmap` (`newuidmap`), Virtum lance virtiofsd avec `--sandbox=none` (isolation réduite — voir `virtum doctor`).
+
+### Sécurité v0.5
+
+- Chemins invité `guest:` validés (whitelist, préfixe `/home/virtum/`).
+- SSH : `StrictHostKeyChecking=accept-new` + `instances/<vm-id>/known_hosts` ; ignore `~/.ssh/config` (`-F /dev/null`).
+- Flag `--insecure-ssh` sur `shell`, `run`, `apply`, `up` (restaure v0.4) ; `virtum up --yes-lan` (CI sans TTY).
+- Findings audit **V-001–V-006** : voir [`SPEC_TECH_V0.5.md`](./SPEC_TECH_V0.5.md), [`STEPS5.md`](./STEPS5.md).
+
+```bash
+virtum shell test2 --insecure-ssh
+virtum run --os debian-12 --name db --insecure-ssh
+virtum up -f Virtumfile --yes-lan --insecure-ssh
+```
+
+Validation manuelle : [`specs/001-security-hardening/quickstart.md`](./specs/001-security-hardening/quickstart.md).
 
 ## Licence
 

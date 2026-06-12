@@ -4,6 +4,7 @@ use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -12,9 +13,48 @@ use crate::command::{path_arg, run_command};
 use crate::config;
 use crate::libvirt::SLIRP_GUEST_IPV4;
 use crate::metadata::{self, InstanceStatus};
+use crate::mounts::{MountSshStep, ResolvedMount};
 
 const PRIVATE_KEY_NAME: &str = "virtum_id_ed25519";
 const PUBLIC_KEY_NAME: &str = "virtum_id_ed25519.pub";
+
+static INSECURE_SSH_WARNED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshSecurityMode {
+    Secure,
+    Insecure,
+}
+
+impl SshSecurityMode {
+    pub fn from_flag(insecure_ssh: bool) -> Self {
+        if insecure_ssh {
+            Self::Insecure
+        } else {
+            Self::Secure
+        }
+    }
+}
+
+/// Options SSH par instance (known_hosts + mode sécurité v0.5).
+#[derive(Debug, Clone)]
+pub struct SshSessionOpts {
+    pub mode: SshSecurityMode,
+    pub known_hosts: PathBuf,
+}
+
+impl SshSessionOpts {
+    pub fn new(instance_dir: &Path, insecure_ssh: bool) -> Self {
+        Self {
+            mode: SshSecurityMode::from_flag(insecure_ssh),
+            known_hosts: known_hosts_path(instance_dir),
+        }
+    }
+}
+
+pub fn known_hosts_path(instance_dir: &Path) -> PathBuf {
+    instance_dir.join("known_hosts")
+}
 
 #[derive(Debug, Clone)]
 pub struct SshKeyPaths {
@@ -72,15 +112,71 @@ pub fn read_public_key(public_key_path: &Path) -> Result<String> {
     Ok(line.to_string())
 }
 
+fn warn_insecure_ssh_once() {
+    if !INSECURE_SSH_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "Avertissement : --insecure-ssh désactive la vérification de clé SSH \
+             (StrictHostKeyChecking=no). À réserver aux scripts / CI de confiance. \
+             OpenSSH peut afficher « Permanently added » (écriture dans /dev/null) : bruit sans effet."
+        );
+    }
+}
+
+/// Ignore `~/.ssh/config` : Virtum fournit toutes les options SSH nécessaires.
+fn append_ssh_config_isolation(cmd: &mut Command) {
+    cmd.arg("-F").arg("/dev/null");
+}
+
+fn append_security_opts(cmd: &mut Command, opts: &SshSessionOpts, batch_mode: bool) -> Result<()> {
+    append_ssh_config_isolation(cmd);
+    if batch_mode {
+        cmd.arg("-o").arg("BatchMode=yes");
+    }
+    cmd.arg("-o").arg("IdentitiesOnly=yes");
+    cmd.arg("-o").arg("ConnectTimeout=30");
+    match opts.mode {
+        SshSecurityMode::Insecure => {
+            warn_insecure_ssh_once();
+            cmd.arg("-o").arg("StrictHostKeyChecking=no");
+            cmd.arg("-o").arg("UserKnownHostsFile=/dev/null");
+            cmd.arg("-o").arg("GlobalKnownHostsFile=/dev/null");
+        }
+        SshSecurityMode::Secure => {
+            cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
+            let kh = path_arg(&opts.known_hosts)?;
+            cmd.arg("-o").arg(format!("UserKnownHostsFile={kh}"));
+            cmd.arg("-o").arg("GlobalKnownHostsFile=/dev/null");
+        }
+    }
+    Ok(())
+}
+
+fn map_ssh_host_key_error(stderr: &str, opts: &SshSessionOpts) -> Option<String> {
+    if opts.mode == SshSecurityMode::Insecure {
+        return None;
+    }
+    let upper = stderr.to_uppercase();
+    if upper.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+        || upper.contains("HOST KEY VERIFICATION FAILED")
+    {
+        Some(format!(
+            "La clé SSH de la VM a changé. Supprimez {} ou virtum destroy <ref> puis recréez le lab.",
+            opts.known_hosts.display()
+        ))
+    } else {
+        None
+    }
+}
+
 /// SSH interactif vers une instance (étape 17) ; termine le processus avec le code SSH.
-pub fn shell_to_instance(reference: &str) -> Result<()> {
+pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .context("Impossible de démarrer le runtime Tokio")?;
 
-    let (private_key, user, host, port) = runtime.block_on(async {
+    let (private_key, user, host, port, ssh_opts) = runtime.block_on(async {
         let paths = config::ensure_layout().await?;
         let metadata = metadata::load_metadata(&paths.metadata).await?;
         let instance = metadata::resolve_instance_ref(&metadata, reference)?;
@@ -127,15 +223,18 @@ pub fn shell_to_instance(reference: &str) -> Result<()> {
         let host = ip;
 
         let keys = ensure_ssh_keypair(&paths.keys)?;
+        let instance_dir = paths.instances.join(vm_id);
+        let ssh_opts = SshSessionOpts::new(&instance_dir, insecure_ssh);
         Ok((
             keys.private_key,
             instance.user.clone(),
             host.to_string(),
             port,
+            ssh_opts,
         ))
     })?;
 
-    exec_ssh_shell(&private_key, &user, &host, port)
+    exec_ssh_shell(&private_key, &user, &host, port, &ssh_opts)
 }
 
 /// Exécute des commandes de provision via SSH (après premier login).
@@ -146,6 +245,7 @@ pub fn run_provision_commands(
     port: u16,
     commands: &[String],
     timeout: Duration,
+    opts: &SshSessionOpts,
 ) -> Result<()> {
     use std::time::Instant;
 
@@ -159,13 +259,65 @@ pub fn run_provision_commands(
             bail!("Provision interrompue : délai global dépassé ({timeout:?}).");
         }
         eprintln!("  [{}/{}] {trimmed}", i + 1, commands.len());
-        ssh_run_provision_command(private_key, user, host, port, trimmed).with_context(|| {
-            format!(
-                "Provision échouée à l'étape {}/{}: {trimmed}",
-                i + 1,
-                commands.len()
-            )
-        })?;
+        ssh_run_provision_command(private_key, user, host, port, trimmed, opts).with_context(
+            || {
+                format!(
+                    "Provision échouée à l'étape {}/{}: {trimmed}",
+                    i + 1,
+                    commands.len()
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Monte des volumes virtiofs via SSH (arguments séparés, sans bash -c sur les chemins).
+pub fn run_ssh_mount_steps(
+    private_key: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    mounts: &[ResolvedMount],
+    opts: &SshSessionOpts,
+) -> Result<()> {
+    for step in crate::mounts::ssh_mount_steps(mounts) {
+        match step {
+            MountSshStep::Mkdir { path } => {
+                ssh_run_sudo_argv(
+                    private_key,
+                    user,
+                    host,
+                    port,
+                    &["mkdir", "-p", "--", &path],
+                    opts,
+                )?;
+            }
+            MountSshStep::Mount { volume, path } => {
+                if ssh_run_sudo_argv(
+                    private_key,
+                    user,
+                    host,
+                    port,
+                    &["mount", "-t", "virtiofs", &volume, &path],
+                    opts,
+                )
+                .is_err()
+                {
+                    // runcmd cloud-init peut avoir déjà monté le volume
+                }
+            }
+            MountSshStep::Chown { path } => {
+                ssh_run_sudo_argv(
+                    private_key,
+                    user,
+                    host,
+                    port,
+                    &["chown", "-R", "virtum:virtum", &path],
+                    opts,
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -191,30 +343,47 @@ pub fn ssh_run_provision_command(
     host: &str,
     port: u16,
     command: &str,
+    opts: &SshSessionOpts,
 ) -> Result<()> {
     let remote = remote_provision_shell_command(command);
+    ssh_run_remote_command(private_key, user, host, port, &remote, opts, true)
+}
+
+/// Exécute `sudo -n` + argv sur la VM (chemins en arguments séparés).
+pub fn ssh_run_sudo_argv(
+    private_key: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    argv: &[&str],
+    opts: &SshSessionOpts,
+) -> Result<()> {
+    let mut remote_parts = vec!["sudo", "-n"];
+    remote_parts.extend(argv);
+    let remote = remote_parts.join(" ");
+    ssh_run_remote_command(private_key, user, host, port, &remote, opts, true)
+}
+
+fn ssh_run_remote_command(
+    private_key: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    remote: &str,
+    opts: &SshSessionOpts,
+    batch_mode: bool,
+) -> Result<()> {
     let key = path_arg(private_key)?;
     let target = format!("{user}@{host}");
     let port_str = port.to_string();
 
     let mut cmd = Command::new("ssh");
-    cmd.arg("-i")
-        .arg(key)
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("IdentitiesOnly=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=30")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null");
+    cmd.arg("-i").arg(key);
+    append_security_opts(&mut cmd, opts, batch_mode)?;
     if port != 22 {
         cmd.arg("-p").arg(&port_str);
     }
-    // Un seul argument commande : évite que le shell distant ne coupe sur les espaces/&&.
-    cmd.arg(&target).arg(&remote);
+    cmd.arg(&target).arg(remote);
 
     let output = cmd
         .output()
@@ -224,6 +393,9 @@ pub fn ssh_run_provision_command(
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(msg) = map_ssh_host_key_error(&stderr, opts) {
+        bail!("{msg}");
+    }
     bail!(
         "Commande distante échouée (code {}): {stderr}",
         output.status.code().unwrap_or(-1)
@@ -237,24 +409,15 @@ pub fn ssh_run_command(
     host: &str,
     port: u16,
     command: &str,
+    opts: &SshSessionOpts,
 ) -> Result<()> {
     let key = path_arg(private_key)?;
     let target = format!("{user}@{host}");
     let port_str = port.to_string();
 
     let mut cmd = Command::new("ssh");
-    cmd.arg("-i")
-        .arg(key)
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("IdentitiesOnly=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=30")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null");
+    cmd.arg("-i").arg(key);
+    append_security_opts(&mut cmd, opts, true)?;
     if port != 22 {
         cmd.arg("-p").arg(&port_str);
     }
@@ -268,67 +431,61 @@ pub fn ssh_run_command(
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(msg) = map_ssh_host_key_error(&stderr, opts) {
+        bail!("{msg}");
+    }
     bail!(
         "Commande distante échouée (code {}): {stderr}",
         output.status.code().unwrap_or(-1)
-    );
+    )
 }
 
 /// Vérifie que l'authentification par clé Virtum fonctionne (cloud-init terminé).
-pub fn ssh_auth_probe(private_key: &Path, user: &str, host: &str, port: u16) -> bool {
+pub fn ssh_auth_probe(
+    private_key: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    opts: &SshSessionOpts,
+) -> bool {
     let key = match path_arg(private_key) {
         Ok(k) => k,
         Err(_) => return false,
     };
     let target = format!("{user}@{host}");
-    let mut args = vec![
-        "-i",
-        key,
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "ConnectTimeout=5",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-    ];
-    let port_str = port.to_string();
-    if port != 22 {
-        args.push("-p");
-        args.push(&port_str);
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-i").arg(key);
+    if append_security_opts(&mut cmd, opts, true).is_err() {
+        return false;
     }
-    args.push(&target);
-    args.push("true");
+    if port != 22 {
+        cmd.arg("-p").arg(port.to_string());
+    }
+    cmd.arg(&target).arg("true");
 
-    std::process::Command::new("ssh")
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
 
-fn exec_ssh_shell(private_key: &Path, user: &str, host: &str, port: u16) -> Result<()> {
+fn exec_ssh_shell(
+    private_key: &Path,
+    user: &str,
+    host: &str,
+    port: u16,
+    opts: &SshSessionOpts,
+) -> Result<()> {
     let key = path_arg(private_key)?;
     let target = format!("{user}@{host}");
 
     let mut cmd = Command::new("ssh");
-    cmd.arg("-i")
-        .arg(key)
-        .arg("-o")
-        .arg("IdentitiesOnly=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null");
+    cmd.arg("-i").arg(key);
+    append_security_opts(&mut cmd, opts, false)?;
     if port != 22 {
         cmd.arg("-p").arg(port.to_string());
     }
-    // Shell de connexion : charge /etc/profile.d (dont virtum-path.sh) → PATH avec /usr/sbin
     cmd.arg("-t")
         .arg(&target)
         .arg("bash")
@@ -351,6 +508,19 @@ fn restrict_private_key_permissions(private_key: &Path) -> Result<()> {
             private_key.display()
         )
     })
+}
+
+pub fn ssh_option_strings(opts: &SshSessionOpts) -> (String, String) {
+    match opts.mode {
+        SshSecurityMode::Insecure => (
+            "StrictHostKeyChecking=no".into(),
+            "UserKnownHostsFile=/dev/null".into(),
+        ),
+        SshSecurityMode::Secure => (
+            "StrictHostKeyChecking=accept-new".into(),
+            format!("UserKnownHostsFile={}", opts.known_hosts.display()),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -391,5 +561,19 @@ mod tests {
         assert!(pubkey.starts_with("ssh-ed25519 "));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ssh_option_strings_secure_vs_insecure() {
+        let dir = std::env::temp_dir().join(format!("virtum-ssh-opts-{}", std::process::id()));
+        let opts = SshSessionOpts::new(&dir, false);
+        let (strict, kh) = ssh_option_strings(&opts);
+        assert_eq!(strict, "StrictHostKeyChecking=accept-new");
+        assert!(kh.contains("known_hosts"));
+
+        let opts_insec = SshSessionOpts::new(&dir, true);
+        let (strict2, kh2) = ssh_option_strings(&opts_insec);
+        assert_eq!(strict2, "StrictHostKeyChecking=no");
+        assert_eq!(kh2, "UserKnownHostsFile=/dev/null");
     }
 }

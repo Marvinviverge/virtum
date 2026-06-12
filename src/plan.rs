@@ -431,6 +431,11 @@ fn collect_bind_lan_warnings(
             .collect::<Vec<_>>()
             .join(", ")
     );
+    warnings.push(
+        "Sécurité réseau : bind: lan expose les ports mappés sur toutes les interfaces (0.0.0.0) \
+         — accessible depuis le réseau local. `virtum up` demandera une confirmation."
+            .to_string(),
+    );
 
     match firewall::get_firewall_state(paths, &lab.name)? {
         None => {

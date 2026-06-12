@@ -18,7 +18,7 @@ use crate::libvirt::{
 use crate::metadata::{self, Instance};
 use crate::mounts::{self, ResolvedMount};
 use crate::port_forward::{self, PortBind, PortForward};
-use crate::ssh::{ensure_ssh_keypair, run_provision_commands};
+use crate::ssh::{ensure_ssh_keypair, run_provision_commands, run_ssh_mount_steps, SshSessionOpts};
 use crate::virtumfile::{self, MachineSpec, MountSpec, Virtumfile};
 use crate::vm::{self, lab_vm_id};
 
@@ -320,7 +320,7 @@ pub async fn build_lab_diff(virtumfile_path: PathBuf, lab: Virtumfile) -> Result
     })
 }
 
-pub async fn apply_lab(file: Option<PathBuf>) -> Result<()> {
+pub async fn apply_lab(file: Option<PathBuf>, insecure_ssh: bool) -> Result<()> {
     let virtumfile_path = virtumfile::resolve_virtumfile_path(file)?;
     let lab = virtumfile::load(&virtumfile_path)?;
     let diff = build_lab_diff(virtumfile_path.clone(), lab.clone()).await?;
@@ -386,6 +386,7 @@ pub async fn apply_lab(file: Option<PathBuf>) -> Result<()> {
             spec,
             md,
             &virtumfile_path,
+            insecure_ssh,
         )
         .await?;
 
@@ -414,6 +415,7 @@ pub async fn apply_lab(file: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_machine(
     paths: &VirtumPaths,
     lab: &Virtumfile,
@@ -422,12 +424,14 @@ async fn apply_machine(
     spec: &MachineSpec,
     md: &MachineDiff,
     virtumfile_path: &Path,
+    insecure_ssh: bool,
 ) -> Result<()> {
     let metadata = metadata::load_metadata(&paths.metadata).await?;
     let instance = metadata::find_by_lab_machine(&metadata, lab_name, &md.machine_name)
         .context("Instance introuvable pendant apply")?;
     let instance_dir = paths.instances.join(&md.vm_id);
     let vm_id = &md.vm_id;
+    let ssh_opts = SshSessionOpts::new(&instance_dir, insecure_ssh);
 
     let needs_stop = md.changes.iter().any(|c| c.needs_guest_stop());
     let was_running = domain_exists(vm_id)
@@ -548,6 +552,7 @@ async fn apply_machine(
                     SSH_PORT,
                     &cmds,
                     std::time::Duration::from_secs(120),
+                    &ssh_opts,
                 )?;
             }
         } else {
@@ -593,14 +598,13 @@ async fn apply_machine(
                     "  Montage virtiofs dans la VM ({} volume(s))…",
                     mounts_added_ssh.len()
                 );
-                let cmds: Vec<String> = mounts::ssh_mount_commands(&mounts_added_ssh);
-                run_provision_commands(
+                run_ssh_mount_steps(
                     &keys.private_key,
                     &inst.user,
                     ip,
                     SSH_PORT,
-                    &cmds,
-                    std::time::Duration::from_secs(120),
+                    &mounts_added_ssh,
+                    &ssh_opts,
                 )?;
             }
         }

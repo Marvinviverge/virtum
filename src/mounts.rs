@@ -271,27 +271,67 @@ fn host_path_under_virtumfile_root(candidate: &Path, base: &Path) -> bool {
 }
 
 pub fn resolve_guest_path(guest: &str) -> Result<String> {
-    let guest = guest.trim();
-    if guest.is_empty() {
-        bail!("Chemin invité mount vide.");
+    let raw = guest.trim();
+    if raw.is_empty() {
+        bail!(guest_path_error(raw, "chemin vide"));
     }
-    let path = if let Some(rest) = guest.strip_prefix("~/") {
-        format!("{VIRTUM_GUEST_HOME}/{rest}")
-    } else if guest == "~" {
-        VIRTUM_GUEST_HOME.to_string()
-    } else if guest.starts_with(VIRTUM_GUEST_HOME) {
-        guest.to_string()
-    } else if guest.starts_with('/') {
-        bail!("Chemin invité '{guest}' interdit : doit être sous {VIRTUM_GUEST_HOME} (ex. ~/app).");
-    } else {
-        bail!(
-            "Chemin invité '{guest}' invalide : utilisez ~/chemin ou {VIRTUM_GUEST_HOME}/chemin."
-        );
-    };
-    if path.contains("..") {
-        bail!("Chemin invité '{guest}' ne doit pas contenir '..'.");
+
+    let normalized = normalize_guest_path(raw)?;
+    if normalized.contains("..") {
+        bail!(guest_path_error(raw, "ne doit pas contenir '..'"));
     }
-    Ok(path)
+    validate_guest_path_chars(raw, &normalized)?;
+    if !is_strict_virtum_home(&normalized) {
+        bail!(guest_path_error(
+            raw,
+            "doit être sous /home/virtum (ex. ~/app)"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn guest_path_error(raw: &str, reason: &str) -> String {
+    format!("Chemin invité '{raw}' invalide : {reason}")
+}
+
+fn normalize_guest_path(raw: &str) -> Result<String> {
+    if raw == "~" {
+        return Ok(VIRTUM_GUEST_HOME.to_string());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if rest.is_empty() {
+            return Ok(VIRTUM_GUEST_HOME.to_string());
+        }
+        return Ok(format!("{VIRTUM_GUEST_HOME}/{rest}"));
+    }
+    if raw.starts_with('/') {
+        return Ok(raw.to_string());
+    }
+    bail!(guest_path_error(
+        raw,
+        "utilisez ~/chemin ou /home/virtum/chemin"
+    ))
+}
+
+/// Préfixe strict `/home/virtum` ou `/home/virtum/…` (pas `/home/virtum-evil`).
+fn is_strict_virtum_home(path: &str) -> bool {
+    if path == VIRTUM_GUEST_HOME {
+        return true;
+    }
+    path.starts_with(&format!("{VIRTUM_GUEST_HOME}/"))
+}
+
+fn validate_guest_path_chars(raw: &str, normalized: &str) -> Result<()> {
+    for c in normalized.chars() {
+        if c.is_ascii_alphanumeric() || c == '/' || c == '.' || c == '_' || c == '-' {
+            continue;
+        }
+        bail!(guest_path_error(
+            raw,
+            &format!("caractère '{c}' interdit (autorisés : [a-zA-Z0-9/_.-])")
+        ));
+    }
+    Ok(())
 }
 
 pub fn socket_path_for(instance_dir: &Path, name: &str) -> PathBuf {
@@ -625,18 +665,45 @@ pub fn mounts_changed_blocking(stored: &[MountSpec], desired: &[MountSpec]) -> V
     errors
 }
 
-/// Commandes shell pour monter des volumes après boot (apply / provision).
-pub fn ssh_mount_commands(mounts: &[ResolvedMount]) -> Vec<String> {
-    let mut cmds = Vec::new();
+/// Étapes de montage virtiofs exécutées via SSH (chemins déjà validés).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountSshStep {
+    Mkdir { path: String },
+    Mount { volume: String, path: String },
+    Chown { path: String },
+}
+
+/// Prépare les étapes SSH pour monter des volumes (sans concaténation shell).
+pub fn ssh_mount_steps(mounts: &[ResolvedMount]) -> Vec<MountSshStep> {
+    let mut steps = Vec::new();
     for m in mounts {
-        cmds.push(format!("mkdir -p {}", m.guest_path));
-        cmds.push(format!(
-            "mount -t virtiofs {} {} || true",
-            m.name, m.guest_path
-        ));
-        cmds.push(format!("chown -R virtum:virtum {}", m.guest_path));
+        steps.push(MountSshStep::Mkdir {
+            path: m.guest_path.clone(),
+        });
+        steps.push(MountSshStep::Mount {
+            volume: m.name.clone(),
+            path: m.guest_path.clone(),
+        });
+        steps.push(MountSshStep::Chown {
+            path: m.guest_path.clone(),
+        });
     }
-    cmds
+    steps
+}
+
+/// Commandes shell legacy — préférez `ssh_mount_steps` + `ssh::run_ssh_mount_steps`.
+#[deprecated(note = "use ssh_mount_steps with ssh::run_ssh_mount_steps")]
+pub fn ssh_mount_commands(mounts: &[ResolvedMount]) -> Vec<String> {
+    ssh_mount_steps(mounts)
+        .into_iter()
+        .map(|step| match step {
+            MountSshStep::Mkdir { path } => format!("mkdir -p -- {path}"),
+            MountSshStep::Mount { volume, path } => {
+                format!("mount -t virtiofs {volume} {path} || true")
+            }
+            MountSshStep::Chown { path } => format!("chown -R virtum:virtum {path}"),
+        })
+        .collect()
 }
 
 pub fn format_mount_list(mounts: &[MountSpec]) -> String {
@@ -664,6 +731,45 @@ mod tests {
             "/home/virtum/data"
         );
         assert!(resolve_guest_path("/etc/foo").is_err());
+    }
+
+    #[test]
+    fn resolve_guest_path_rejects_contract_cases() {
+        let cases = [
+            ("/home/virtum-evil", "prefix bypass"),
+            ("/home/virtum/app;id", "semicolon"),
+            ("/home/virtum/a b", "space"),
+            ("~/app\n-evil", "newline"),
+            ("/etc/passwd", "outside home"),
+            ("", "empty"),
+        ];
+        for (input, _label) in cases {
+            let err = resolve_guest_path(input).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("Chemin invité") && msg.contains("invalide"),
+                "input={input:?} msg={msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_mount_steps_use_validated_paths() {
+        let mounts = vec![ResolvedMount {
+            name: "app".into(),
+            host: "./app".into(),
+            guest: "~/app".into(),
+            host_abs: PathBuf::from("/tmp/app"),
+            guest_path: "/home/virtum/app".into(),
+            socket_path: PathBuf::new(),
+            virtiofsd_pid: None,
+        }];
+        let steps = ssh_mount_steps(&mounts);
+        assert_eq!(steps.len(), 3);
+        assert!(matches!(
+            &steps[0],
+            MountSshStep::Mkdir { path } if path == "/home/virtum/app"
+        ));
     }
 
     #[test]

@@ -7,7 +7,7 @@ DEBUG_BIN := $(TARGET_DIR)/debug/virtum
 INSTALL_DIR ?= $(HOME)/.cargo/bin
 INSTALLED_BIN := $(INSTALL_DIR)/virtum
 
-.PHONY: all release build debug install test fmt clippy check clean help setup-host setup-var-lib smoke-lab smoke-lab-bridge
+.PHONY: all release build debug install test fmt clippy check clean help setup-host setup-var-lib smoke-lab smoke-lab-bridge audit
 
 all: release
 
@@ -36,8 +36,16 @@ fmt:
 clippy:
 	$(CARGO) clippy -- -D warnings
 
-## fmt + clippy + tests
-check: fmt clippy test
+## cargo audit (ignore via .audit.toml) — warn si binaire absent
+audit:
+	@if command -v cargo-audit >/dev/null 2>&1; then \
+		cargo audit --file .audit.toml; \
+	else \
+		echo "Avertissement: cargo-audit absent — installez-le pour le scan RustSec (cargo install cargo-audit)."; \
+	fi
+
+## fmt + clippy + tests + audit (si cargo-audit installé)
+check: fmt clippy test audit
 
 ## Smoke lab NAT (examples/Virtumfile) — nécessite make release + images
 smoke-lab: release
@@ -68,7 +76,7 @@ help:
 	@echo "  make install   — release + copie vers $(INSTALL_DIR)"
 	@echo "  make debug     — build dev ($(DEBUG_BIN))"
 	@echo "  make test      — cargo test"
-	@echo "  make check     — fmt + clippy + test"
+	@echo "  make check     — fmt + clippy + test + audit (si cargo-audit installé)"
 	@echo "  make clean     — cargo clean"
 	@echo "  make setup-host    — sudo scripts/setup-host.sh (apt, libvirt, socat)"
 	@echo "  make setup-var-lib — sudo scripts/setup-var-lib.sh"

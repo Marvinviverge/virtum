@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use serde_yaml::Value;
 
 use crate::command::{path_arg, run_command};
 use crate::mounts::ResolvedMount;
@@ -20,30 +21,89 @@ write_files:
       esac
 "#;
 
+pub fn validate_cloud_init_user(user: &str) -> Result<()> {
+    if user.is_empty() || user.len() > 32 {
+        bail!("Utilisateur cloud-init invalide : longueur 1–32 requise.");
+    }
+    let mut chars = user.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_lowercase() || first == '_') {
+        bail!("Utilisateur cloud-init invalide : doit commencer par [a-z_].");
+    }
+    if !user
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        bail!("Utilisateur cloud-init invalide : caractères autorisés [a-z0-9_-].");
+    }
+    Ok(())
+}
+
+pub fn validate_cloud_init_hostname(hostname: &str) -> Result<()> {
+    if hostname.is_empty() || hostname.len() > 64 {
+        bail!("Hostname cloud-init invalide : longueur 1–64 requise.");
+    }
+    if !hostname
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        bail!("Hostname cloud-init invalide : caractères autorisés [a-zA-Z0-9_.-].");
+    }
+    Ok(())
+}
+
+pub fn validate_cloud_init_vm_id(vm_id: &str) -> Result<()> {
+    if vm_id.is_empty() {
+        bail!("Identifiant instance cloud-init vide.");
+    }
+    if !vm_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("Identifiant instance '{vm_id}' invalide (attendu alphanum + '-').");
+    }
+    Ok(())
+}
+
+fn mount_runcmd_entries(mounts: &[ResolvedMount]) -> Vec<Vec<String>> {
+    let mut entries = Vec::new();
+    for m in mounts {
+        entries.push(vec!["mkdir".into(), "-p".into(), m.guest_path.clone()]);
+        entries.push(vec![
+            "mount".into(),
+            "-t".into(),
+            "virtiofs".into(),
+            m.name.clone(),
+            m.guest_path.clone(),
+        ]);
+        entries.push(vec![
+            "chown".into(),
+            "-R".into(),
+            "virtum:virtum".into(),
+            m.guest_path.clone(),
+        ]);
+    }
+    entries
+}
+
+fn yaml_runcmd_block(entries: &[Vec<String>]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let seq: Vec<Value> = entries
+        .iter()
+        .map(|row| Value::Sequence(row.iter().map(|s| Value::String(s.clone())).collect()))
+        .collect();
+    let mut map = serde_yaml::Mapping::new();
+    map.insert(Value::String("runcmd".into()), Value::Sequence(seq));
+    format!(
+        "{}\n",
+        serde_yaml::to_string(&Value::Mapping(map)).expect("runcmd yaml")
+    )
+}
+
 /// Writes `user-data` (cloud-config) with user, sudo and Virtum SSH public key.
 ///
 /// Si `grow_root` est vrai, cloud-init agrandit la partition racine au premier boot.
 /// Les commandes `provision` ne sont pas injectées ici : exécutées via SSH après
 /// que la VM accepte les connexions (voir `ssh::run_provision_commands`).
-fn mount_runcmd_block(mounts: &[ResolvedMount]) -> String {
-    if mounts.is_empty() {
-        return String::new();
-    }
-    let mut lines = Vec::new();
-    for m in mounts {
-        lines.push(format!("  - [ mkdir, -p, {} ]", m.guest_path));
-        lines.push(format!(
-            "  - [ mount, -t, virtiofs, {}, {} ]",
-            m.name, m.guest_path
-        ));
-        lines.push(format!(
-            "  - [ chown, -R, virtum:virtum, {} ]",
-            m.guest_path
-        ));
-    }
-    format!("runcmd:\n{}\n", lines.join("\n"))
-}
-
 pub fn write_user_data(
     instance_dir: &Path,
     user: &str,
@@ -51,6 +111,11 @@ pub fn write_user_data(
     grow_root: bool,
     mounts: &[ResolvedMount],
 ) -> Result<PathBuf> {
+    validate_cloud_init_user(user)?;
+    if public_key.contains('\n') {
+        bail!("Clé publique SSH cloud-init invalide : retour ligne interdit.");
+    }
+
     let path = instance_dir.join("user-data");
     let grow_block = if grow_root {
         r"
@@ -62,9 +127,9 @@ resize_rootfs: true
     } else {
         ""
     };
-    let mount_block = mount_runcmd_block(mounts);
+    let mount_entries = mount_runcmd_entries(mounts);
+    let mount_block = yaml_runcmd_block(&mount_entries);
     let (package_block, runcmd_block) = if grow_root {
-        // Pas de runcmd/apt au boot : growpart d'abord ; mounts via runcmd dédié si présents.
         (String::new(), mount_block)
     } else if mounts.is_empty() {
         (
@@ -76,19 +141,20 @@ packages:
             "runcmd:\n  - [ systemctl, enable, --now, qemu-guest-agent ]\n".to_string(),
         )
     } else {
-        let mut runcmd =
-            String::from("runcmd:\n  - [ systemctl, enable, --now, qemu-guest-agent ]\n");
-        for line in mount_block.lines().skip(1) {
-            runcmd.push_str(line);
-            runcmd.push('\n');
-        }
+        let mut entries = vec![vec![
+            "systemctl".into(),
+            "enable".into(),
+            "--now".into(),
+            "qemu-guest-agent".into(),
+        ]];
+        entries.extend(mount_entries);
         (
             r"package_update: true
 packages:
   - qemu-guest-agent
 "
             .to_string(),
-            runcmd,
+            yaml_runcmd_block(&entries),
         )
     };
     let content = format!(
@@ -112,6 +178,8 @@ ssh_pwauth: false
 
 /// Writes `meta-data` with instance-id and hostname.
 pub fn write_meta_data(instance_dir: &Path, vm_id: &str, hostname: &str) -> Result<PathBuf> {
+    validate_cloud_init_vm_id(vm_id)?;
+    validate_cloud_init_hostname(hostname)?;
     let path = instance_dir.join("meta-data");
     let content = format!("instance-id: {vm_id}\nlocal-hostname: {hostname}\n");
     std::fs::write(&path, content)
@@ -233,7 +301,15 @@ mod tests {
         assert!(content.contains("/home/virtum/app"));
         assert!(content.contains("virtiofs"));
         assert!(content.contains("app"));
+        assert!(!content.contains("mkdir -p /home"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_unsafe_cloud_init_fields() {
+        assert!(validate_cloud_init_user("bad user").is_err());
+        assert!(validate_cloud_init_hostname("host\nname").is_err());
+        assert!(validate_cloud_init_vm_id("vm;id").is_err());
     }
 
     fn cloud_localds_available() -> bool {

@@ -35,6 +35,9 @@ pub enum Commands {
         /// Path to Virtumfile
         #[arg(short, long)]
         file: Option<PathBuf>,
+        /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+        #[arg(long)]
+        insecure_ssh: bool,
     },
     /// Preview lab deploy (create/resume, updates, warnings) without changes
     Plan {
@@ -47,6 +50,12 @@ pub enum Commands {
         /// Path to Virtumfile
         #[arg(short, long)]
         file: Option<PathBuf>,
+        /// Confirme le déploiement avec `bind: lan` sans invite interactive (CI / scripts).
+        #[arg(long)]
+        yes_lan: bool,
+        /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+        #[arg(long)]
+        insecure_ssh: bool,
     },
     /// Open host firewall (ufw) for `bind: lan` ports in a Virtumfile
     Open {
@@ -76,6 +85,9 @@ pub enum Commands {
     Shell {
         /// VM id (`vm-…`) or name (`--name` from `virtum run`)
         vm: String,
+        /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+        #[arg(long)]
+        insecure_ssh: bool,
     },
     /// Start one or more stopped VMs (same instances, no re-provisioning)
     Start {
@@ -137,6 +149,10 @@ pub struct RunArgs {
     /// Interface hôte pour `--network bridge` (sinon route par défaut / `virtum doctor`).
     #[arg(long)]
     pub bridge_interface: Option<String>,
+
+    /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+    #[arg(long)]
+    pub insecure_ssh: bool,
 }
 
 /// Réseau `virtum run` (hors Virtumfile).
@@ -147,4 +163,34 @@ pub enum RunNetworkMode {
     Default,
     /// Une NIC sur le LAN du bureau (nécessite Ethernet recommandé ; voir `virtum doctor`).
     Bridge,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn shell_insecure_ssh_after_vm_arg() {
+        let cli = Cli::try_parse_from(["virtum", "shell", "test2", "--insecure-ssh"]).unwrap();
+        match cli.command {
+            Commands::Shell { vm, insecure_ssh } => {
+                assert_eq!(vm, "test2");
+                assert!(insecure_ssh);
+            }
+            _ => panic!("expected shell subcommand"),
+        }
+    }
+
+    #[test]
+    fn shell_insecure_ssh_before_vm_arg() {
+        let cli = Cli::try_parse_from(["virtum", "shell", "--insecure-ssh", "test2"]).unwrap();
+        match cli.command {
+            Commands::Shell { vm, insecure_ssh } => {
+                assert_eq!(vm, "test2");
+                assert!(insecure_ssh);
+            }
+            _ => panic!("expected shell subcommand"),
+        }
+    }
 }

@@ -27,7 +27,9 @@ use crate::libvirt_access;
 use crate::metadata::{self, Instance, InstanceStatus};
 use crate::mounts::{self, ResolvedMount};
 use crate::port_forward::{self, PortForward};
-use crate::ssh::{ensure_ssh_keypair, read_public_key, run_provision_commands, ssh_auth_probe};
+use crate::ssh::{
+    ensure_ssh_keypair, read_public_key, run_provision_commands, ssh_auth_probe, SshSessionOpts,
+};
 
 const IP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const IP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -64,6 +66,8 @@ pub struct VmLaunchConfig {
     pub bridge_host_interface: Option<String>,
     /// Volumes virtiofs résolus (lab `virtum up` uniquement en v0.4).
     pub resolved_mounts: Vec<ResolvedMount>,
+    /// Mode SSH (--insecure-ssh global).
+    pub insecure_ssh: bool,
 }
 
 impl VmLaunchConfig {
@@ -83,6 +87,7 @@ impl VmLaunchConfig {
             libvirt_network: None,
             bridge_host_interface: None,
             resolved_mounts: Vec::new(),
+            insecure_ssh: false,
         }
     }
 
@@ -133,6 +138,7 @@ pub async fn run_vm_async(args: RunArgs) -> Result<()> {
     }
 
     let mut config = VmLaunchConfig::from_run_args(&args);
+    config.insecure_ssh = args.insecure_ssh;
     if args.network == RunNetworkMode::Bridge {
         let iface =
             bridge_network::resolve_bridge_interface(args.bridge_interface.as_deref())
@@ -345,20 +351,32 @@ pub async fn launch_vm_inner(
     }
     let keys = ensure_ssh_keypair(&paths.keys)?;
     let private_key = keys.private_key.display();
-    wait_for_ssh_login(&keys.private_key, &config.user, &ip, SSH_PORT, ssh_timeout)
-        .await
-        .with_context(|| {
-            format!(
-                "Instance : {}/{}\n\
-                 user-data : {}/user-data\n\
-                 Test manuel : ssh -i {private_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
-                 {user}@{ip}",
-                paths.root.display(),
-                instance_dir.file_name().unwrap_or_default().to_string_lossy(),
-                instance_dir.display(),
-                user = config.user,
-            )
-        })?;
+    let ssh_opts = SshSessionOpts::new(instance_dir, config.insecure_ssh);
+    wait_for_ssh_login(
+        &keys.private_key,
+        &config.user,
+        &ip,
+        SSH_PORT,
+        ssh_timeout,
+        &ssh_opts,
+    )
+    .await
+    .with_context(|| {
+        let (strict, kh) = crate::ssh::ssh_option_strings(&ssh_opts);
+        format!(
+            "Instance : {}/{}\n\
+             user-data : {}/user-data\n\
+             Test manuel : ssh -i {private_key} -o IdentitiesOnly=yes -o {strict} -o {kh} \
+             {user}@{ip}",
+            paths.root.display(),
+            instance_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            instance_dir.display(),
+            user = config.user,
+        )
+    })?;
     *retain_vm_on_error = true;
 
     if !config.provision.is_empty() {
@@ -384,6 +402,7 @@ pub async fn launch_vm_inner(
             SSH_PORT,
             &post_boot,
             SSH_TIMEOUT_PROVISION,
+            &ssh_opts,
         )?;
     } else if grow_root {
         eprintln!("Installation qemu-guest-agent post-SSH…");
@@ -397,6 +416,7 @@ pub async fn launch_vm_inner(
                systemctl enable --now qemu-guest-agent"
                 .to_string()],
             SSH_TIMEOUT_PROVISION,
+            &ssh_opts,
         )?;
     }
 
@@ -620,6 +640,7 @@ struct ResumeIpHint<'a> {
     private_key: &'a Path,
     user: &'a str,
     ssh_port: u16,
+    ssh_opts: &'a SshSessionOpts,
 }
 
 async fn wait_for_ip(
@@ -644,7 +665,13 @@ async fn wait_for_ip(
 
         if let Some(hint) = resume_hint.as_ref() {
             if is_usable_ssh_ip(hint.known_ip, attach.prefer_non_libvirt_default())
-                && ssh_auth_probe(hint.private_key, hint.user, hint.known_ip, hint.ssh_port)
+                && ssh_auth_probe(
+                    hint.private_key,
+                    hint.user,
+                    hint.known_ip,
+                    hint.ssh_port,
+                    hint.ssh_opts,
+                )
             {
                 eprintln!("IP réutilisée (metadata / SSH) : {}", hint.known_ip);
                 return Ok(hint.known_ip.to_string());
@@ -784,13 +811,14 @@ pub async fn wait_for_ssh_login(
     host: &str,
     port: u16,
     timeout: Duration,
+    opts: &SshSessionOpts,
 ) -> Result<()> {
     let started = Instant::now();
     let mut last_progress = Instant::now();
     sleep(SSH_BOOT_GRACE).await;
 
     loop {
-        if ssh_auth_probe(private_key, user, host, port) {
+        if ssh_auth_probe(private_key, user, host, port, opts) {
             return Ok(());
         }
 
@@ -935,6 +963,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         network_attach_from_resume(libvirt_network.as_deref(), bridge_iface.as_deref())?;
     let keys = ensure_ssh_keypair(&paths.keys)?;
     let ssh_port = instance.ssh_port.unwrap_or(SSH_PORT);
+    let ssh_opts = SshSessionOpts::new(&instance_dir, false);
     let resume_hint = instance.ip.as_deref().and_then(|known_ip| {
         if is_usable_ssh_ip(known_ip, network_attach.prefer_non_libvirt_default()) {
             Some(ResumeIpHint {
@@ -942,6 +971,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
                 private_key: &keys.private_key,
                 user: &instance.user,
                 ssh_port,
+                ssh_opts: &ssh_opts,
             })
         } else {
             None
@@ -983,6 +1013,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         &ip,
         ssh_port,
         SSH_TIMEOUT,
+        &ssh_opts,
     )
     .await?;
 
