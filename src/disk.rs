@@ -100,9 +100,12 @@ pub fn format_virtual_size_label(bytes: u64) -> String {
     }
 }
 
-/// Taille virtuelle de l'image de base (qemu-img info --output=json).
+/// Taille virtuelle d'une image (`qemu-img info -U` : lisible même VM allumée).
 pub fn image_virtual_size_bytes(path: &Path) -> Result<u64> {
-    let output = run_command("qemu-img", &["info", "--output=json", path_arg(path)?])?;
+    let output = run_command(
+        "qemu-img",
+        &["info", "-U", "--output=json", path_arg(path)?],
+    )?;
     if !output.status.success() {
         bail!(
             "qemu-img info a échoué pour {} : {}",

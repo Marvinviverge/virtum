@@ -629,10 +629,13 @@ pub fn domain_state(vm_id: &str) -> Result<String> {
 }
 
 /// Returns true for states where the guest is still running (ACPI shutdown needed).
+///
+/// `in shutdown` compte comme actif : QEMU tient encore le disque (verrou qcow2)
+/// tant que l'état n'est pas `shut off`.
 pub fn domain_is_active(state: &str) -> bool {
     matches!(
         state,
-        "running" | "paused" | "pmsuspended" | "blocked" | "unknown"
+        "running" | "paused" | "pmsuspended" | "blocked" | "unknown" | "in shutdown"
     )
 }
 
@@ -642,7 +645,8 @@ pub fn shutdown_domain(vm_id: &str) -> Result<()> {
         return Ok(());
     }
     let state = domain_state(vm_id)?;
-    if state == "shut off" || !domain_is_active(&state) {
+    // Déjà en cours d'arrêt : inutile de renvoyer l'ACPI.
+    if state == "in shutdown" || !domain_is_active(&state) {
         return Ok(());
     }
     run_virsh(&["shutdown", vm_id]).map(|_| ())
@@ -931,6 +935,14 @@ fn xml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_in_shutdown_still_active() {
+        assert!(domain_is_active("in shutdown"));
+        assert!(domain_is_active("running"));
+        assert!(!domain_is_active("shut off"));
+        assert!(!domain_is_active("crashed"));
+    }
 
     #[test]
     fn domain_is_active_recognizes_running_and_shutoff() {
