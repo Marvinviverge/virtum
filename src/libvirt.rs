@@ -582,6 +582,17 @@ pub fn domain_exists(vm_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Noms de tous les domaines libvirt (actifs et arrêtés).
+pub fn list_domain_names() -> Result<Vec<String>> {
+    let output = run_virsh(&["list", "--all", "--name"])?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 pub fn define_domain(xml_path: &Path) -> Result<()> {
     run_virsh(&["define", path_arg(xml_path)?]).map(|_| ())
 }

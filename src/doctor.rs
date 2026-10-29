@@ -6,7 +6,9 @@ use std::process::Command;
 use crate::bridge_network;
 use crate::config;
 use crate::disk;
+use crate::libvirt;
 use crate::metadata::{self, Instance, InstanceStatus};
+use crate::vm;
 
 const KVM_DEVICE: &str = "/dev/kvm";
 
@@ -65,6 +67,7 @@ pub fn run() -> i32 {
         check_bridge_lan(),
         check_virtum_storage(&paths),
         check_vm_base_images(&paths),
+        check_orphans(&paths),
     ];
 
     print_report(&results)
@@ -340,6 +343,119 @@ fn base_images_result(instances: &[Instance], instances_dir: &Path) -> CheckResu
     }
 }
 
+const ORPHANS_CHECK: &str = "Restes orphelins";
+
+/// Domaines `vm-…` et dossiers `instances/vm-…` sans entrée `metadata.json` (rien n'est supprimé).
+fn check_orphans(paths: &config::VirtumPaths) -> CheckResult {
+    let metadata = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(anyhow::Error::from)
+        .and_then(|rt| rt.block_on(metadata::load_metadata(&paths.metadata)));
+    let (metadata, domains) = match (metadata, libvirt::list_domain_names()) {
+        (Ok(metadata), Ok(domains)) => (metadata, domains),
+        (Err(err), _) | (_, Err(err)) => {
+            return CheckResult {
+                name: ORPHANS_CHECK.to_string(),
+                ok: true,
+                detail: format!("non vérifié ({err})"),
+            };
+        }
+    };
+    let known: Vec<&str> = metadata
+        .instances
+        .iter()
+        .filter(|i| i.status != InstanceStatus::Destroyed)
+        .map(|i| i.id.as_str())
+        .collect();
+    let dirs: Vec<String> = std::fs::read_dir(&paths.instances)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    orphans_result(&find_orphans(&known, &domains, &dirs), &paths.instances)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Orphans {
+    /// Domaines libvirt `vm-…` inconnus de `metadata.json`.
+    domains: Vec<String>,
+    /// Dossiers `instances/vm-…` sans metadata ni domaine.
+    dirs: Vec<String>,
+}
+
+fn find_orphans(known: &[&str], domains: &[String], dirs: &[String]) -> Orphans {
+    let is_orphan = |name: &String| name.starts_with("vm-") && !known.contains(&name.as_str());
+    let mut orphans = Orphans {
+        domains: domains.iter().filter(|d| is_orphan(d)).cloned().collect(),
+        dirs: dirs
+            .iter()
+            .filter(|d| is_orphan(d) && !domains.contains(d))
+            .cloned()
+            .collect(),
+    };
+    orphans.domains.sort();
+    orphans.dirs.sort();
+    orphans
+}
+
+/// Avertissement non bloquant : liste les orphelins et la commande de nettoyage adaptée.
+fn orphans_result(orphans: &Orphans, instances_dir: &Path) -> CheckResult {
+    if orphans.domains.is_empty() && orphans.dirs.is_empty() {
+        return CheckResult {
+            name: ORPHANS_CHECK.to_string(),
+            ok: true,
+            detail: "aucun".to_string(),
+        };
+    }
+    let mut parts = Vec::new();
+    if !orphans.domains.is_empty() {
+        parts.push(format!(
+            "domaine(s) libvirt sans metadata : {}",
+            orphans.domains.join(", ")
+        ));
+    }
+    if !orphans.dirs.is_empty() {
+        parts.push(format!(
+            "dossier(s) instances/ sans VM : {}",
+            orphans.dirs.join(", ")
+        ));
+    }
+
+    // `virtum destroy` ne reconnaît que les ids générés (`vm-` + hex) ; le reste se nettoie à la main.
+    let all: Vec<&String> = orphans.domains.iter().chain(&orphans.dirs).collect();
+    let (destroyable, manual): (Vec<&String>, Vec<&String>) =
+        all.into_iter().partition(|id| vm::is_virtum_vm_id(id));
+    let mut hints = Vec::new();
+    if !destroyable.is_empty() {
+        let ids: Vec<&str> = destroyable.iter().map(|s| s.as_str()).collect();
+        hints.push(format!("`virtum destroy {}`", ids.join(" ")));
+    }
+    for id in manual {
+        if orphans.domains.contains(id) {
+            hints.push(format!("`virsh undefine {id}`"));
+        }
+        let dir = instances_dir.join(id);
+        if dir.is_dir() {
+            hints.push(format!("`rm -r {}`", dir.display()));
+        }
+    }
+
+    CheckResult {
+        name: ORPHANS_CHECK.to_string(),
+        ok: true,
+        detail: format!(
+            "{}. Vérifiez avant de nettoyer : {}",
+            parts.join(" ; "),
+            hints.join(", ")
+        ),
+    }
+}
+
 fn check_bridge_lan() -> CheckResult {
     const NAME: &str = "Réseau bridge (LAN physique)";
     let cap = bridge_network::scan_bridge_capability();
@@ -497,6 +613,45 @@ fn print_report(results: &[CheckResult]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn find_orphans_ignores_known_and_foreign_domains() {
+        let known = ["vm-39c32f26cb1b"];
+        let domains = strings(&["vm-39c32f26cb1b", "vm-18a0ec445896", "vm-aa-test6", "win11"]);
+        let dirs = strings(&["vm-39c32f26cb1b", "vm-aa-test6", "vm-perm-test"]);
+        let orphans = find_orphans(&known, &domains, &dirs);
+        assert_eq!(
+            orphans.domains,
+            strings(&["vm-18a0ec445896", "vm-aa-test6"])
+        );
+        // vm-aa-test6 a un domaine : compté une seule fois, côté domaines.
+        assert_eq!(orphans.dirs, strings(&["vm-perm-test"]));
+    }
+
+    #[test]
+    fn orphans_result_suggests_destroy_or_manual_cleanup() {
+        let dir = std::env::temp_dir().join(format!("virtum-doctor-orph-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("vm-perm-test")).unwrap();
+        let orphans = Orphans {
+            domains: strings(&["vm-18a0ec445896", "vm-aa-test6"]),
+            dirs: strings(&["vm-perm-test"]),
+        };
+        let result = orphans_result(&orphans, &dir);
+        assert!(result.ok, "avertissement non bloquant");
+        assert!(result.detail.contains("`virtum destroy vm-18a0ec445896`"));
+        assert!(result.detail.contains("`virsh undefine vm-aa-test6`"));
+        assert!(result.detail.contains("vm-perm-test`"));
+        assert!(!result.detail.contains("virsh undefine vm-perm-test"));
+
+        let none = orphans_result(&Orphans::default(), &dir);
+        assert_eq!(none.detail, "aucun");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn base_images_check_detects_missing_base() {

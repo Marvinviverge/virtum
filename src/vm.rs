@@ -1231,7 +1231,7 @@ async fn resolve_destroy_target(paths: &VirtumPaths, reference: &str) -> Result<
 }
 
 /// Id libvirt généré par Virtum (`vm-` + 12 hex).
-fn is_virtum_vm_id(reference: &str) -> bool {
+pub fn is_virtum_vm_id(reference: &str) -> bool {
     let Some(suffix) = reference.strip_prefix("vm-") else {
         return false;
     };
