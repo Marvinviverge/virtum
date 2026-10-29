@@ -2,7 +2,7 @@
 
 **Virtum : la VM, tout simplement.**
 
-CLI Linux pour lancer des VM locales reproductibles avec une expérience proche de Docker : `run`, `ps`, `shell`, `stop`, `start`, `destroy`.
+CLI Linux pour lancer des VM locales reproductibles avec une expérience proche de Docker : `run`, `ps`, `shell`, `stop`, `start`, `destroy`, labs `up` / `down`, instantanés `snapshot`.
 
 ## Statut
 
@@ -15,6 +15,8 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 **v0.4 terminé** — `mounts:` dossiers partagés hôte ↔ VM (**virtiofs**) : [`STEPS4.md`](./STEPS4.md) §7, [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md). Exemple : [`examples/Virtumfile.mounts`](./examples/Virtumfile.mounts).
 
 **v0.5 terminée** — durcissement sécurité V-001–V-006 (guest mounts, cloud-init, SSH `known_hosts`, `--insecure-ssh`, confirmation `bind: lan`, `cargo audit`) : [`STEPS5.md`](./STEPS5.md), [`SPEC_TECH_V0.5.md`](./SPEC_TECH_V0.5.md).
+
+**v0.6 terminée (banc de test d'infra)** — instantanés `virtum snapshot` (VM ou lab), `ssh_port` (VM durcies), `restart:` au boot de l'hôte, alias `virtum list`, fiabilité (statut libvirt réel, images de base, orphelins dans `doctor`) : [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md).
 
 ## Documentation
 
@@ -32,6 +34,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`SPEC_TECH_V0.5.md`](./SPEC_TECH_V0.5.md) | Contrat technique **v0.5** (security hardening) |
 | [`STEPS5.md`](./STEPS5.md) | Plan d’implémentation **v0.5** |
 | [`specs/001-security-hardening/spec.md`](./specs/001-security-hardening/spec.md) | Spec Kit feature v0.5 |
+| [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md) | Contrat technique **v0.6** (instantanés, `ssh_port`, `restart`) |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 
@@ -77,7 +80,7 @@ virtum doctor
 | `setup-host.sh` | Paquets apt, `libvirtd`, groupes `libvirt`/`kvm` |
 | `install.sh` / `make install` | Compile et installe `virtum` dans `~/.cargo/bin` |
 | `setup-var-lib.sh` | Prépare `/var/lib/virtum` (stockage QEMU système) |
-| `virtum doctor` | Binaires, KVM, groupes, réseau `default`, **bridge LAN**, stockage, socat |
+| `virtum doctor` | Binaires, KVM, groupes, réseau `default`, **bridge LAN**, stockage, socat, images de base des VM, restes orphelins (avertissement) |
 
 Le répertoire `~/.cargo/bin` doit être dans votre `PATH` (souvent déjà le cas avec Rust).
 
@@ -131,8 +134,9 @@ virtum down                  # arrête toutes les VM du lab (Virtumfile `name`)
 virtum down --destroy        # supprime le lab
 virtum up -f examples/Virtumfile.mounts   # lab v0.4 avec mounts virtiofs
 virtum down -f examples/Virtumfile.mounts --destroy --purge  # + dossiers hôte mounts
-virtum ps          # VM en cours (NAME, LAB, DISK, IP, …)
+virtum ps          # VM en cours (NAME, LAB, DISK, IP, …) ; signale les labs éteints
 virtum ps -a       # toutes les VM connues (y compris arrêtées)
+virtum list        # alias de ps
 virtum shell <vm-id>
 virtum stop <vm-id> [vm…]      # une ou plusieurs VM (id ou name)
 virtum start <vm-id> [vm…]     # relancer une ou plusieurs VM arrêtées
@@ -315,6 +319,24 @@ virtum down -f examples/Virtumfile.mounts --destroy --purge
 Voir [`STEPS4.md`](./STEPS4.md) §7 et [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md).
 
 **Prérequis mounts** : paquet `virtiofsd` ; sans `uidmap` (`newuidmap`), Virtum lance virtiofsd avec `--sandbox=none` (isolation réduite — voir `virtum doctor`).
+
+### Banc de test v0.6
+
+Sur un lab jetable (pas un lab de travail) :
+
+```bash
+virtum up -f Virtumfile
+virtum snapshot create avant -f Virtumfile        # toutes les VM du lab
+virtum shell <vm>                                 # modifier la VM (fichier témoin…)
+virtum snapshot restore avant -f Virtumfile       # le témoin a disparu
+virtum snapshot ls -f Virtumfile
+virtum snapshot rm avant -f Virtumfile
+# ssh_port : déplacer sshd sur 2222 dans la VM, déclarer ssh_port: 2222, puis down / up / shell
+# restart : virsh dominfo <vm-id> | grep Autostart  après up et après stop
+virtum down -f Virtumfile --destroy
+```
+
+Voir [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md) §Validation.
 
 ### Sécurité v0.5
 

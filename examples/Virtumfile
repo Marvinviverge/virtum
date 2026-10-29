@@ -4,6 +4,9 @@
 name: demo-lab
 # Expose les ports sur le LAN (téléphone / collègue même Wi‑Fi) — v0.3
 bind: lan
+# v0.6 (optionnels) :
+# ssh_port: 2222          # si la configuration de la VM déplace sshd (repli 22)
+# restart: unless-stopped # démarrage au boot de l'hôte : no | always | unless-stopped
 
 machines:
   web:

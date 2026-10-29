@@ -31,7 +31,7 @@ pub enum Commands {
     },
     /// Launch a headless VM
     Run(RunArgs),
-    /// Apply Virtumfile changes to existing lab VMs (RAM, bind, ports, disk_size)
+    /// Apply Virtumfile changes to existing lab VMs (RAM, CPU, bind, ports, disk_size, mounts, ssh_port, restart)
     Apply {
         /// Path to Virtumfile
         #[arg(short, long)]
@@ -96,7 +96,7 @@ pub enum Commands {
         #[arg(value_name = "VM", num_args = 1..)]
         vms: Vec<String>,
     },
-    /// Shut down one or more VMs (graceful shutdown, then force after 30s)
+    /// Shut down one or more VMs (graceful shutdown, then force after 30s; `restart: unless-stopped` then skips host boot)
     Stop {
         /// VM id or name
         #[arg(value_name = "VM", num_args = 1..)]
