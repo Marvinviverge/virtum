@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::config::{self, VirtumPaths};
 use crate::lab_network;
-use crate::libvirt::{domain_exists, domain_is_active, domain_state};
+use crate::libvirt::domain_exists;
 use crate::metadata::{self, Instance, InstanceStatus};
 use crate::mounts;
 use crate::port_forward::{self, PortBind, PortForward};
@@ -269,8 +269,9 @@ async fn resume_lab_machine(
     let reference = existing.name.clone().unwrap_or_else(|| existing.id.clone());
 
     if domain_exists(vm_id) {
-        let state = domain_state(vm_id)?;
-        if domain_is_active(&state) && existing.status == InstanceStatus::Running {
+        let paths = config::ensure_layout().await?;
+        let live = vm::refresh_instance_status(&paths.metadata, existing.clone()).await?;
+        if live.status == InstanceStatus::Running {
             let ip = existing.ip.as_deref().unwrap_or("-");
             eprintln!("Machine '{machine_name}' déjà en cours d'exécution (IP: {ip}).");
             if !spec_ports.is_empty() && ip != "-" {

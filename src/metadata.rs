@@ -172,6 +172,17 @@ pub fn resolve_instance_ref<'a>(metadata: &'a Metadata, reference: &str) -> Resu
     );
 }
 
+/// Statut réel d'après libvirt : `domain_active` = `None` si le domaine est absent (statut stocké conservé).
+///
+/// Corrige un `running` périmé après un redémarrage de l'hôte, ou un `stopped` après un `virsh start` manuel.
+pub fn reconcile_status(stored: InstanceStatus, domain_active: Option<bool>) -> InstanceStatus {
+    match (stored, domain_active) {
+        (InstanceStatus::Running | InstanceStatus::Stopped, Some(true)) => InstanceStatus::Running,
+        (InstanceStatus::Running | InstanceStatus::Stopped, Some(false)) => InstanceStatus::Stopped,
+        _ => stored,
+    }
+}
+
 /// Id libvirt à partir d'une référence id ou name.
 pub fn resolve_instance_id(metadata: &Metadata, reference: &str) -> Result<String> {
     Ok(resolve_instance_ref(metadata, reference)?.id.clone())
@@ -361,6 +372,26 @@ mod tests {
         assert!(validate_name("").is_err());
         assert!(validate_name("-bad").is_err());
         assert!(validate_name("a b").is_err());
+    }
+
+    #[test]
+    fn reconcile_status_follows_libvirt() {
+        use InstanceStatus::*;
+        // Hôte redémarré : metadata dit running, domaine shut off.
+        assert_eq!(reconcile_status(Running, Some(false)), Stopped);
+        // `virsh start` manuel : metadata dit stopped, domaine actif.
+        assert_eq!(reconcile_status(Stopped, Some(true)), Running);
+        assert_eq!(reconcile_status(Running, Some(true)), Running);
+        assert_eq!(reconcile_status(Stopped, Some(false)), Stopped);
+    }
+
+    #[test]
+    fn reconcile_status_keeps_stored_without_domain_or_when_transient() {
+        use InstanceStatus::*;
+        assert_eq!(reconcile_status(Running, None), Running);
+        assert_eq!(reconcile_status(Stopped, None), Stopped);
+        assert_eq!(reconcile_status(Creating, Some(true)), Creating);
+        assert_eq!(reconcile_status(Destroyed, Some(false)), Destroyed);
     }
 
     #[tokio::test]

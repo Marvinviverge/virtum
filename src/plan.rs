@@ -157,10 +157,9 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
                 if !updates.is_empty() {
                     MachineAction::Update
                 } else if domain_exists(&vm_id) {
-                    let state = domain_state(&vm_id).ok();
-                    if state.as_ref().is_some_and(|s| domain_is_active(s))
-                        && inst.status == InstanceStatus::Running
-                    {
+                    // Lecture seule : statut réel libvirt, sans réécrire metadata.json.
+                    let active = domain_state(&vm_id).ok().map(|s| domain_is_active(&s));
+                    if metadata::reconcile_status(inst.status, active) == InstanceStatus::Running {
                         MachineAction::Unchanged
                     } else {
                         MachineAction::Resume

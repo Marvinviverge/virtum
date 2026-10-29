@@ -1238,6 +1238,24 @@ fn is_virtum_vm_id(reference: &str) -> bool {
     (8..=16).contains(&suffix.len()) && suffix.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Aligne `status` sur l'état libvirt réel et persiste l'écart dans `metadata.json`.
+pub async fn refresh_instance_status(
+    metadata_path: &Path,
+    mut instance: Instance,
+) -> Result<Instance> {
+    let domain_active = if domain_exists(&instance.id) {
+        Some(domain_is_active(&domain_state(&instance.id)?))
+    } else {
+        None
+    };
+    let live = metadata::reconcile_status(instance.status, domain_active);
+    if live != instance.status {
+        instance.status = live;
+        metadata::upsert_instance(metadata_path, instance.clone()).await?;
+    }
+    Ok(instance)
+}
+
 async fn require_instance(paths: &VirtumPaths, reference: &str) -> Result<Instance> {
     let metadata = metadata::load_metadata(&paths.metadata).await?;
     metadata::resolve_instance_ref(&metadata, reference).cloned()

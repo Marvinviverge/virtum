@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use crate::command::{path_arg, run_command};
 use crate::config;
 use crate::libvirt::SLIRP_GUEST_IPV4;
-use crate::metadata::{self, InstanceStatus};
+use crate::metadata::{self, Instance, InstanceStatus};
 use crate::mounts::{MountSshStep, ResolvedMount};
 
 const PRIVATE_KEY_NAME: &str = "virtum_id_ed25519";
@@ -168,6 +168,18 @@ fn map_ssh_host_key_error(stderr: &str, opts: &SshSessionOpts) -> Option<String>
     }
 }
 
+/// Message pour une VM éteinte (cas typique : hôte redémarré, les VM ne repartent pas seules).
+fn stopped_vm_message(instance: &Instance) -> String {
+    let reference = instance.name.as_deref().unwrap_or(&instance.id);
+    let relaunch = match instance.lab_name.as_deref() {
+        Some(lab) => format!(
+            "Relancez-la : `virtum start {reference}`, ou tout le lab '{lab}' : `virtum up` (dans le dossier du Virtumfile)."
+        ),
+        None => format!("Relancez-la : `virtum start {reference}`."),
+    };
+    format!("La VM '{reference}' est éteinte (shut off) — l'hôte a peut-être redémarré. {relaunch}")
+}
+
 /// SSH interactif vers une instance (étape 17) ; termine le processus avec le code SSH.
 pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -179,18 +191,16 @@ pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
     let (private_key, user, host, port, ssh_opts) = runtime.block_on(async {
         let paths = config::ensure_layout().await?;
         let metadata = metadata::load_metadata(&paths.metadata).await?;
-        let instance = metadata::resolve_instance_ref(&metadata, reference)?;
+        let instance = metadata::resolve_instance_ref(&metadata, reference)?.clone();
+        let instance = crate::vm::refresh_instance_status(&paths.metadata, instance).await?;
         let vm_id = instance.id.as_str();
 
+        if instance.status == InstanceStatus::Stopped {
+            bail!("{}", stopped_vm_message(&instance));
+        }
         if instance.status != InstanceStatus::Running {
-            let hint = match instance.status {
-                InstanceStatus::Stopped => {
-                    format!("Utilisez `virtum start {vm_id}` pour la relancer.")
-                }
-                _ => String::new(),
-            };
             bail!(
-                "La VM '{vm_id}' n'est pas en cours d'exécution (statut: {:?}). {hint}",
+                "La VM '{vm_id}' n'est pas en cours d'exécution (statut: {:?}).",
                 instance.status
             );
         }
@@ -526,6 +536,32 @@ pub fn ssh_option_strings(opts: &SshSessionOpts) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stopped_instance(lab: Option<&str>) -> Instance {
+        let mut instance: Instance = serde_json::from_str(
+            r#"{"id":"vm-39c32f26cb1b","name":"app","os":"ubuntu-24.04","status":"stopped",
+                "user":"virtum","hostname":"app","created_at":"2026-10-28T09:13:04Z"}"#,
+        )
+        .unwrap();
+        instance.lab_name = lab.map(str::to_string);
+        instance
+    }
+
+    #[test]
+    fn stopped_vm_message_points_to_lab_up() {
+        let msg = stopped_vm_message(&stopped_instance(Some("infra-local")));
+        assert!(msg.contains("'app' est éteinte"));
+        assert!(msg.contains("virtum start app"));
+        assert!(msg.contains("lab 'infra-local'"));
+        assert!(msg.contains("virtum up"));
+    }
+
+    #[test]
+    fn stopped_vm_message_standalone_vm() {
+        let msg = stopped_vm_message(&stopped_instance(None));
+        assert!(msg.contains("virtum start app"));
+        assert!(!msg.contains("virtum up"));
+    }
 
     #[test]
     fn remote_provision_shell_command_quotes_and_sudo() {
