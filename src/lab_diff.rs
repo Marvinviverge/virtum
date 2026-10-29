@@ -18,11 +18,13 @@ use crate::libvirt::{
 use crate::metadata::{self, Instance};
 use crate::mounts::{self, ResolvedMount};
 use crate::port_forward::{self, PortBind, PortForward};
-use crate::ssh::{ensure_ssh_keypair, run_provision_commands, run_ssh_mount_steps, SshSessionOpts};
+use crate::ssh::{
+    ensure_ssh_keypair, reachable_ssh_port, run_provision_commands, run_ssh_mount_steps,
+    SshSessionOpts,
+};
 use crate::virtumfile::{self, MachineSpec, MountSpec, Virtumfile};
 use crate::vm::{self, lab_vm_id};
 
-const SSH_PORT: u16 = 22;
 const GROW_COMMANDS: &[&str] = &[
     "growpart /dev/vda 1 || true",
     "resize2fs /dev/vda1 || xfs_growfs / || true",
@@ -58,6 +60,11 @@ pub enum MachineChange {
     MountsAdd {
         volumes: Vec<MountSpec>,
     },
+    /// Port sshd déclaré (metadata seulement, aucun redémarrage).
+    SshPort {
+        from: u16,
+        to: u16,
+    },
 }
 
 impl MachineChange {
@@ -85,7 +92,13 @@ impl MachineChange {
                     mounts::format_mount_list(volumes)
                 )
             }
+            Self::SshPort { from, to } => format!("ssh_port: {from} → {to}"),
         }
+    }
+
+    /// False si `virtum up` applique lui-même le changement (sans exiger `apply`).
+    pub fn needs_apply(&self) -> bool {
+        !matches!(self, Self::SshPort { .. })
     }
 
     fn needs_guest_stop(&self) -> bool {
@@ -256,6 +269,15 @@ pub fn diff_machine(
         .collect();
     if !additions.is_empty() {
         changes.push(MachineChange::MountsAdd { volumes: additions });
+    }
+
+    let stored_ssh_port = instance.ssh_port.unwrap_or(virtumfile::DEFAULT_SSH_PORT);
+    let desired_ssh_port = virtumfile::effective_ssh_port(lab, machine_name);
+    if stored_ssh_port != desired_ssh_port {
+        changes.push(MachineChange::SshPort {
+            from: stored_ssh_port,
+            to: desired_ssh_port,
+        });
     }
 
     Ok(MachineDiff {
@@ -472,6 +494,7 @@ async fn apply_machine(
                     apply_mounts_add(paths, lab, lab_net, spec, md, volumes, virtumfile_path)
                         .await?;
             }
+            MachineChange::SshPort { .. } => {}
             MachineChange::Os { .. } => unreachable!(),
         }
     }
@@ -518,6 +541,7 @@ async fn apply_machine(
     } else if spec.disk_size.is_some() {
         updated.disk_size = spec.disk_size.clone();
     }
+    updated.ssh_port = vm::stored_ssh_port(virtumfile::effective_ssh_port(lab, &md.machine_name));
     let desired_mounts = virtumfile::effective_mount_specs(lab, &md.machine_name);
     updated.mounts = if desired_mounts.is_empty() {
         None
@@ -549,7 +573,7 @@ async fn apply_machine(
                     &keys.private_key,
                     &inst.user,
                     ip,
-                    SSH_PORT,
+                    reachable_ssh_port(ip, inst.ssh_port.unwrap_or(virtumfile::DEFAULT_SSH_PORT)),
                     &cmds,
                     std::time::Duration::from_secs(120),
                     &ssh_opts,
@@ -602,7 +626,7 @@ async fn apply_machine(
                     &keys.private_key,
                     &inst.user,
                     ip,
-                    SSH_PORT,
+                    reachable_ssh_port(ip, inst.ssh_port.unwrap_or(virtumfile::DEFAULT_SSH_PORT)),
                     &mounts_added_ssh,
                     &ssh_opts,
                 )?;
@@ -675,6 +699,32 @@ mod tests {
     }
 
     #[test]
+    fn ssh_port_drift_is_reported_but_left_to_up() {
+        let lab = virtumfile::load_from_str(
+            "name: lab\nssh_port: 2222\nmachines:\n  app:\n    os: ubuntu-24.04\n",
+        )
+        .unwrap();
+        let instance: Instance = serde_json::from_str(
+            r#"{"id":"vm-test","name":"app","os":"ubuntu-24.04","status":"stopped",
+                "user":"virtum","hostname":"app","created_at":"2026-10-29T09:00:00Z"}"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("virtum-diff-ssh-{}", std::process::id()));
+        let diff = diff_machine(&lab, "app", &lab.machines["app"], &instance, &dir).unwrap();
+        assert_eq!(
+            diff.changes,
+            vec![MachineChange::SshPort { from: 22, to: 2222 }]
+        );
+        assert_eq!(diff.changes[0].summary_line(), "ssh_port: 22 → 2222");
+        assert!(!diff.changes[0].needs_apply());
+
+        let mut aligned = instance.clone();
+        aligned.ssh_port = Some(2222);
+        let diff = diff_machine(&lab, "app", &lab.machines["app"], &aligned, &dir).unwrap();
+        assert!(diff.changes.is_empty());
+    }
+
+    #[test]
     fn bind_drift_ignored_when_no_ports() {
         let lab = Virtumfile {
             name: "lab".into(),
@@ -682,6 +732,7 @@ mod tests {
             bridge_interface: None,
             bind: Some(PortBind::Lan),
             mounts: None,
+            ssh_port: None,
             machines: BTreeMap::from([(
                 "db".into(),
                 MachineSpec {
@@ -695,6 +746,7 @@ mod tests {
                     bind: None,
                     provision: vec![],
                     mounts: None,
+                    ssh_port: None,
                 },
             )]),
         };
@@ -739,6 +791,7 @@ mod tests {
             bridge_interface: None,
             bind: Some(PortBind::Lan),
             mounts: None,
+            ssh_port: None,
             machines: BTreeMap::from([(
                 "web".into(),
                 MachineSpec {
@@ -752,6 +805,7 @@ mod tests {
                     bind: None,
                     provision: vec![],
                     mounts: None,
+                    ssh_port: None,
                 },
             )]),
         };

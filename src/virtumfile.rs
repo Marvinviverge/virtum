@@ -87,6 +87,9 @@ pub struct Virtumfile {
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_mounts_field")]
     pub mounts: Option<Vec<MountSpec>>,
+    /// Port sshd une fois la machine configurée (défaut 22), hérité par toutes les machines.
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
     pub machines: BTreeMap<String, MachineSpec>,
 }
 
@@ -133,6 +136,9 @@ pub struct MachineSpec {
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_mounts_field")]
     pub mounts: Option<Vec<MountSpec>>,
+    /// Port sshd de cette machine (surcharge `ssh_port` du lab).
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
 }
 
 /// Mounts effectifs pour une machine (lab + surcharge machine).
@@ -245,6 +251,15 @@ pub fn effective_port_bind(lab: &Virtumfile, machine_name: &str) -> PortBind {
     spec.bind.or(lab.bind).unwrap_or(PortBind::Local)
 }
 
+/// Port SSH standard (image cloud fraîche).
+pub const DEFAULT_SSH_PORT: u16 = 22;
+
+/// `ssh_port` effectif : machine > lab > 22.
+pub fn effective_ssh_port(lab: &Virtumfile, machine_name: &str) -> u16 {
+    let spec = &lab.machines[machine_name];
+    spec.ssh_port.or(lab.ssh_port).unwrap_or(DEFAULT_SSH_PORT)
+}
+
 /// True si `virtum up` doit demander confirmation (bind: lan + au moins un port mappé).
 pub fn lab_requires_lan_consent(lab: &Virtumfile) -> Result<bool> {
     for (machine_name, spec) in &lab.machines {
@@ -309,6 +324,9 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
     if let Some(ref iface) = lab.bridge_interface {
         validate_bridge_interface_name(iface)?;
     }
+    if lab.ssh_port == Some(0) {
+        bail!("`ssh_port` doit être compris entre 1 et 65535.");
+    }
 
     let mut port_machines: Vec<(String, Vec<PortForward>)> = Vec::new();
     for (machine_name, spec) in &lab.machines {
@@ -325,6 +343,9 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
         }
         if spec.cpu == 0 {
             bail!("Machine '{machine_name}': `cpu` doit être > 0.");
+        }
+        if spec.ssh_port == Some(0) {
+            bail!("Machine '{machine_name}': `ssh_port` doit être compris entre 1 et 65535.");
         }
         if let Some(ref size) = spec.disk_size {
             parse_disk_size(size)
@@ -431,6 +452,38 @@ machines:
         assert_eq!(lab.network, None);
         assert_eq!(effective_network_mode(&lab, "web"), NetworkMode::Lab);
         assert_eq!(effective_network_mode(&lab, "db"), NetworkMode::Lab);
+    }
+
+    #[test]
+    fn ssh_port_defaults_to_22_and_inherits_from_lab() {
+        let lab = load_from_str(SAMPLE).unwrap();
+        assert_eq!(effective_ssh_port(&lab, "web"), 22);
+
+        let yaml = r#"
+name: infra
+ssh_port: 2222
+machines:
+  app:
+    os: ubuntu-24.04
+  edge:
+    os: ubuntu-24.04
+    ssh_port: 2200
+"#;
+        let lab = load_from_str(yaml).unwrap();
+        validate(&lab, Path::new("/tmp")).unwrap();
+        assert_eq!(effective_ssh_port(&lab, "app"), 2222);
+        assert_eq!(effective_ssh_port(&lab, "edge"), 2200);
+    }
+
+    #[test]
+    fn rejects_invalid_ssh_port() {
+        let zero = load_from_str("name: x\nmachines:\n  a:\n    os: debian-12\n    ssh_port: 0\n")
+            .unwrap();
+        assert!(validate(&zero, Path::new("/tmp")).is_err());
+        assert!(
+            load_from_str("name: x\nssh_port: 70000\nmachines:\n  a:\n    os: debian-12\n")
+                .is_err()
+        );
     }
 
     #[test]

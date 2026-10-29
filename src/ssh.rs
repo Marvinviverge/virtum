@@ -14,6 +14,7 @@ use crate::config;
 use crate::libvirt::SLIRP_GUEST_IPV4;
 use crate::metadata::{self, Instance, InstanceStatus};
 use crate::mounts::{MountSshStep, ResolvedMount};
+use crate::virtumfile::DEFAULT_SSH_PORT;
 
 const PRIVATE_KEY_NAME: &str = "virtum_id_ed25519";
 const PUBLIC_KEY_NAME: &str = "virtum_id_ed25519.pub";
@@ -216,7 +217,13 @@ pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
                 )
             })?;
 
-        let port = instance.ssh_port.unwrap_or(22);
+        let configured = instance.ssh_port.unwrap_or(DEFAULT_SSH_PORT);
+        // SLIRP (ancien mode) : `ssh_port` est le port hôte redirigé, pas de repli.
+        let port = if ip == "127.0.0.1" || ip == SLIRP_GUEST_IPV4 {
+            configured
+        } else {
+            reachable_ssh_port(ip, configured)
+        };
 
         if (ip == "127.0.0.1" || ip == SLIRP_GUEST_IPV4) && instance.ssh_port.is_some() {
             eprintln!(
@@ -480,6 +487,35 @@ pub fn ssh_auth_probe(
         .unwrap_or(false)
 }
 
+/// Délai de connexion TCP pour choisir le port SSH joignable.
+const TCP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Ports SSH à essayer : le port déclaré, puis 22 (image fraîche, avant que la
+/// configuration de la VM — Ansible, provision — ne déplace sshd).
+pub fn ssh_ports_to_try(configured: u16) -> Vec<u16> {
+    if configured == DEFAULT_SSH_PORT {
+        vec![configured]
+    } else {
+        vec![configured, DEFAULT_SSH_PORT]
+    }
+}
+
+/// Premier port de `ssh_ports_to_try` qui accepte une connexion TCP, sinon le port déclaré.
+pub fn reachable_ssh_port(host: &str, configured: u16) -> u16 {
+    ssh_ports_to_try(configured)
+        .into_iter()
+        .find(|port| tcp_port_open(host, *port))
+        .unwrap_or(configured)
+}
+
+fn tcp_port_open(host: &str, port: u16) -> bool {
+    let Ok(ip) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(ip, port), TCP_PROBE_TIMEOUT)
+        .is_ok()
+}
+
 fn exec_ssh_shell(
     private_key: &Path,
     user: &str,
@@ -545,6 +581,26 @@ mod tests {
         .unwrap();
         instance.lab_name = lab.map(str::to_string);
         instance
+    }
+
+    #[test]
+    fn ssh_ports_to_try_falls_back_to_22() {
+        assert_eq!(ssh_ports_to_try(22), vec![22]);
+        assert_eq!(ssh_ports_to_try(2222), vec![2222, 22]);
+    }
+
+    #[test]
+    fn reachable_ssh_port_prefers_open_configured_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap().port();
+        assert_eq!(reachable_ssh_port("127.0.0.1", open), open);
+
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        // Port déclaré fermé : repli sur 22 si un sshd local écoute, sinon port déclaré.
+        assert!([closed, 22].contains(&reachable_ssh_port("127.0.0.1", closed)));
     }
 
     #[test]

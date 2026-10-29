@@ -115,7 +115,7 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             if let Ok(diff) =
                 crate::lab_diff::diff_machine(&lab, machine_name, spec, existing, &instance_dir)
             {
-                if !diff.changes.is_empty() {
+                if diff.changes.iter().any(|c| c.needs_apply()) {
                     bail!(
                         "Le Virtumfile de la machine '{machine_name}' ne correspond plus à l'instance déployée. \
                          Appliquez les changements avec : virtum apply -f {}\n\
@@ -136,6 +136,7 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
                 &instance_dir,
                 &spec_ports,
                 port_bind,
+                &lab,
             )
             .await
             {
@@ -181,6 +182,7 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             bridge_host_interface: net_cfg.bridge_host_interface,
             resolved_mounts,
             insecure_ssh,
+            ssh_port: virtumfile::effective_ssh_port(&lab, machine),
         };
         let hostname = config.hostname_for_vm(&vm_id);
         let instance_dir = paths.instances.join(&vm_id);
@@ -257,7 +259,9 @@ async fn resume_lab_machine(
     instance_dir: &std::path::Path,
     spec_ports: &[PortForward],
     port_bind: PortBind,
+    lab: &virtumfile::Virtumfile,
 ) -> Result<()> {
+    let ssh_port = virtumfile::effective_ssh_port(lab, machine_name);
     if existing.id != vm_id {
         bail!(
             "Incohérence lab/machine '{machine_name}' : metadata {} vs domaine attendu {vm_id}. \
@@ -268,8 +272,17 @@ async fn resume_lab_machine(
 
     let reference = existing.name.clone().unwrap_or_else(|| existing.id.clone());
 
+    let paths = config::ensure_layout().await?;
+    // `ssh_port` du Virtumfile pris en compte dès `up` (pas besoin d'`apply`).
+    let mut existing = existing.clone();
+    let stored_port = vm::stored_ssh_port(ssh_port);
+    if existing.ssh_port != stored_port {
+        eprintln!("  Port SSH de '{machine_name}' : {ssh_port}");
+        existing.ssh_port = stored_port;
+        metadata::upsert_instance(&paths.metadata, existing.clone()).await?;
+    }
+
     if domain_exists(vm_id) {
-        let paths = config::ensure_layout().await?;
         let live = vm::refresh_instance_status(&paths.metadata, existing.clone()).await?;
         if live.status == InstanceStatus::Running {
             let ip = existing.ip.as_deref().unwrap_or("-");

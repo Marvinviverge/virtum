@@ -163,6 +163,25 @@ Après `virtum down`, modifier le Virtumfile (ex. plus de RAM) puis **`virtum ap
 
 Si vous changez un port hôte (`18080` → `18088`) : **`virtum apply`** met à jour socat, puis **`virtum close`** et **`virtum open`** pour resynchroniser ufw (le plan signale le décalage tant que le JSON n’est pas à jour).
 
+### Port SSH (`ssh_port`)
+
+Si la configuration de la VM (Ansible, provision) déplace sshd, déclarez le port dans le Virtumfile :
+
+```yaml
+name: infra-local
+ssh_port: 2222        # tout le lab (défaut : 22)
+machines:
+  app:
+    os: ubuntu-24.04
+  edge:
+    os: ubuntu-24.04
+    ssh_port: 2200    # surcharge pour une machine
+```
+
+- `up`, `start`, `shell`, `apply` et les instantanés essaient ce port, puis **22 en repli** : une VM neuve (sshd encore sur 22) démarre sans changer le Virtumfile.
+- Un changement de `ssh_port` est pris en compte au prochain `virtum up` (pas besoin d'`apply`) ; `virtum plan` l'affiche.
+- `virtum ps` affiche `IP:port` quand le port n'est pas 22.
+
 ### Instantanés (`virtum snapshot`)
 
 Pour rejouer un scénario de test : figer l'état des disques avant un test risqué, puis y revenir.

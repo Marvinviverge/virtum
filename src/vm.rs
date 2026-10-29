@@ -28,7 +28,8 @@ use crate::metadata::{self, Instance, InstanceStatus};
 use crate::mounts::{self, ResolvedMount};
 use crate::port_forward::{self, PortForward};
 use crate::ssh::{
-    ensure_ssh_keypair, read_public_key, run_provision_commands, ssh_auth_probe, SshSessionOpts,
+    ensure_ssh_keypair, read_public_key, run_provision_commands, ssh_auth_probe, ssh_ports_to_try,
+    SshSessionOpts,
 };
 
 const IP_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -68,6 +69,8 @@ pub struct VmLaunchConfig {
     pub resolved_mounts: Vec<ResolvedMount>,
     /// Mode SSH (--insecure-ssh global).
     pub insecure_ssh: bool,
+    /// Port sshd déclaré (Virtumfile `ssh_port`) ; 22 essayé en repli.
+    pub ssh_port: u16,
 }
 
 impl VmLaunchConfig {
@@ -88,6 +91,7 @@ impl VmLaunchConfig {
             bridge_host_interface: None,
             resolved_mounts: Vec::new(),
             insecure_ssh: false,
+            ssh_port: SSH_PORT,
         }
     }
 
@@ -99,6 +103,11 @@ impl VmLaunchConfig {
         }
         self.name.clone().unwrap_or_else(|| vm_id.to_string())
     }
+}
+
+/// `Instance.ssh_port` : absent pour 22 (metadata inchangée pour les labs existants).
+pub fn stored_ssh_port(port: u16) -> Option<u16> {
+    (port != SSH_PORT).then_some(port)
 }
 
 /// Id libvirt stable pour une machine de lab (`virtum up`).
@@ -352,11 +361,11 @@ pub async fn launch_vm_inner(
     let keys = ensure_ssh_keypair(&paths.keys)?;
     let private_key = keys.private_key.display();
     let ssh_opts = SshSessionOpts::new(instance_dir, config.insecure_ssh);
-    wait_for_ssh_login(
+    let ssh_port = wait_for_ssh_login(
         &keys.private_key,
         &config.user,
         &ip,
-        SSH_PORT,
+        &ssh_ports_to_try(config.ssh_port),
         ssh_timeout,
         &ssh_opts,
     )
@@ -399,7 +408,7 @@ pub async fn launch_vm_inner(
             &keys.private_key,
             &config.user,
             &ip,
-            SSH_PORT,
+            ssh_port,
             &post_boot,
             SSH_TIMEOUT_PROVISION,
             &ssh_opts,
@@ -410,7 +419,7 @@ pub async fn launch_vm_inner(
             &keys.private_key,
             &config.user,
             &ip,
-            SSH_PORT,
+            ssh_port,
             &["DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
                apt-get install -y -qq qemu-guest-agent && \
                systemctl enable --now qemu-guest-agent"
@@ -426,7 +435,7 @@ pub async fn launch_vm_inner(
         os: config.os.clone(),
         status: InstanceStatus::Running,
         ip: Some(ip.clone()),
-        ssh_port: None,
+        ssh_port: stored_ssh_port(config.ssh_port),
         user: config.user.clone(),
         hostname: hostname.to_string(),
         disk_size: Some(disk_size_label),
@@ -639,7 +648,7 @@ struct ResumeIpHint<'a> {
     known_ip: &'a str,
     private_key: &'a Path,
     user: &'a str,
-    ssh_port: u16,
+    ssh_ports: &'a [u16],
     ssh_opts: &'a SshSessionOpts,
 }
 
@@ -665,13 +674,15 @@ async fn wait_for_ip(
 
         if let Some(hint) = resume_hint.as_ref() {
             if is_usable_ssh_ip(hint.known_ip, attach.prefer_non_libvirt_default())
-                && ssh_auth_probe(
-                    hint.private_key,
-                    hint.user,
-                    hint.known_ip,
-                    hint.ssh_port,
-                    hint.ssh_opts,
-                )
+                && hint.ssh_ports.iter().any(|&port| {
+                    ssh_auth_probe(
+                        hint.private_key,
+                        hint.user,
+                        hint.known_ip,
+                        port,
+                        hint.ssh_opts,
+                    )
+                })
             {
                 eprintln!("IP réutilisée (metadata / SSH) : {}", hint.known_ip);
                 return Ok(hint.known_ip.to_string());
@@ -805,21 +816,40 @@ fn is_usable_ssh_ip(ip: &str, bridge_lan: bool) -> bool {
     true
 }
 
+/// `2222` ou `2222, repli 22`.
+fn format_ssh_ports(ports: &[u16]) -> String {
+    match ports {
+        [first, rest @ ..] if !rest.is_empty() => {
+            let rest: Vec<String> = rest.iter().map(u16::to_string).collect();
+            format!("{first}, repli {}", rest.join(", "))
+        }
+        _ => ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+/// Attend une connexion SSH par clé sur l'un des `ports` (dans l'ordre) ; renvoie le port qui a répondu.
 pub async fn wait_for_ssh_login(
     private_key: &Path,
     user: &str,
     host: &str,
-    port: u16,
+    ports: &[u16],
     timeout: Duration,
     opts: &SshSessionOpts,
-) -> Result<()> {
+) -> Result<u16> {
     let started = Instant::now();
     let mut last_progress = Instant::now();
     sleep(SSH_BOOT_GRACE).await;
 
     loop {
-        if ssh_auth_probe(private_key, user, host, port, opts) {
-            return Ok(());
+        if let Some(&port) = ports
+            .iter()
+            .find(|&&port| ssh_auth_probe(private_key, user, host, port, opts))
+        {
+            return Ok(port);
         }
 
         if last_progress.elapsed() >= Duration::from_secs(30) {
@@ -838,8 +868,10 @@ pub async fn wait_for_ssh_login(
     }
 
     bail!(
-        "Connexion SSH refusée pour {user}@{host}:{port} après {} secondes \
-         (sshd pas encore joignable ; cloud-init ou growpart peut être en cours).",
+        "Connexion SSH refusée pour {user}@{host} (port {}) après {} secondes \
+         (sshd pas encore joignable ; cloud-init ou growpart peut être en cours, \
+         ou `ssh_port` du Virtumfile ne correspond pas au port de sshd).",
+        format_ssh_ports(ports),
         timeout.as_secs()
     );
 }
@@ -962,7 +994,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     let network_attach =
         network_attach_from_resume(libvirt_network.as_deref(), bridge_iface.as_deref())?;
     let keys = ensure_ssh_keypair(&paths.keys)?;
-    let ssh_port = instance.ssh_port.unwrap_or(SSH_PORT);
+    let ssh_ports = ssh_ports_to_try(instance.ssh_port.unwrap_or(SSH_PORT));
     let ssh_opts = SshSessionOpts::new(&instance_dir, false);
     let resume_hint = instance.ip.as_deref().and_then(|known_ip| {
         if is_usable_ssh_ip(known_ip, network_attach.prefer_non_libvirt_default()) {
@@ -970,7 +1002,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
                 known_ip,
                 private_key: &keys.private_key,
                 user: &instance.user,
-                ssh_port,
+                ssh_ports: &ssh_ports,
                 ssh_opts: &ssh_opts,
             })
         } else {
@@ -1006,12 +1038,16 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         );
     }
 
-    eprintln!("Attente de SSH sur {ip} (max {} s)…", SSH_TIMEOUT.as_secs());
+    eprintln!(
+        "Attente de SSH sur {ip} (port {}, max {} s)…",
+        format_ssh_ports(&ssh_ports),
+        SSH_TIMEOUT.as_secs()
+    );
     wait_for_ssh_login(
         &keys.private_key,
         &instance.user,
         &ip,
-        ssh_port,
+        &ssh_ports,
         SSH_TIMEOUT,
         &ssh_opts,
     )
@@ -1322,6 +1358,14 @@ fn generate_vm_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_port_storage_and_label() {
+        assert_eq!(stored_ssh_port(22), None);
+        assert_eq!(stored_ssh_port(2222), Some(2222));
+        assert_eq!(format_ssh_ports(&[22]), "22");
+        assert_eq!(format_ssh_ports(&[2222, 22]), "2222, repli 22");
+    }
 
     #[test]
     fn generate_vm_id_has_prefix() {
