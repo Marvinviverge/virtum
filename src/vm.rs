@@ -1143,6 +1143,22 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
     Ok(())
 }
 
+/// Arrêt immédiat (`virsh destroy`) : pour `snapshot restore`, où l'état courant est abandonné.
+pub async fn kill_vm_async(reference: &str) -> Result<()> {
+    let paths = config::ensure_layout().await?;
+    let mut instance = require_instance(&paths, reference).await?;
+    let vm_id = instance.id.clone();
+
+    destroy_domain(&vm_id).with_context(|| format!("virsh destroy a échoué pour {vm_id}"))?;
+    port_forward::stop_instance_proxies(&paths.instances.join(&vm_id));
+
+    instance.status = InstanceStatus::Stopped;
+    metadata::upsert_instance(&paths.metadata, instance).await?;
+
+    println!("VM arrêtée (forcé): {vm_id}");
+    Ok(())
+}
+
 pub fn destroy_vm(reference: &str, purge_mounts: bool) -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()

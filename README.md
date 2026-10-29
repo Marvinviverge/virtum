@@ -137,6 +137,7 @@ virtum shell <vm-id>
 virtum stop <vm-id> [vm…]      # une ou plusieurs VM (id ou name)
 virtum start <vm-id> [vm…]     # relancer une ou plusieurs VM arrêtées
 virtum destroy <vm-id> [vm…]   # id/name ; orphelin libvirt (`virsh list` sans `virtum ps`)
+virtum snapshot create|restore|ls|rm <nom> [vm…]   # instantanés (sans vm : tout le lab)
 ```
 
 Virtum utilise **libvirt système** (`qemu:///system`).
@@ -161,6 +162,25 @@ virtum open -f examples/Virtumfile    # si bind: lan + ports (ufw, sudo)
 Après `virtum down`, modifier le Virtumfile (ex. plus de RAM) puis **`virtum apply`** — pas besoin de `--destroy` pour ces champs.
 
 Si vous changez un port hôte (`18080` → `18088`) : **`virtum apply`** met à jour socat, puis **`virtum close`** et **`virtum open`** pour resynchroniser ufw (le plan signale le décalage tant que le JSON n’est pas à jour).
+
+### Instantanés (`virtum snapshot`)
+
+Pour rejouer un scénario de test : figer l'état des disques avant un test risqué, puis y revenir.
+
+```bash
+virtum snapshot create avant-tls          # tout le lab du ./Virtumfile (ou -f …)
+virtum snapshot create avant-tls app edge # seulement ces VM
+virtum snapshot ls                        # instantanés + place disque
+virtum snapshot restore avant-tls         # retour de tout le lab
+virtum snapshot rm avant-tls
+```
+
+- **À froid** : seul le disque est capturé, pas la mémoire. Revenir à un instantané redémarre la VM depuis ce disque.
+- **VM allumées** : `create` / `rm` les arrêtent proprement, `restore` les coupe (l'état courant est abandonné), puis toutes sont relancées. `--no-restart` les laisse éteintes.
+- **Lab cohérent** : toutes les VM sont arrêtées avant le premier instantané. `restore` refuse sans rien toucher si une VM du lab n'a pas l'instantané.
+- **Stockage** : instantanés internes au `disk.qcow2` de chaque VM (tag `virtum-<nom>`). Aucun coût à la création ; chaque bloc réécrit ensuite est conservé en double. `rm` libère l'espace pour réutilisation, sans forcément réduire le fichier.
+- **Non inclus** : les dossiers hôte `mounts:`. `destroy` / `down --destroy` suppriment les instantanés avec le disque.
+- Si `apply` a agrandi un disque après l'instantané, `restore` remet l'ancienne taille : `virtum plan` le signale.
 
 ### Réseau bridge (LAN) — prérequis hôte
 

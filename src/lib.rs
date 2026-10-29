@@ -18,6 +18,7 @@ pub mod mounts;
 pub mod plan;
 pub mod port_forward;
 pub mod ps;
+pub mod snapshot;
 pub mod ssh;
 pub mod test_env;
 pub mod virtumfile;
@@ -25,7 +26,7 @@ pub mod vm;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, SnapshotAction};
 
 pub fn run() -> Result<()> {
     dispatch(Cli::parse().command)
@@ -55,6 +56,27 @@ fn dispatch(command: Commands) -> Result<()> {
             destroy,
             purge,
         } => lab::down(file, destroy, purge)?,
+        Commands::Snapshot { action } => match action {
+            SnapshotAction::Create {
+                name,
+                vms,
+                file,
+                no_restart,
+            } => snapshot::create(&name, &vms, file, no_restart)?,
+            SnapshotAction::Restore {
+                name,
+                vms,
+                file,
+                no_restart,
+            } => snapshot::restore(&name, &vms, file, no_restart)?,
+            SnapshotAction::Ls { vms, file } => snapshot::list(&vms, file)?,
+            SnapshotAction::Rm {
+                name,
+                vms,
+                file,
+                no_restart,
+            } => snapshot::remove(&name, &vms, file, no_restart)?,
+        },
     };
     Ok(())
 }

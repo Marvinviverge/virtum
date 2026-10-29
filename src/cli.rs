@@ -110,6 +110,67 @@ pub enum Commands {
         #[arg(long)]
         purge: bool,
     },
+    /// Named disk snapshots of VMs or of a whole lab (VMs are stopped while it is taken)
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+}
+
+/// Sans VM citée : toutes les VM du lab du Virtumfile (`-f` ou `./Virtumfile`).
+#[derive(Subcommand)]
+pub enum SnapshotAction {
+    /// Take a named snapshot (running VMs are stopped, then restarted)
+    Create {
+        /// Snapshot name (letters, digits, `-`, `_`)
+        name: String,
+        /// VM id or name (default: whole lab)
+        #[arg(value_name = "VM")]
+        vms: Vec<String>,
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Leave the VMs stopped afterwards
+        #[arg(long)]
+        no_restart: bool,
+    },
+    /// Return VMs to a snapshot (running VMs are powered off, then restarted)
+    Restore {
+        /// Snapshot name
+        name: String,
+        /// VM id or name (default: whole lab)
+        #[arg(value_name = "VM")]
+        vms: Vec<String>,
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Leave the VMs stopped afterwards
+        #[arg(long)]
+        no_restart: bool,
+    },
+    /// List snapshots
+    Ls {
+        /// VM id or name (default: whole lab)
+        #[arg(value_name = "VM")]
+        vms: Vec<String>,
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Delete a snapshot (running VMs are stopped, then restarted)
+    Rm {
+        /// Snapshot name
+        name: String,
+        /// VM id or name (default: whole lab)
+        #[arg(value_name = "VM")]
+        vms: Vec<String>,
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Leave the VMs stopped afterwards
+        #[arg(long)]
+        no_restart: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -169,6 +230,52 @@ pub enum RunNetworkMode {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn snapshot_create_with_vms_and_flags() {
+        let cli = Cli::try_parse_from([
+            "virtum",
+            "snapshot",
+            "create",
+            "avant-tls",
+            "app",
+            "edge",
+            "--no-restart",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Snapshot {
+                action:
+                    SnapshotAction::Create {
+                        name,
+                        vms,
+                        file,
+                        no_restart,
+                    },
+            } => {
+                assert_eq!(name, "avant-tls");
+                assert_eq!(vms, vec!["app", "edge"]);
+                assert!(file.is_none());
+                assert!(no_restart);
+            }
+            _ => panic!("expected snapshot create"),
+        }
+    }
+
+    #[test]
+    fn snapshot_ls_defaults_to_lab() {
+        let cli =
+            Cli::try_parse_from(["virtum", "snapshot", "ls", "-f", "lab/Virtumfile"]).unwrap();
+        match cli.command {
+            Commands::Snapshot {
+                action: SnapshotAction::Ls { vms, file },
+            } => {
+                assert!(vms.is_empty());
+                assert_eq!(file, Some(PathBuf::from("lab/Virtumfile")));
+            }
+            _ => panic!("expected snapshot ls"),
+        }
+    }
 
     #[test]
     fn shell_insecure_ssh_after_vm_arg() {
