@@ -10,7 +10,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::port_forward::{PortBind, PortForward};
-use crate::virtumfile::MountSpec;
+use crate::virtumfile::{MountSpec, RestartPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -60,6 +60,9 @@ pub struct Instance {
     /// Volumes virtiofs actifs (chemins relatifs au Virtumfile).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mounts: Option<Vec<MountSpec>>,
+    /// Virtumfile `restart:` ; absent = autostart libvirt non géré par Virtum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RestartPolicy>,
     pub created_at: String,
 }
 
@@ -298,6 +301,7 @@ mod tests {
             bridge_host_interface: None,
             lan_ip: None,
             mounts: None,
+            restart: None,
             created_at: "2026-06-02T10:00:00Z".to_string(),
         }
     }

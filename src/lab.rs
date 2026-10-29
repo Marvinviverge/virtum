@@ -11,7 +11,7 @@ use crate::metadata::{self, Instance, InstanceStatus};
 use crate::mounts;
 use crate::port_forward::{self, PortBind, PortForward};
 use crate::ssh::{ensure_ssh_keypair, read_public_key};
-use crate::virtumfile;
+use crate::virtumfile::{self, RestartPolicy};
 use crate::vm::{self, cleanup_failed_run, lab_vm_id, launch_vm_inner, VmLaunchConfig};
 
 pub fn up(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> Result<()> {
@@ -183,6 +183,7 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             resolved_mounts,
             insecure_ssh,
             ssh_port: virtumfile::effective_ssh_port(&lab, machine),
+            restart: virtumfile::effective_restart(&lab, machine),
         };
         let hostname = config.hostname_for_vm(&vm_id);
         let instance_dir = paths.instances.join(&vm_id);
@@ -209,6 +210,16 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
     }
 
     println!("Lab '{}' prêt ({} VM).", lab.name, ready);
+    for (machine_name, spec) in &lab.machines {
+        let autostarts = virtumfile::effective_restart(&lab, machine_name)
+            .is_some_and(|r| r != RestartPolicy::No);
+        if autostarts && !spec.ports.is_empty() {
+            eprintln!(
+                "  Note '{machine_name}' : après un redémarrage de l'hôte, la VM repart seule \
+                 mais les `ports:` (socat) ne reviennent qu'avec `virtum up`."
+            );
+        }
+    }
     println!("  virtum ps");
     println!("  virtum shell <name>   # ex. virtum shell web");
     println!(
@@ -262,6 +273,7 @@ async fn resume_lab_machine(
     lab: &virtumfile::Virtumfile,
 ) -> Result<()> {
     let ssh_port = virtumfile::effective_ssh_port(lab, machine_name);
+    let restart = virtumfile::effective_restart(lab, machine_name);
     if existing.id != vm_id {
         bail!(
             "Incohérence lab/machine '{machine_name}' : metadata {} vs domaine attendu {vm_id}. \
@@ -281,10 +293,23 @@ async fn resume_lab_machine(
         existing.ssh_port = stored_port;
         metadata::upsert_instance(&paths.metadata, existing.clone()).await?;
     }
+    if existing.restart != restart {
+        eprintln!(
+            "  Démarrage au boot de '{machine_name}' : restart: {}",
+            restart.map_or("(non géré)", RestartPolicy::label)
+        );
+        // `restart` retiré du Virtumfile : on désactive l'autostart que Virtum avait posé.
+        if restart.is_none() && domain_exists(vm_id) {
+            crate::libvirt::set_domain_autostart(vm_id, false)?;
+        }
+        existing.restart = restart;
+        metadata::upsert_instance(&paths.metadata, existing.clone()).await?;
+    }
 
     if domain_exists(vm_id) {
         let live = vm::refresh_instance_status(&paths.metadata, existing.clone()).await?;
         if live.status == InstanceStatus::Running {
+            vm::sync_autostart(&existing, true)?;
             let ip = existing.ip.as_deref().unwrap_or("-");
             eprintln!("Machine '{machine_name}' déjà en cours d'exécution (IP: {ip}).");
             if !spec_ports.is_empty() && ip != "-" {

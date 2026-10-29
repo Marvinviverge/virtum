@@ -182,6 +182,33 @@ machines:
 - Un changement de `ssh_port` est pris en compte au prochain `virtum up` (pas besoin d'`apply`) ; `virtum plan` l'affiche.
 - `virtum ps` affiche `IP:port` quand le port n'est pas 22.
 
+### Démarrage au boot de l'hôte (`restart`)
+
+Comme `restart:` dans docker compose, au niveau du lab ou par machine :
+
+```yaml
+name: infra-local
+restart: unless-stopped   # no | always | unless-stopped
+machines:
+  app:
+    os: ubuntu-24.04
+  scratch:
+    os: ubuntu-24.04
+    restart: no
+```
+
+| Valeur | Au boot de l'hôte |
+| :--- | :--- |
+| `no` | la VM reste éteinte |
+| `always` | la VM démarre, même après `virtum stop` / `down` |
+| `unless-stopped` | la VM démarre, sauf si vous l'avez arrêtée (`stop`, `down`) |
+| *(absent)* | Virtum ne touche pas à l'autostart libvirt (comportement d'avant) |
+
+- Repose sur l'autostart libvirt (`virsh autostart`) ; le réseau `virtum-lab-<name>` est déjà en autostart.
+- Pris en compte au prochain `virtum up` ou `virtum apply` ; `virtum plan` l'affiche.
+- **Limites** : au boot, libvirt démarre la VM seule. Les `ports:` (socat) ne reviennent qu'avec `virtum up`, et `restart` est refusé avec `mounts:` (virtiofsd ne serait pas lancé).
+- Sans `restart`, `virtum ps` signale les VM de lab éteintes (par exemple après un redémarrage) et suggère `virtum up`.
+
 ### Instantanés (`virtum snapshot`)
 
 Pour rejouer un scénario de test : figer l'état des disques avant un test risqué, puis y revenir.

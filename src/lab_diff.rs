@@ -22,7 +22,7 @@ use crate::ssh::{
     ensure_ssh_keypair, reachable_ssh_port, run_provision_commands, run_ssh_mount_steps,
     SshSessionOpts,
 };
-use crate::virtumfile::{self, MachineSpec, MountSpec, Virtumfile};
+use crate::virtumfile::{self, MachineSpec, MountSpec, RestartPolicy, Virtumfile};
 use crate::vm::{self, lab_vm_id};
 
 const GROW_COMMANDS: &[&str] = &[
@@ -65,6 +65,11 @@ pub enum MachineChange {
         from: u16,
         to: u16,
     },
+    /// Démarrage au boot de l'hôte (autostart libvirt, aucun redémarrage).
+    Restart {
+        from: Option<RestartPolicy>,
+        to: Option<RestartPolicy>,
+    },
 }
 
 impl MachineChange {
@@ -93,12 +98,15 @@ impl MachineChange {
                 )
             }
             Self::SshPort { from, to } => format!("ssh_port: {from} → {to}"),
+            Self::Restart { from, to } => {
+                format!("restart: {} → {}", restart_label(*from), restart_label(*to))
+            }
         }
     }
 
     /// False si `virtum up` applique lui-même le changement (sans exiger `apply`).
     pub fn needs_apply(&self) -> bool {
-        !matches!(self, Self::SshPort { .. })
+        !matches!(self, Self::SshPort { .. } | Self::Restart { .. })
     }
 
     fn needs_guest_stop(&self) -> bool {
@@ -127,6 +135,10 @@ pub struct LabDiff {
     pub machine_diffs: Vec<MachineDiff>,
     pub creates: Vec<String>,
     pub blocking_errors: Vec<String>,
+}
+
+fn restart_label(restart: Option<RestartPolicy>) -> &'static str {
+    restart.map_or("(non géré)", RestartPolicy::label)
 }
 
 pub fn bind_label(bind: PortBind) -> &'static str {
@@ -269,6 +281,14 @@ pub fn diff_machine(
         .collect();
     if !additions.is_empty() {
         changes.push(MachineChange::MountsAdd { volumes: additions });
+    }
+
+    let desired_restart = virtumfile::effective_restart(lab, machine_name);
+    if instance.restart != desired_restart {
+        changes.push(MachineChange::Restart {
+            from: instance.restart,
+            to: desired_restart,
+        });
     }
 
     let stored_ssh_port = instance.ssh_port.unwrap_or(virtumfile::DEFAULT_SSH_PORT);
@@ -494,7 +514,7 @@ async fn apply_machine(
                     apply_mounts_add(paths, lab, lab_net, spec, md, volumes, virtumfile_path)
                         .await?;
             }
-            MachineChange::SshPort { .. } => {}
+            MachineChange::SshPort { .. } | MachineChange::Restart { .. } => {}
             MachineChange::Os { .. } => unreachable!(),
         }
     }
@@ -542,6 +562,8 @@ async fn apply_machine(
         updated.disk_size = spec.disk_size.clone();
     }
     updated.ssh_port = vm::stored_ssh_port(virtumfile::effective_ssh_port(lab, &md.machine_name));
+    let previous_restart = updated.restart;
+    updated.restart = virtumfile::effective_restart(lab, &md.machine_name);
     let desired_mounts = virtumfile::effective_mount_specs(lab, &md.machine_name);
     updated.mounts = if desired_mounts.is_empty() {
         None
@@ -634,6 +656,20 @@ async fn apply_machine(
         }
     }
 
+    // En dernier : un undefine/define plus haut efface l'autostart libvirt.
+    if domain_exists(vm_id) {
+        let meta = metadata::load_metadata(&paths.metadata).await?;
+        if let Some(inst) = metadata::find_by_lab_machine(&meta, lab_name, &md.machine_name) {
+            let running = domain_state(vm_id)
+                .map(|s| domain_is_active(&s))
+                .unwrap_or(false);
+            if inst.restart.is_none() && previous_restart.is_some() {
+                crate::libvirt::set_domain_autostart(vm_id, false)?;
+            }
+            vm::sync_autostart(inst, running)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -718,6 +754,16 @@ mod tests {
         assert_eq!(diff.changes[0].summary_line(), "ssh_port: 22 → 2222");
         assert!(!diff.changes[0].needs_apply());
 
+        let restart = MachineChange::Restart {
+            from: None,
+            to: Some(RestartPolicy::UnlessStopped),
+        };
+        assert_eq!(
+            restart.summary_line(),
+            "restart: (non géré) → unless-stopped"
+        );
+        assert!(!restart.needs_apply());
+
         let mut aligned = instance.clone();
         aligned.ssh_port = Some(2222);
         let diff = diff_machine(&lab, "app", &lab.machines["app"], &aligned, &dir).unwrap();
@@ -732,6 +778,7 @@ mod tests {
             bridge_interface: None,
             bind: Some(PortBind::Lan),
             mounts: None,
+            restart: None,
             ssh_port: None,
             machines: BTreeMap::from([(
                 "db".into(),
@@ -746,6 +793,7 @@ mod tests {
                     bind: None,
                     provision: vec![],
                     mounts: None,
+                    restart: None,
                     ssh_port: None,
                 },
             )]),
@@ -767,6 +815,7 @@ mod tests {
             port_forwards: None,
             port_bind: Some(PortBind::Local),
             mounts: None,
+            restart: None,
             created_at: "2020-01-01T00:00:00Z".into(),
         };
         let dir = std::env::temp_dir().join(format!("virtum-diff-bind-{}", std::process::id()));
@@ -791,6 +840,7 @@ mod tests {
             bridge_interface: None,
             bind: Some(PortBind::Lan),
             mounts: None,
+            restart: None,
             ssh_port: None,
             machines: BTreeMap::from([(
                 "web".into(),
@@ -805,6 +855,7 @@ mod tests {
                     bind: None,
                     provision: vec![],
                     mounts: None,
+                    restart: None,
                     ssh_port: None,
                 },
             )]),
@@ -829,6 +880,7 @@ mod tests {
             }]),
             port_bind: Some(PortBind::Local),
             mounts: None,
+            restart: None,
             created_at: "2020-01-01T00:00:00Z".into(),
         };
         let dir = std::env::temp_dir().join(format!("virtum-diff-bind2-{}", std::process::id()));

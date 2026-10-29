@@ -661,6 +661,18 @@ pub fn destroy_domain(vm_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Démarrage du domaine au boot de l'hôte (`virsh autostart [--disable]`).
+pub fn set_domain_autostart(vm_id: &str, enabled: bool) -> Result<()> {
+    let args: &[&str] = if enabled {
+        &["autostart", vm_id]
+    } else {
+        &["autostart", "--disable", vm_id]
+    };
+    run_virsh(args)
+        .map(|_| ())
+        .with_context(|| format!("virsh autostart a échoué pour {vm_id}"))
+}
+
 /// Idempotent: succeeds if the domain is not defined.
 pub fn undefine_domain(vm_id: &str) -> Result<()> {
     if !domain_exists(vm_id) {

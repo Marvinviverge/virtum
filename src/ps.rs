@@ -62,7 +62,44 @@ async fn ps_async(all: bool) -> Result<()> {
     }
 
     print_table(&rows);
+    if !all {
+        if let Some(hint) = stopped_lab_hint(&metadata.instances, |id| {
+            domain_exists(id) && !is_active_live(&domain_state(id).unwrap_or_default())
+        }) {
+            eprintln!("{hint}");
+        }
+    }
     Ok(())
+}
+
+/// Signale les VM de lab éteintes (cas typique : hôte redémarré), absentes de `virtum ps`.
+fn stopped_lab_hint(instances: &[Instance], is_stopped: impl Fn(&str) -> bool) -> Option<String> {
+    let mut by_lab: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for instance in instances
+        .iter()
+        .filter(|i| i.status != InstanceStatus::Destroyed)
+    {
+        let Some(lab) = instance.lab_name.as_deref() else {
+            continue;
+        };
+        if is_stopped(&instance.id) {
+            by_lab
+                .entry(lab)
+                .or_default()
+                .push(instance.name.as_deref().unwrap_or(&instance.id));
+        }
+    }
+    if by_lab.is_empty() {
+        return None;
+    }
+    let labs: Vec<String> = by_lab
+        .iter()
+        .map(|(lab, vms)| format!("lab '{lab}' : {}", vms.join(", ")))
+        .collect();
+    Some(format!(
+        "VM éteintes ({}). Relancez avec `virtum up` dans le dossier du lab ; détail : `virtum ps -a`.",
+        labs.join(" ; ")
+    ))
 }
 
 fn live_status(vm_id: &str, metadata_status: InstanceStatus) -> String {
@@ -147,6 +184,32 @@ fn print_table(rows: &[PsRow]) {
 mod tests {
     use super::*;
 
+    fn lab_instance(id: &str, name: &str, lab: Option<&str>) -> Instance {
+        let mut instance: Instance = serde_json::from_str(&format!(
+            r#"{{"id":"{id}","name":"{name}","os":"ubuntu-24.04","status":"running",
+                "user":"virtum","hostname":"{name}","created_at":"2026-10-29T09:00:00Z"}}"#
+        ))
+        .unwrap();
+        instance.lab_name = lab.map(str::to_string);
+        instance
+    }
+
+    #[test]
+    fn stopped_lab_hint_groups_by_lab() {
+        let instances = vec![
+            lab_instance("vm-1", "app", Some("infra-local")),
+            lab_instance("vm-2", "edge", Some("infra-local")),
+            lab_instance("vm-3", "web", Some("demo")),
+            lab_instance("vm-4", "solo", None),
+        ];
+        let hint = stopped_lab_hint(&instances, |id| id != "vm-3").unwrap();
+        assert!(hint.contains("lab 'infra-local' : app, edge"));
+        assert!(!hint.contains("web"));
+        assert!(!hint.contains("solo"), "VM hors lab ignorée");
+        assert!(hint.contains("virtum up"));
+        assert!(stopped_lab_hint(&instances, |_| false).is_none());
+    }
+
     #[test]
     fn is_active_live_matches_running_states() {
         assert!(is_active_live("running"));
@@ -172,6 +235,7 @@ mod tests {
             bridge_host_interface: None,
             lan_ip: None,
             mounts: None,
+            restart: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(format_ip(&inst), "127.0.0.1:22422");
@@ -203,6 +267,7 @@ mod tests {
             bridge_host_interface: None,
             lan_ip: None,
             mounts: None,
+            restart: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(super::resolve_disk_size(&inst, &paths), "20G");

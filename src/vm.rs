@@ -31,6 +31,7 @@ use crate::ssh::{
     ensure_ssh_keypair, read_public_key, run_provision_commands, ssh_auth_probe, ssh_ports_to_try,
     SshSessionOpts,
 };
+use crate::virtumfile::RestartPolicy;
 
 const IP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const IP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -71,6 +72,8 @@ pub struct VmLaunchConfig {
     pub insecure_ssh: bool,
     /// Port sshd déclaré (Virtumfile `ssh_port`) ; 22 essayé en repli.
     pub ssh_port: u16,
+    /// Démarrage au boot de l'hôte (Virtumfile `restart`).
+    pub restart: Option<RestartPolicy>,
 }
 
 impl VmLaunchConfig {
@@ -92,6 +95,7 @@ impl VmLaunchConfig {
             resolved_mounts: Vec::new(),
             insecure_ssh: false,
             ssh_port: SSH_PORT,
+            restart: None,
         }
     }
 
@@ -102,6 +106,15 @@ impl VmLaunchConfig {
             }
         }
         self.name.clone().unwrap_or_else(|| vm_id.to_string())
+    }
+}
+
+/// Aligne l'autostart libvirt sur `restart` (VM `running` ou arrêtée volontairement).
+/// Sans `restart` déclaré, l'autostart n'est pas touché (réglage manuel `virsh autostart` respecté).
+pub fn sync_autostart(instance: &Instance, running: bool) -> Result<()> {
+    match instance.restart {
+        Some(policy) => libvirt::set_domain_autostart(&instance.id, policy.autostart(running)),
+        None => Ok(()),
     }
 }
 
@@ -458,8 +471,10 @@ pub async fn launch_vm_inner(
         } else {
             Some(mounts::mounts_to_instance_specs(&resolved_mounts))
         },
+        restart: config.restart,
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
+    sync_autostart(&instance, true)?;
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
     if !config.port_forwards.is_empty() {
@@ -1065,6 +1080,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     instance.status = InstanceStatus::Running;
     instance.ip = Some(ip.clone());
     instance.lan_ip = lan_ip.clone();
+    sync_autostart(&instance, true)?;
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
     if let Some(ref forwards) = forwards_snapshot {
@@ -1173,6 +1189,9 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
     port_forward::stop_instance_proxies(&instance_dir);
 
     instance.status = InstanceStatus::Stopped;
+    if domain_exists(&vm_id) {
+        sync_autostart(&instance, false)?;
+    }
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
     println!("VM arrêtée: {vm_id}");
@@ -1189,6 +1208,9 @@ pub async fn kill_vm_async(reference: &str) -> Result<()> {
     port_forward::stop_instance_proxies(&paths.instances.join(&vm_id));
 
     instance.status = InstanceStatus::Stopped;
+    if domain_exists(&vm_id) {
+        sync_autostart(&instance, false)?;
+    }
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
     println!("VM arrêtée (forcé): {vm_id}");

@@ -90,6 +90,9 @@ pub struct Virtumfile {
     /// Port sshd une fois la machine configurée (défaut 22), hérité par toutes les machines.
     #[serde(default)]
     pub ssh_port: Option<u16>,
+    /// Démarrage au boot de l'hôte (`no`, `always`, `unless-stopped`), hérité par les machines.
+    #[serde(default)]
+    pub restart: Option<RestartPolicy>,
     pub machines: BTreeMap<String, MachineSpec>,
 }
 
@@ -139,6 +142,42 @@ pub struct MachineSpec {
     /// Port sshd de cette machine (surcharge `ssh_port` du lab).
     #[serde(default)]
     pub ssh_port: Option<u16>,
+    /// Démarrage au boot de l'hôte pour cette machine (surcharge `restart` du lab).
+    #[serde(default)]
+    pub restart: Option<RestartPolicy>,
+}
+
+/// Démarrage automatique au boot de l'hôte (`restart:`, comme docker compose).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub enum RestartPolicy {
+    /// Jamais démarrée automatiquement.
+    #[serde(rename = "no")]
+    No,
+    /// Démarrée au boot, même après `virtum stop` / `down`.
+    #[serde(rename = "always")]
+    Always,
+    /// Démarrée au boot sauf si arrêtée volontairement (`virtum stop` / `down`).
+    #[serde(rename = "unless-stopped")]
+    UnlessStopped,
+}
+
+impl RestartPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::Always => "always",
+            Self::UnlessStopped => "unless-stopped",
+        }
+    }
+
+    /// Autostart libvirt voulu selon que la VM tourne (`running`) ou a été arrêtée.
+    pub fn autostart(self, running: bool) -> bool {
+        match self {
+            Self::No => false,
+            Self::Always => true,
+            Self::UnlessStopped => running,
+        }
+    }
 }
 
 /// Mounts effectifs pour une machine (lab + surcharge machine).
@@ -260,6 +299,12 @@ pub fn effective_ssh_port(lab: &Virtumfile, machine_name: &str) -> u16 {
     spec.ssh_port.or(lab.ssh_port).unwrap_or(DEFAULT_SSH_PORT)
 }
 
+/// `restart` effectif : machine > lab ; `None` = non déclaré (autostart libvirt laissé tel quel).
+pub fn effective_restart(lab: &Virtumfile, machine_name: &str) -> Option<RestartPolicy> {
+    let spec = &lab.machines[machine_name];
+    spec.restart.or(lab.restart)
+}
+
 /// True si `virtum up` doit demander confirmation (bind: lan + au moins un port mappé).
 pub fn lab_requires_lan_consent(lab: &Virtumfile) -> Result<bool> {
     for (machine_name, spec) in &lab.machines {
@@ -346,6 +391,14 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
         }
         if spec.ssh_port == Some(0) {
             bail!("Machine '{machine_name}': `ssh_port` doit être compris entre 1 et 65535.");
+        }
+        let autostarts =
+            effective_restart(lab, machine_name).is_some_and(|r| r != RestartPolicy::No);
+        if autostarts && !effective_mount_specs(lab, machine_name).is_empty() {
+            bail!(
+                "Machine '{machine_name}': `restart` est incompatible avec `mounts:` — au boot de l'hôte, \
+                 libvirt démarrerait la VM sans virtiofsd. Utilisez `restart: no` ou retirez les mounts."
+            );
         }
         if let Some(ref size) = spec.disk_size {
             parse_disk_size(size)
@@ -473,6 +526,62 @@ machines:
         validate(&lab, Path::new("/tmp")).unwrap();
         assert_eq!(effective_ssh_port(&lab, "app"), 2222);
         assert_eq!(effective_ssh_port(&lab, "edge"), 2200);
+    }
+
+    #[test]
+    fn restart_policy_parses_and_inherits() {
+        let lab = load_from_str(SAMPLE).unwrap();
+        assert_eq!(effective_restart(&lab, "web"), None);
+
+        let yaml = r#"
+name: infra
+restart: unless-stopped
+machines:
+  app:
+    os: ubuntu-24.04
+  edge:
+    os: ubuntu-24.04
+    restart: always
+  scratch:
+    os: ubuntu-24.04
+    restart: no
+"#;
+        let lab = load_from_str(yaml).unwrap();
+        validate(&lab, Path::new("/tmp")).unwrap();
+        assert_eq!(
+            effective_restart(&lab, "app"),
+            Some(RestartPolicy::UnlessStopped)
+        );
+        assert_eq!(effective_restart(&lab, "edge"), Some(RestartPolicy::Always));
+        assert_eq!(effective_restart(&lab, "scratch"), Some(RestartPolicy::No));
+        assert!(load_from_str(
+            "name: x\nrestart: on-failure\nmachines:\n  a:\n    os: debian-12\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn restart_policy_autostart_rules() {
+        assert!(!RestartPolicy::No.autostart(true));
+        assert!(RestartPolicy::Always.autostart(false));
+        assert!(RestartPolicy::UnlessStopped.autostart(true));
+        assert!(!RestartPolicy::UnlessStopped.autostart(false));
+    }
+
+    #[test]
+    fn rejects_restart_with_mounts() {
+        let yaml = r#"
+name: x
+restart: always
+machines:
+  a:
+    os: debian-12
+    mounts:
+      - ./app:/home/virtum/app
+"#;
+        let lab = load_from_str(yaml).unwrap();
+        let err = validate(&lab, Path::new("/tmp")).unwrap_err();
+        assert!(format!("{err:#}").contains("incompatible avec `mounts:`"));
     }
 
     #[test]
