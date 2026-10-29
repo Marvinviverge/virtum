@@ -18,6 +18,7 @@ pub enum Commands {
     /// Check that the host is ready to run VMs
     Doctor,
     /// List VMs (like `docker ps`; use `-a` for stopped instances too)
+    #[command(visible_alias = "list")]
     Ps {
         /// Show all instances (including shut off), not only running
         #[arg(short = 'a', long)]
@@ -230,6 +231,12 @@ pub enum RunNetworkMode {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn list_is_an_alias_of_ps() {
+        let cli = Cli::try_parse_from(["virtum", "list", "-a"]).unwrap();
+        assert!(matches!(cli.command, Commands::Ps { all: true }));
+    }
 
     #[test]
     fn snapshot_create_with_vms_and_flags() {
