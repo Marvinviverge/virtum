@@ -20,7 +20,7 @@ if [[ -f "$LEGACY_IMAGE" && ! -f "$ROOT/images/debian-12.qcow2" ]]; then
   echo "Copie de l'image depuis $LEGACY_IMAGE …"
   cp -n "$LEGACY_IMAGE" "$ROOT/images/debian-12.qcow2"
   chown "$USER_NAME:$GROUP" "$ROOT/images/debian-12.qcow2"
-  chmod 664 "$ROOT/images/debian-12.qcow2"
+  chmod 444 "$ROOT/images/debian-12.qcow2"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

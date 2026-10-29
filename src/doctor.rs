@@ -1,9 +1,12 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::Command;
 
 use crate::bridge_network;
 use crate::config;
+use crate::disk;
+use crate::metadata::{self, Instance, InstanceStatus};
 
 const KVM_DEVICE: &str = "/dev/kvm";
 
@@ -61,6 +64,7 @@ pub fn run() -> i32 {
         check_libvirt_default_network(),
         check_bridge_lan(),
         check_virtum_storage(&paths),
+        check_vm_base_images(&paths),
     ];
 
     print_report(&results)
@@ -278,6 +282,64 @@ fn check_virtum_storage(paths: &config::VirtumPaths) -> CheckResult {
     }
 }
 
+fn check_vm_base_images(paths: &config::VirtumPaths) -> CheckResult {
+    let metadata = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(anyhow::Error::from)
+        .and_then(|rt| rt.block_on(metadata::load_metadata(&paths.metadata)));
+    match metadata {
+        Ok(metadata) => base_images_result(&metadata.instances, &paths.instances),
+        Err(err) => CheckResult {
+            name: BASE_IMAGES_CHECK.to_string(),
+            ok: false,
+            detail: format!("{err:#}"),
+        },
+    }
+}
+
+const BASE_IMAGES_CHECK: &str = "Images de base des VM";
+
+/// Chaque disque COW doit retrouver son image de base (sinon la VM ne démarre plus).
+fn base_images_result(instances: &[Instance], instances_dir: &Path) -> CheckResult {
+    let mut checked = 0;
+    let mut broken = Vec::new();
+    for instance in instances
+        .iter()
+        .filter(|i| i.status != InstanceStatus::Destroyed)
+    {
+        let disk_path = instances_dir.join(&instance.id).join("disk.qcow2");
+        if !disk_path.is_file() {
+            continue;
+        }
+        let label = instance.name.as_deref().unwrap_or(&instance.id);
+        match disk::backing_file(&disk_path) {
+            Ok(Some(base)) if !base.is_file() => {
+                broken.push(format!("{label} → {} introuvable", base.display()));
+            }
+            Ok(_) => checked += 1,
+            Err(err) => broken.push(format!("{label} : {err}")),
+        }
+    }
+
+    if broken.is_empty() {
+        return CheckResult {
+            name: BASE_IMAGES_CHECK.to_string(),
+            ok: true,
+            detail: format!("{checked} disque(s) de VM vérifié(s)"),
+        };
+    }
+    CheckResult {
+        name: BASE_IMAGES_CHECK.to_string(),
+        ok: false,
+        detail: format!(
+            "{}. Restaurez le fichier d'origine ; ne le re-téléchargez pas avec `virtum pull` \
+             (une image différente rendrait le disque incohérent) — sinon recréez la VM.",
+            broken.join(" ; ")
+        ),
+    }
+}
+
 fn check_bridge_lan() -> CheckResult {
     const NAME: &str = "Réseau bridge (LAN physique)";
     let cap = bridge_network::scan_bridge_capability();
@@ -435,6 +497,39 @@ fn print_report(results: &[CheckResult]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_images_check_detects_missing_base() {
+        let dir = std::env::temp_dir().join(format!("virtum-doctor-base-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let instance_dir = dir.join("instances").join("vm-test01");
+        std::fs::create_dir_all(&instance_dir).unwrap();
+        let base = dir.join("base.qcow2");
+        crate::command::run_command(
+            "qemu-img",
+            &["create", "-f", "qcow2", base.to_str().unwrap(), "1G"],
+        )
+        .unwrap();
+        disk::create_cow_disk(&base, &instance_dir.join("disk.qcow2"), None).unwrap();
+        let instance: Instance = serde_json::from_str(
+            r#"{"id":"vm-test01","name":"app","os":"ubuntu-24.04","status":"stopped",
+                "user":"virtum","hostname":"app","created_at":"2026-10-29T09:00:00Z"}"#,
+        )
+        .unwrap();
+        let instances = [instance];
+
+        let ok = base_images_result(&instances, &dir.join("instances"));
+        assert!(ok.ok, "{}", ok.detail);
+        assert!(ok.detail.contains("1 disque"));
+
+        std::fs::remove_file(&base).unwrap();
+        let broken = base_images_result(&instances, &dir.join("instances"));
+        assert!(!broken.ok);
+        assert!(broken.detail.contains("app →"));
+        assert!(broken.detail.contains("introuvable"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_virsh_net_info_fields() {

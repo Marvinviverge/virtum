@@ -1,6 +1,6 @@
 //! Copy-on-Write instance disks via qemu-img (step 10).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -214,6 +214,26 @@ pub fn plan_disk_size(base_image: &Path, size: &DiskSize) -> Result<bool> {
     Ok(size.bytes > base_bytes)
 }
 
+/// Image de base d'un disque COW (`None` si le disque est autonome). Lecture seule (`-U`),
+/// fonctionne VM allumée et même si l'image de base a disparu.
+pub fn backing_file(disk_path: &Path) -> Result<Option<PathBuf>> {
+    let output = run_command(
+        "qemu-img",
+        &["info", "-U", "--output=json", path_arg(disk_path)?],
+    )?;
+    parse_backing_file(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_backing_file(json: &str) -> Result<Option<PathBuf>> {
+    let info: Value = serde_json::from_str(json)
+        .context("Impossible de parser la sortie qemu-img info (JSON)")?;
+    Ok(info
+        .get("full-backing-filename")
+        .or_else(|| info.get("backing-filename"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from))
+}
+
 /// Returns true if `qemu-img info` reports the expected backing file.
 pub fn cow_disk_has_backing_file(disk_path: &Path, base_image: &Path) -> Result<bool> {
     let output = run_command("qemu-img", &["info", path_arg(disk_path)?])?;
@@ -264,6 +284,36 @@ mod tests {
         .unwrap();
         create_cow_disk(&base, &disk, None).unwrap();
         assert!(disk.is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_backing_file_prefers_full_path() {
+        let json = r#"{"backing-filename": "base.qcow2",
+                       "full-backing-filename": "/var/lib/virtum/images/base.qcow2"}"#;
+        assert_eq!(
+            parse_backing_file(json).unwrap(),
+            Some(PathBuf::from("/var/lib/virtum/images/base.qcow2"))
+        );
+        assert_eq!(parse_backing_file(r#"{"format": "qcow2"}"#).unwrap(), None);
+    }
+
+    #[test]
+    fn backing_file_readable_after_base_removed() {
+        let dir = std::env::temp_dir().join(format!("virtum-disk-backing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("base.qcow2");
+        let disk = dir.join("disk.qcow2");
+        run_command(
+            "qemu-img",
+            &["create", "-f", "qcow2", path_arg(&base).unwrap(), "1G"],
+        )
+        .unwrap();
+        create_cow_disk(&base, &disk, None).unwrap();
+        assert_eq!(backing_file(&disk).unwrap(), Some(base.clone()));
+        fs::remove_file(&base).unwrap();
+        assert_eq!(backing_file(&disk).unwrap(), Some(base));
         let _ = fs::remove_dir_all(&dir);
     }
 

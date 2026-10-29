@@ -13,6 +13,8 @@ pub const LIBVIRT_GROUP: &str = "libvirt";
 /// Groupe partagé par l'utilisateur Virtum et `libvirt-qemu` (sockets virtiofs).
 pub const KVM_GROUP: &str = "kvm";
 const LIBVIRT_QEMU_USER: &str = "libvirt-qemu";
+/// Image de base partagée : lisible par tous, modifiable par personne.
+const BASE_IMAGE_MODE: u32 = 0o444;
 
 /// Prépare arborescence + disques avant `virsh start` (réseau `default`, QEMU système).
 pub fn prepare_storage_for_system_qemu(
@@ -71,6 +73,7 @@ fn prepare_var_lib_storage(
     for file in [base_image, disk_path, iso_path] {
         set_libvirt_group_readable(file, false)?;
     }
+    set_base_image_read_only(base_image)?;
     // Ne pas passer instance_dir en groupe « libvirt » : libvirt-qemu n'y est pas.
     if config::uses_var_lib_storage() {
         ensure_qemu_can_traverse(&paths.root)?;
@@ -126,7 +129,7 @@ fn prepare_home_storage(
     for file in [base_image, disk_path, iso_path] {
         prepare_data_file_for_qemu(file)?;
     }
-    Ok(())
+    set_base_image_read_only(base_image)
 }
 
 fn prepare_data_file_for_qemu(path: &Path) -> Result<()> {
@@ -305,8 +308,49 @@ fn path_is_socket(path: &Path) -> bool {
 /// Image de base (après téléchargement).
 pub fn set_image_file_for_libvirt(path: &Path) -> Result<()> {
     if config::uses_var_lib_storage() {
-        set_libvirt_group_readable(path, false)
+        set_libvirt_group_readable(path, false)?;
     } else {
-        prepare_data_file_for_qemu(path)
+        prepare_data_file_for_qemu(path)?;
+    }
+    set_base_image_read_only(path)
+}
+
+/// Image de base en lecture seule (0444) : les disques COW des VM en dépendent ;
+/// une écriture ou un remplacement accidentel les rendrait incohérents.
+fn set_base_image_read_only(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = fs::metadata(path)
+        .with_context(|| format!("Impossible de lire les métadonnées de {}", path.display()))?;
+    let current_uid = unsafe { libc::getuid() };
+    if meta.uid() != current_uid {
+        return Ok(());
+    }
+    let mut perms = meta.permissions();
+    perms.set_mode(BASE_IMAGE_MODE);
+    fs::set_permissions(path, perms)
+        .with_context(|| format!("Impossible de chmod 444 sur {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_image_becomes_read_only() {
+        let dir = std::env::temp_dir().join(format!("virtum-ro-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("base.qcow2");
+        fs::write(&image, b"qcow2").unwrap();
+        fs::set_permissions(&image, Permissions::from_mode(0o664)).unwrap();
+
+        set_base_image_read_only(&image).unwrap();
+        let mode = fs::metadata(&image).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444);
+        // Idempotent.
+        set_base_image_read_only(&image).unwrap();
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
