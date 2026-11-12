@@ -18,7 +18,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.6 terminée (banc de test d'infra)** — instantanés `virtum snapshot` (VM ou lab), `ssh_port` (VM durcies), `restart:` au boot de l'hôte, alias `virtum list`, fiabilité (statut libvirt réel, images de base, orphelins dans `doctor`) : [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md).
 
-**v0.7 en cours (convergence)** — `ip:` déclarée (optionnelle) par machine, machines retirées du Virtumfile signalées par `plan` et supprimées par `apply --prune`, dérive RAM/vCPU lue dans libvirt : [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md).
+**v0.7 terminée (convergence)** — `ip:` déclarée (optionnelle) par machine, machines retirées du Virtumfile signalées par `plan` et supprimées par `apply --prune`, dérive RAM/vCPU lue dans libvirt : [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md).
 
 ## Documentation
 
@@ -325,6 +325,26 @@ virtum down -f examples/Virtumfile.mounts --destroy --purge
 Voir [`STEPS4.md`](./STEPS4.md) §7 et [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md).
 
 **Prérequis mounts** : paquet `virtiofsd` ; sans `uidmap` (`newuidmap`), Virtum lance virtiofsd avec `--sandbox=none` (isolation réduite — voir `virtum doctor`).
+
+### Banc de test v0.7
+
+Sur un lab jetable (pas un lab de travail) :
+
+```bash
+virtum up -f Virtumfile                           # sans ip: : DHCP, MAC stable
+virsh setmem <vm-id> 1G --config                  # changement hors de Virtum
+virtum plan -f Virtumfile                         # « ram: … (modifié hors de Virtum) »
+virtum apply -f Virtumfile                        # rétablit la RAM du Virtumfile
+# ip: 192.168.<octet>.10 sur une machine (sous-réseau affiché par plan)
+virtum plan -f Virtumfile && virtum apply -f Virtumfile   # réservation + redémarrage
+virsh net-dumpxml virtum-lab-<name> | grep host  # réservation présente
+# retirer une machine du Virtumfile
+virtum plan -f Virtumfile                         # « - remove … »
+virtum apply --prune -f Virtumfile                # confirmation, puis suppression
+virtum down -f Virtumfile --destroy
+```
+
+Voir [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md) §Validation et §Limites connues.
 
 ### Banc de test v0.6
 
