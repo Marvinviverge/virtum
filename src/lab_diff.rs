@@ -606,6 +606,12 @@ pub async fn apply_lab(
         );
     }
 
+    if lab.ansible.is_some() && !diff.machine_diffs.is_empty() {
+        println!(
+            "Machines modifiées : `virtum provision -f {}` si le playbook Ansible doit être rejoué.",
+            virtumfile_path.display()
+        );
+    }
     if prune {
         prune_removals(&paths, &lab.name, &diff.removals, &virtumfile_path).await?;
     } else {

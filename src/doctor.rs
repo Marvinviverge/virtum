@@ -68,6 +68,7 @@ pub fn run() -> i32 {
         check_virtum_storage(&paths),
         check_vm_base_images(&paths),
         check_orphans(&paths),
+        check_ansible(),
     ];
 
     print_report(&results)
@@ -95,6 +96,26 @@ fn check_binary(name: &str, version_args: &[&str], install_hint: &str) -> CheckR
             ok: false,
             detail: format!("Impossible d'exécuter {name}: {e}"),
         },
+    }
+}
+
+/// Ansible est optionnel (section `ansible:`, v0.8) : jamais bloquant.
+fn check_ansible() -> CheckResult {
+    let detail = match Command::new("ansible-playbook").arg("--version").output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("présent")
+            .trim()
+            .to_string(),
+        _ => "absent (optionnel : requis seulement pour la section `ansible:` du Virtumfile ; \
+              ex. sudo apt install ansible-core)"
+            .to_string(),
+    };
+    CheckResult {
+        name: "ansible-playbook".to_string(),
+        ok: true,
+        detail,
     }
 }
 

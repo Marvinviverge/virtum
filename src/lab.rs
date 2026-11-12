@@ -51,6 +51,10 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
     if virtumfile::lab_requires_lan_consent(&lab)? && !yes_lan {
         confirm_lan_deploy()?;
     }
+    // Ansible déclaré mais absent : on s'arrête avant de créer la moindre VM.
+    if let Some(ref spec) = lab.ansible {
+        crate::ansible::require_tools(spec)?;
+    }
 
     let paths = config::ensure_layout().await?;
     let metadata = metadata::load_metadata(&paths.metadata).await?;
@@ -270,6 +274,14 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             path.display()
         );
     }
+    provision_after_up(
+        &lab,
+        &path,
+        &paths,
+        !created_this_run.is_empty(),
+        insecure_ssh,
+    )
+    .await?;
     for (machine_name, spec) in &lab.machines {
         let autostarts = virtumfile::effective_restart(&lab, machine_name)
             .is_some_and(|r| r != RestartPolicy::No);
@@ -352,6 +364,103 @@ async fn warn_if_ip_differs(paths: &VirtumPaths, vm_id: &str, machine: &str, dec
              il expire dans l'heure, puis `virtum stop {machine}` / `virtum start {machine}`."
         );
     }
+}
+
+/// Joue le playbook `ansible:` à la fin de `up` si le lab n'a jamais été provisionné avec
+/// succès ou si des machines viennent d'être créées ; puis prend l'instantané de lab.
+async fn provision_after_up(
+    lab: &virtumfile::Virtumfile,
+    path: &std::path::Path,
+    paths: &VirtumPaths,
+    created_machines: bool,
+    insecure_ssh: bool,
+) -> Result<()> {
+    let Some(ref spec) = lab.ansible else {
+        return Ok(());
+    };
+    let previous = crate::ansible::load_state(paths, &lab.name)?;
+    let Some(reason) = crate::ansible::provision_reason(previous.as_ref(), created_machines) else {
+        let when = previous
+            .as_ref()
+            .and_then(|s| s.provisioned_at.clone())
+            .unwrap_or_default();
+        println!(
+            "Lab déjà provisionné ({when}) — `virtum provision -f {}` pour rejouer le playbook.",
+            path.display()
+        );
+        return Ok(());
+    };
+    eprintln!("--- Provisionnement Ansible ({reason}) ---");
+    match crate::ansible::run_playbook(lab, path, paths, &[], insecure_ssh).await? {
+        crate::ansible::RunOutcome::Failed(code) => bail!(
+            "Provisionnement en échec (ansible-playbook, code {code}) : VM conservées pour le diagnostic. \
+             Corrigez puis relancez `virtum provision -f {p}` (ou `virtum up -f {p}`).",
+            p = path.display()
+        ),
+        crate::ansible::RunOutcome::Success => println!("Provisionnement Ansible réussi."),
+    }
+    if let Some(name) = spec.snapshot_name() {
+        take_provision_snapshot(lab, path, paths, &name).await?;
+    }
+    Ok(())
+}
+
+/// Instantané de lab après provisionnement ; jamais d'écrasement, échec non bloquant.
+async fn take_provision_snapshot(
+    lab: &virtumfile::Virtumfile,
+    path: &std::path::Path,
+    paths: &VirtumPaths,
+    name: &str,
+) -> Result<()> {
+    let meta = metadata::load_metadata(&paths.metadata).await?;
+    let mut with = Vec::new();
+    let mut without = Vec::new();
+    for inst in metadata::instances_for_lab(&meta, &lab.name) {
+        let disk = paths.instances.join(&inst.id).join("disk.qcow2");
+        let label = inst.machine_name.clone().unwrap_or_else(|| inst.id.clone());
+        let exists = crate::snapshot::list_disk_snapshots(&disk)
+            .map(|snaps| snaps.iter().any(|s| s.name == name))
+            .unwrap_or(false);
+        if exists {
+            with.push(label);
+        } else {
+            without.push(label);
+        }
+    }
+    if !with.is_empty() {
+        let missing = if without.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Sans cet instantané : {} — `virtum snapshot restore {name}` sera refusé tant qu'il n'est pas repris.",
+                without.join(", ")
+            )
+        };
+        eprintln!(
+            "Avertissement: l'instantané '{name}' existe déjà (non écrasé).{missing} Pour le reprendre : \
+             `virtum snapshot rm {name} -f {p}` puis `virtum snapshot create {name} -f {p}`.",
+            p = path.display()
+        );
+        return Ok(());
+    }
+    eprintln!("--- Instantané '{name}' du lab provisionné ---");
+    match crate::snapshot::create_async(name, &[], Some(path.to_path_buf()), false).await {
+        Ok(()) => {
+            let mut state = crate::ansible::load_state(paths, &lab.name)?.unwrap_or_default();
+            state.snapshot = Some(name.to_string());
+            crate::ansible::save_state(paths, &lab.name, &state)?;
+            println!(
+                "Retour à ce lab provisionné : virtum snapshot restore {name} -f {}",
+                path.display()
+            );
+        }
+        Err(err) => eprintln!(
+            "Avertissement: instantané '{name}' non pris ({err:#}). Provisionnement conservé ; \
+             relancez `virtum snapshot create {name} -f {}`.",
+            path.display()
+        ),
+    }
+    Ok(())
 }
 
 fn confirm_lan_deploy() -> Result<()> {
@@ -505,6 +614,7 @@ async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result
                 );
             }
         }
+        crate::ansible::remove_state(&paths, &lab.name);
         println!("Lab '{}' supprimé.", lab.name);
     } else {
         eprintln!("Arrêt de {} VM du lab '{}'…", refs.len(), lab.name);

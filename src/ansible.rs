@@ -69,6 +69,23 @@ pub fn remove_state(paths: &VirtumPaths, lab_name: &str) {
     let _ = std::fs::remove_file(inventory_path(paths, lab_name));
 }
 
+/// Raison de jouer le playbook à la fin de `up`, `None` s'il ne faut pas le rejouer.
+pub fn provision_reason(
+    previous: Option<&AnsibleState>,
+    created_machines: bool,
+) -> Option<&'static str> {
+    match previous {
+        None => return Some("lab non provisionné"),
+        Some(state) if !state.succeeded() => return Some("dernier provisionnement en échec"),
+        Some(_) => {}
+    }
+    if created_machines {
+        Some("machines ajoutées")
+    } else {
+        None
+    }
+}
+
 /// Programme présent dans le PATH.
 pub fn command_in_path(program: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
@@ -351,6 +368,26 @@ mod tests {
         remove_state(&paths, "k8s");
         assert_eq!(load_state(&paths, "k8s").unwrap(), None);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn provision_reason_rules() {
+        let ok = AnsibleState {
+            last_run: Some("success".into()),
+            ..Default::default()
+        };
+        let failed = AnsibleState {
+            last_run: Some("failed".into()),
+            provisioned_at: Some("2026-11-20T10:12:00Z".into()),
+            ..Default::default()
+        };
+        assert_eq!(provision_reason(None, false), Some("lab non provisionné"));
+        assert_eq!(
+            provision_reason(Some(&failed), false),
+            Some("dernier provisionnement en échec")
+        );
+        assert_eq!(provision_reason(Some(&ok), true), Some("machines ajoutées"));
+        assert_eq!(provision_reason(Some(&ok), false), None);
     }
 
     #[test]

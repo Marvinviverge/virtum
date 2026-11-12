@@ -335,6 +335,29 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    if let Some(ref spec) = lab.ansible {
+        if let Err(e) = crate::ansible::require_tools(spec) {
+            errors.push(format!("{e:#}"));
+        }
+        let status = match crate::ansible::load_state(&paths, &lab.name)? {
+            Some(state) if state.succeeded() => {
+                let when = state.provisioned_at.unwrap_or_default();
+                if any_create {
+                    format!("provisionné ({when}) ; sera rejoué au up (machines à créer)")
+                } else {
+                    format!("déjà provisionné ({when}) — `virtum provision` pour rejouer")
+                }
+            }
+            Some(_) => "dernier provisionnement en échec — sera rejoué au up".to_string(),
+            None => "sera joué au up (lab non provisionné)".to_string(),
+        };
+        let snapshot = spec
+            .snapshot_name()
+            .map(|n| format!(", puis instantané '{n}'"))
+            .unwrap_or_default();
+        println!("\nAnsible : {} — {status}{snapshot}", spec.playbook);
+    }
+
     collect_bind_lan_warnings(&paths, &lab, &virtumfile_path, &mut warnings)?;
 
     if !warnings.is_empty() {

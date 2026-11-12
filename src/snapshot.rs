@@ -327,7 +327,7 @@ pub fn create(name: &str, vms: &[String], file: Option<PathBuf>, no_restart: boo
     block_on(create_async(name, vms, file, no_restart))
 }
 
-async fn create_async(
+pub(crate) async fn create_async(
     name: &str,
     vms: &[String],
     file: Option<PathBuf>,
