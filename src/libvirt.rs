@@ -519,12 +519,64 @@ pub fn read_ram_vcpu_from_instance(instance_dir: &Path) -> Result<(u32, u32)> {
         .ok_or_else(|| anyhow::anyhow!("Impossible de lire RAM/vCPU dans {}", xml_path.display()))
 }
 
+/// RAM (MiB) et vCPU de la définition **persistante** du domaine (`virsh dumpxml --inactive`).
+///
+/// Reflète ce qui s'appliquera au prochain démarrage, y compris un `virsh setmem --config`
+/// ou `virsh edit` fait hors de Virtum.
+pub fn read_ram_vcpu_from_domain(vm_id: &str) -> Result<(u32, u32)> {
+    let output = run_virsh(&["dumpxml", "--inactive", vm_id])?;
+    let xml = String::from_utf8_lossy(&output.stdout);
+    parse_ram_vcpu_from_xml(&xml)
+        .ok_or_else(|| anyhow::anyhow!("Impossible de lire RAM/vCPU dans `virsh dumpxml {vm_id}`"))
+}
+
+/// RAM convertie en MiB (attribut `unit`, KiB par défaut comme libvirt) et vCPU.
+///
+/// `config.xml` écrit par Virtum utilise `unit='MiB'`, `virsh dumpxml` renvoie `unit='KiB'`.
 fn parse_ram_vcpu_from_xml(xml: &str) -> Option<(u32, u32)> {
-    let ram = xml.split("<memory").nth(1)?.split('>').nth(1)?;
-    let ram = ram.split('<').next()?.trim().parse().ok()?;
-    let vcpu = xml.split("<vcpu").nth(1)?.split('>').nth(1)?;
-    let vcpu = vcpu.split('<').next()?.trim().parse().ok()?;
+    let (mem_attrs, mem_text) = xml_element(xml, "memory")?;
+    let amount: u64 = mem_text.trim().parse().ok()?;
+    let unit = xml_attribute_value(mem_attrs, "unit").unwrap_or_else(|| "KiB".to_string());
+    let ram = u32::try_from(memory_to_mib(amount, &unit)?).ok()?;
+    let (_, vcpu_text) = xml_element(xml, "vcpu")?;
+    let vcpu = vcpu_text.trim().parse().ok()?;
     Some((ram, vcpu))
+}
+
+/// Attributs et texte du premier élément `<name …>texte</name>` (nom exact :
+/// `<memory` ne correspond pas à `<memoryBacking`).
+fn xml_element<'a>(xml: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
+    let open = format!("<{name}");
+    let mut rest = xml;
+    loop {
+        let start = rest.find(&open)?;
+        let after = &rest[start + open.len()..];
+        if after.starts_with([' ', '>', '\t', '\n']) {
+            let end_tag = after.find('>')?;
+            let attrs = &after[..end_tag];
+            let body = &after[end_tag + 1..];
+            let text = &body[..body.find('<')?];
+            return Some((attrs, text));
+        }
+        rest = after;
+    }
+}
+
+/// Unités mémoire libvirt → MiB (arrondi inférieur).
+fn memory_to_mib(amount: u64, unit: &str) -> Option<u64> {
+    let bytes: u64 = match unit {
+        "b" | "bytes" => 1,
+        "KB" => 1_000,
+        "k" | "KiB" => 1 << 10,
+        "MB" => 1_000_000,
+        "M" | "MiB" => 1 << 20,
+        "GB" => 1_000_000_000,
+        "G" | "GiB" => 1 << 30,
+        "TB" => 1_000_000_000_000,
+        "T" | "TiB" => 1 << 40,
+        _ => return None,
+    };
+    Some(amount.checked_mul(bytes)? >> 20)
 }
 
 /// Réécrit `config.xml` avec RAM/CPU demandés et redéfinit le domaine libvirt (VM arrêtée).
@@ -947,6 +999,47 @@ fn xml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_ram_vcpu_from_virtum_config() {
+        let xml = "<domain type='kvm'>\n  <name>vm-a</name>\n  <memory unit='MiB'>4096</memory>\n  <vcpu>2</vcpu>\n  <memoryBacking>\n    <source type='memfd'/>\n  </memoryBacking>\n</domain>";
+        assert_eq!(parse_ram_vcpu_from_xml(xml), Some((4096, 2)));
+    }
+
+    #[test]
+    fn parses_ram_vcpu_from_virsh_dumpxml() {
+        // Forme renvoyée par `virsh dumpxml --inactive` : KiB, currentMemory, vcpu placement.
+        let xml = r#"<domain type='kvm'>
+  <name>vm-a</name>
+  <uuid>0b0c</uuid>
+  <memory unit='KiB'>2097152</memory>
+  <currentMemory unit='KiB'>2097152</currentMemory>
+  <memoryBacking>
+    <source type='memfd'/>
+  </memoryBacking>
+  <vcpu placement='static'>4</vcpu>
+</domain>"#;
+        assert_eq!(parse_ram_vcpu_from_xml(xml), Some((2048, 4)));
+    }
+
+    #[test]
+    fn memory_backing_before_memory_is_not_mistaken() {
+        let xml = "<domain><memoryBacking><source type='memfd'/></memoryBacking><memory unit='GiB'>3</memory><vcpu>1</vcpu></domain>";
+        assert_eq!(parse_ram_vcpu_from_xml(xml), Some((3072, 1)));
+    }
+
+    #[test]
+    fn memory_without_unit_defaults_to_kib() {
+        let xml = "<domain><memory>1048576</memory><vcpu>1</vcpu></domain>";
+        assert_eq!(parse_ram_vcpu_from_xml(xml), Some((1024, 1)));
+    }
+
+    #[test]
+    fn memory_unknown_unit_is_rejected() {
+        let xml = "<domain><memory unit='parsec'>1</memory><vcpu>1</vcpu></domain>";
+        assert_eq!(parse_ram_vcpu_from_xml(xml), None);
+        assert_eq!(memory_to_mib(1, "GB"), Some(953));
+    }
 
     #[test]
     fn domain_in_shutdown_still_active() {

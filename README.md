@@ -18,6 +18,8 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.6 terminée (banc de test d'infra)** — instantanés `virtum snapshot` (VM ou lab), `ssh_port` (VM durcies), `restart:` au boot de l'hôte, alias `virtum list`, fiabilité (statut libvirt réel, images de base, orphelins dans `doctor`) : [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md).
 
+**v0.7 en cours (convergence)** — `ip:` fixe par machine, machines retirées du Virtumfile signalées par `plan` et supprimées par `apply --prune`, dérive RAM/vCPU lue dans libvirt : [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md).
+
 ## Documentation
 
 | Document | Rôle |
@@ -35,6 +37,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`STEPS5.md`](./STEPS5.md) | Plan d’implémentation **v0.5** |
 | [`specs/001-security-hardening/spec.md`](./specs/001-security-hardening/spec.md) | Spec Kit feature v0.5 |
 | [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md) | Contrat technique **v0.6** (instantanés, `ssh_port`, `restart`) |
+| [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md) | Contrat technique **v0.7** (convergence : `ip:`, `apply --prune`, dérive) |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 

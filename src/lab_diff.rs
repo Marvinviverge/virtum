@@ -12,8 +12,8 @@ use crate::firewall;
 use crate::images::{ensure_image, resolve_image};
 use crate::lab_network;
 use crate::libvirt::{
-    destroy_domain, domain_exists, domain_is_active, domain_state, read_ram_vcpu_from_instance,
-    redefine_domain_resources, undefine_domain,
+    destroy_domain, domain_exists, domain_is_active, domain_state, read_ram_vcpu_from_domain,
+    read_ram_vcpu_from_instance, redefine_domain_resources, undefine_domain,
 };
 use crate::metadata::{self, Instance};
 use crate::mounts::{self, ResolvedMount};
@@ -32,13 +32,16 @@ const GROW_COMMANDS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MachineChange {
+    /// `external` : la définition libvirt diffère de `config.xml` (modifiée hors de Virtum).
     Memory {
         from_mb: u32,
         to_mb: u32,
+        external: bool,
     },
     Cpu {
         from: u32,
         to: u32,
+        external: bool,
     },
     DiskSize {
         from_label: String,
@@ -75,8 +78,14 @@ pub enum MachineChange {
 impl MachineChange {
     pub fn summary_line(&self) -> String {
         match self {
-            Self::Memory { from_mb, to_mb } => format!("ram: {from_mb} → {to_mb} MiB"),
-            Self::Cpu { from, to } => format!("cpu: {from} → {to}"),
+            Self::Memory {
+                from_mb,
+                to_mb,
+                external,
+            } => format!("ram: {from_mb} → {to_mb} MiB{}", external_note(*external)),
+            Self::Cpu { from, to, external } => {
+                format!("cpu: {from} → {to}{}", external_note(*external))
+            }
             Self::DiskSize {
                 from_label,
                 to_label,
@@ -135,6 +144,45 @@ pub struct LabDiff {
     pub machine_diffs: Vec<MachineDiff>,
     pub creates: Vec<String>,
     pub blocking_errors: Vec<String>,
+}
+
+fn external_note(external: bool) -> &'static str {
+    if external {
+        " (modifié hors de Virtum)"
+    } else {
+        ""
+    }
+}
+
+/// Écart entre la valeur voulue et l'existant : `(valeur actuelle, modifiée hors de Virtum)`.
+///
+/// `live` : définition libvirt persistante (prioritaire) ; `local` : `config.xml` de Virtum.
+/// Si libvirt est déjà aligné mais `config.xml` ne l'est pas, l'écart est signalé quand même :
+/// `config.xml` sert à redéfinir le domaine (`refresh_domain_xml`) et doit être réaligné.
+fn resource_drift(desired: u32, live: Option<u32>, local: Option<u32>) -> Option<(u32, bool)> {
+    match (live, local) {
+        (Some(l), _) if l != desired => Some((l, local.is_some_and(|c| c != l))),
+        (Some(_), Some(c)) if c != desired => Some((c, true)),
+        (None, Some(c)) if c != desired => Some((c, false)),
+        _ => None,
+    }
+}
+
+/// RAM/vCPU de la définition libvirt, `None` si le domaine est absent ou illisible.
+fn live_ram_vcpu(vm_id: &str) -> Option<(u32, u32)> {
+    if !domain_exists(vm_id) {
+        return None;
+    }
+    match read_ram_vcpu_from_domain(vm_id) {
+        Ok(values) => Some(values),
+        Err(err) => {
+            eprintln!(
+                "Avertissement: RAM/vCPU illisibles dans libvirt pour {vm_id} ({err:#}) ; \
+                 comparaison avec config.xml."
+            );
+            None
+        }
+    }
 }
 
 fn restart_label(restart: Option<RestartPolicy>) -> &'static str {
@@ -217,20 +265,28 @@ pub fn diff_machine(
         });
     }
 
-    if instance_dir.join("config.xml").is_file() {
-        let (ram, cpu) = read_ram_vcpu_from_instance(instance_dir)?;
-        if spec.ram != ram {
-            changes.push(MachineChange::Memory {
-                from_mb: ram,
-                to_mb: spec.ram,
-            });
-        }
-        if spec.cpu != cpu {
-            changes.push(MachineChange::Cpu {
-                from: cpu,
-                to: spec.cpu,
-            });
-        }
+    let local = if instance_dir.join("config.xml").is_file() {
+        Some(read_ram_vcpu_from_instance(instance_dir)?)
+    } else {
+        None
+    };
+    let live = live_ram_vcpu(&instance.id);
+    if let Some((from_mb, external)) =
+        resource_drift(spec.ram, live.map(|v| v.0), local.map(|v| v.0))
+    {
+        changes.push(MachineChange::Memory {
+            from_mb,
+            to_mb: spec.ram,
+            external,
+        });
+    }
+    if let Some((from, external)) = resource_drift(spec.cpu, live.map(|v| v.1), local.map(|v| v.1))
+    {
+        changes.push(MachineChange::Cpu {
+            from,
+            to: spec.cpu,
+            external,
+        });
     }
 
     if let Some(ref desired_size) = spec.disk_size {
@@ -730,8 +786,41 @@ mod tests {
         let c = MachineChange::Memory {
             from_mb: 2048,
             to_mb: 4096,
+            external: false,
         };
-        assert!(c.summary_line().contains("4096"));
+        assert_eq!(c.summary_line(), "ram: 2048 → 4096 MiB");
+        let c = MachineChange::Cpu {
+            from: 4,
+            to: 2,
+            external: true,
+        };
+        assert_eq!(c.summary_line(), "cpu: 4 → 2 (modifié hors de Virtum)");
+    }
+
+    #[test]
+    fn resource_drift_prefers_libvirt_and_flags_external_changes() {
+        // Tout est aligné.
+        assert_eq!(resource_drift(2048, Some(2048), Some(2048)), None);
+        // Changement du Virtumfile, rien hors de Virtum.
+        assert_eq!(
+            resource_drift(4096, Some(2048), Some(2048)),
+            Some((2048, false))
+        );
+        // `virsh setmem --config` hors de Virtum : libvirt fait foi.
+        assert_eq!(
+            resource_drift(2048, Some(1024), Some(2048)),
+            Some((1024, true))
+        );
+        // libvirt déjà aligné à la main, config.xml en retard : à réaligner.
+        assert_eq!(
+            resource_drift(2048, Some(2048), Some(1024)),
+            Some((1024, true))
+        );
+        // Domaine absent : repli sur config.xml.
+        assert_eq!(resource_drift(2048, None, Some(1024)), Some((1024, false)));
+        assert_eq!(resource_drift(2048, None, Some(2048)), None);
+        // Ni domaine ni config.xml : rien à comparer.
+        assert_eq!(resource_drift(2048, None, None), None);
     }
 
     #[test]
