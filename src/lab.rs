@@ -147,7 +147,10 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
                 }
             }
             if !spec_ports.is_empty() {
-                port_forward::ensure_ports_available(&spec_ports, port_bind)?;
+                // Les ports déjà attribués à cette machine (même bind) sont tenus par son
+                // propre socat quand elle tourne : seuls les autres doivent être libres.
+                let to_check = ports_not_owned(&spec_ports, port_bind, existing);
+                port_forward::ensure_ports_available(&to_check, port_bind)?;
                 port_forward::ensure_ports_not_in_metadata(&metadata, Some(&vm_id), &spec_ports)?;
             }
             if let (Some(ip), Some(net)) = (existing.static_ip.as_deref(), lab_net.as_deref()) {
@@ -364,6 +367,22 @@ async fn warn_if_ip_differs(paths: &VirtumPaths, vm_id: &str, machine: &str, dec
              il expire dans l'heure, puis `virtum stop {machine}` / `virtum start {machine}`."
         );
     }
+}
+
+/// Ports du Virtumfile qui ne sont pas déjà ceux de l'instance (même port hôte, même bind).
+fn ports_not_owned(
+    spec_ports: &[PortForward],
+    bind: PortBind,
+    existing: &Instance,
+) -> Vec<PortForward> {
+    let owned = |pf: &PortForward| {
+        existing.port_bind == Some(bind)
+            && existing
+                .port_forwards
+                .as_ref()
+                .is_some_and(|ports| ports.iter().any(|p| p.host_port == pf.host_port))
+    };
+    spec_ports.iter().filter(|pf| !owned(pf)).cloned().collect()
 }
 
 /// Joue le playbook `ansible:` à la fin de `up` si le lab n'a jamais été provisionné avec
@@ -624,4 +643,33 @@ async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result
         println!("Lab '{}' arrêté.", lab.name);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ports_already_owned_are_not_rechecked() {
+        let pf = |h: u16, g: u16| PortForward {
+            host_port: h,
+            guest_port: g,
+        };
+        let mut inst: Instance = serde_json::from_str(
+            r#"{"id":"vm-cp","name":"cp","os":"ubuntu-24.04","status":"running",
+                "user":"virtum","hostname":"h","created_at":"2026-11-20T09:00:00Z"}"#,
+        )
+        .unwrap();
+        inst.port_forwards = Some(vec![pf(6443, 6443)]);
+        inst.port_bind = Some(PortBind::Local);
+        let spec = vec![pf(6443, 6443), pf(30080, 30080)];
+        assert_eq!(
+            ports_not_owned(&spec, PortBind::Local, &inst),
+            vec![pf(30080, 30080)]
+        );
+        // Bind différent : le port est rouvert ailleurs, il faut le vérifier.
+        assert_eq!(ports_not_owned(&spec, PortBind::Lan, &inst), spec);
+        inst.port_forwards = None;
+        assert_eq!(ports_not_owned(&spec, PortBind::Local, &inst), spec);
+    }
 }
