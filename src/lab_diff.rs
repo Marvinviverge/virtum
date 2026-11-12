@@ -151,6 +151,56 @@ pub struct MachineDiff {
     pub changes: Vec<MachineChange>,
 }
 
+/// Machine du lab encore déployée mais absente du Virtumfile (`virtum apply --prune`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removal {
+    pub machine_name: String,
+    pub vm_id: String,
+    /// Instantanés `virtum snapshot` perdus avec le disque.
+    pub snapshots: usize,
+    /// `ports:` exposés en `bind: lan` (règles ufw à réaligner avec `virtum open`).
+    pub lan_ports: bool,
+}
+
+/// Instances du lab dont la machine n'est plus dans le Virtumfile, triées par nom.
+pub fn removed_instances<'a>(
+    lab: &Virtumfile,
+    metadata: &'a metadata::Metadata,
+) -> Vec<&'a Instance> {
+    let mut out: Vec<&Instance> = metadata::instances_for_lab(metadata, &lab.name)
+        .into_iter()
+        .filter(|inst| {
+            inst.machine_name
+                .as_deref()
+                .is_none_or(|m| !lab.machines.contains_key(m))
+        })
+        .collect();
+    out.sort_by(|a, b| a.machine_name.cmp(&b.machine_name));
+    out
+}
+
+/// Retraits à proposer, avec le nombre d'instantanés de chaque disque.
+pub fn collect_removals(
+    lab: &Virtumfile,
+    metadata: &metadata::Metadata,
+    instances_dir: &Path,
+) -> Vec<Removal> {
+    removed_instances(lab, metadata)
+        .into_iter()
+        .map(|inst| Removal {
+            machine_name: inst.machine_name.clone().unwrap_or_else(|| inst.id.clone()),
+            vm_id: inst.id.clone(),
+            snapshots: crate::snapshot::list_disk_snapshots(
+                &instances_dir.join(&inst.id).join("disk.qcow2"),
+            )
+            .map(|s| s.len())
+            .unwrap_or(0),
+            lan_ports: inst.port_bind == Some(PortBind::Lan)
+                && inst.port_forwards.as_ref().is_some_and(|p| !p.is_empty()),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct LabDiff {
     pub virtumfile_path: PathBuf,
@@ -158,6 +208,8 @@ pub struct LabDiff {
     pub machine_diffs: Vec<MachineDiff>,
     pub creates: Vec<String>,
     pub blocking_errors: Vec<String>,
+    /// Machines déployées absentes du Virtumfile.
+    pub removals: Vec<Removal>,
 }
 
 fn external_note(external: bool) -> &'static str {
@@ -437,6 +489,7 @@ pub async fn build_lab_diff(virtumfile_path: PathBuf, lab: Virtumfile) -> Result
         }
     }
     machine_diffs.sort_by(|a, b| a.machine_name.cmp(&b.machine_name));
+    let removals = collect_removals(&lab, &metadata, &paths.instances);
 
     Ok(LabDiff {
         virtumfile_path,
@@ -444,10 +497,16 @@ pub async fn build_lab_diff(virtumfile_path: PathBuf, lab: Virtumfile) -> Result
         machine_diffs,
         creates,
         blocking_errors,
+        removals,
     })
 }
 
-pub async fn apply_lab(file: Option<PathBuf>, insecure_ssh: bool) -> Result<()> {
+pub async fn apply_lab(
+    file: Option<PathBuf>,
+    insecure_ssh: bool,
+    prune: bool,
+    yes: bool,
+) -> Result<()> {
     let virtumfile_path = virtumfile::resolve_virtumfile_path(file)?;
     let lab = virtumfile::load(&virtumfile_path)?;
     let diff = build_lab_diff(virtumfile_path.clone(), lab.clone()).await?;
@@ -462,7 +521,7 @@ pub async fn apply_lab(file: Option<PathBuf>, insecure_ssh: bool) -> Result<()> 
         );
     }
 
-    if diff.machine_diffs.is_empty() {
+    if diff.machine_diffs.is_empty() && (diff.removals.is_empty() || !prune) {
         println!("Aucune modification à appliquer sur le lab '{}'.", lab.name);
         if !diff.creates.is_empty() {
             println!(
@@ -471,17 +530,26 @@ pub async fn apply_lab(file: Option<PathBuf>, insecure_ssh: bool) -> Result<()> 
                 virtumfile_path.display()
             );
         }
+        print_removal_reminder(&diff.removals, &virtumfile_path);
+        return Ok(());
+    }
+
+    // Confirmation avant toute modification : un refus n'applique rien.
+    if prune && !diff.removals.is_empty() && !yes && !confirm_prune(&diff.removals)? {
+        println!("Apply annulé : aucune modification.");
         return Ok(());
     }
 
     let paths = crate::config::ensure_layout().await?;
     let lab_net = lab_network::lab_network_name(&lab.name).ok();
 
-    println!(
-        "Application de {} modification(s) sur le lab '{}'…",
-        diff.machine_diffs.len(),
-        lab.name
-    );
+    if !diff.machine_diffs.is_empty() {
+        println!(
+            "Application de {} modification(s) sur le lab '{}'…",
+            diff.machine_diffs.len(),
+            lab.name
+        );
+    }
 
     let mut needs_open_hint = false;
     for md in &diff.machine_diffs {
@@ -538,7 +606,85 @@ pub async fn apply_lab(file: Option<PathBuf>, insecure_ssh: bool) -> Result<()> 
         );
     }
 
+    if prune {
+        prune_removals(&paths, &lab.name, &diff.removals, &virtumfile_path).await?;
+    } else {
+        print_removal_reminder(&diff.removals, &virtumfile_path);
+    }
+
     println!("Apply terminé pour le lab '{}'.", lab.name);
+    Ok(())
+}
+
+fn print_removal_reminder(removals: &[Removal], virtumfile_path: &Path) {
+    if removals.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = removals.iter().map(|r| r.machine_name.as_str()).collect();
+    println!(
+        "Machines hors du Virtumfile, conservées : {}. Pour les supprimer : virtum apply --prune -f {}",
+        names.join(", "),
+        virtumfile_path.display()
+    );
+}
+
+/// Liste les machines à supprimer et demande confirmation (défaut : non).
+/// Sans terminal interactif : refus, `--yes` requis.
+fn confirm_prune(removals: &[Removal]) -> Result<bool> {
+    use std::io::{self, IsTerminal, Write};
+
+    eprintln!("Machines hors du Virtumfile à supprimer (VM, disque et instantanés) :");
+    for r in removals {
+        let snaps = if r.snapshots > 0 {
+            format!(", {} instantané(s)", r.snapshots)
+        } else {
+            String::new()
+        };
+        eprintln!("  - {} ({}{snaps})", r.machine_name, r.vm_id);
+    }
+    if !io::stdin().is_terminal() {
+        bail!(
+            "Refus de `--prune` sans terminal interactif : relancez avec `--yes` pour confirmer la suppression."
+        );
+    }
+    eprint!("Supprimer ces machines ? Les dossiers `mounts:` de l'hôte sont conservés. [y/N] ");
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(line.trim(), "y" | "Y"))
+}
+
+/// Supprime les machines hors du Virtumfile (comme `virtum destroy`, sans `--purge`).
+/// Un échec n'arrête pas les suivantes ; la liste des restes est donnée à la fin.
+async fn prune_removals(
+    paths: &VirtumPaths,
+    lab_name: &str,
+    removals: &[Removal],
+    virtumfile_path: &Path,
+) -> Result<()> {
+    let mut failed = Vec::new();
+    for r in removals {
+        eprintln!("  Suppression de '{}' ({})…", r.machine_name, r.vm_id);
+        if let Err(err) = vm::destroy_vm_async(&r.vm_id, false).await {
+            eprintln!("  ✗ '{}' : {err:#}", r.machine_name);
+            failed.push(r.machine_name.clone());
+        }
+    }
+    if removals.iter().any(|r| r.lan_ports) && firewall::has_firewall_state(paths, lab_name)? {
+        println!(
+            "Pare-feu LAN : des ports `bind: lan` ont été retirés ; réalignez ufw avec `virtum open -f {}`.",
+            virtumfile_path.display()
+        );
+    }
+    if !failed.is_empty() {
+        bail!(
+            "Retrait incomplet : {} machine(s) restent ({}).",
+            failed.len(),
+            failed.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -935,6 +1081,61 @@ mod tests {
             to: None,
         };
         assert!(removed.summary_line().contains("→ (dhcp)"));
+    }
+
+    #[test]
+    fn removals_list_lab_instances_missing_from_virtumfile() {
+        let lab =
+            virtumfile::load_from_str("name: lab\nmachines:\n  web:\n    os: debian-12\n").unwrap();
+        let inst = |id: &str, lab_name: &str, machine: &str, status: &str| -> Instance {
+            serde_json::from_str(&format!(
+                r#"{{"id":"{id}","name":"{machine}","os":"debian-12","status":"{status}",
+                    "user":"virtum","hostname":"h","lab_name":"{lab_name}",
+                    "machine_name":"{machine}","created_at":"2026-11-12T09:00:00Z"}}"#
+            ))
+            .unwrap()
+        };
+        let mut gone = inst("vm-db", "lab", "db", "running");
+        gone.port_forwards = Some(vec![PortForward {
+            host_port: 5432,
+            guest_port: 5432,
+        }]);
+        gone.port_bind = Some(PortBind::Lan);
+        let metadata = metadata::Metadata {
+            instances: vec![
+                inst("vm-web", "lab", "web", "running"),
+                gone,
+                inst("vm-cache", "lab", "cache", "stopped"),
+                inst("vm-other", "other-lab", "db", "running"),
+                inst("vm-old", "lab", "old", "destroyed"),
+            ],
+            ..Default::default()
+        };
+        let names: Vec<_> = removed_instances(&lab, &metadata)
+            .iter()
+            .map(|i| i.id.clone())
+            .collect();
+        assert_eq!(names, vec!["vm-cache", "vm-db"]);
+
+        let dir = std::env::temp_dir().join(format!("virtum-removals-{}", std::process::id()));
+        let removals = collect_removals(&lab, &metadata, &dir);
+        assert_eq!(
+            removals,
+            vec![
+                Removal {
+                    machine_name: "cache".into(),
+                    vm_id: "vm-cache".into(),
+                    snapshots: 0,
+                    lan_ports: false,
+                },
+                Removal {
+                    machine_name: "db".into(),
+                    vm_id: "vm-db".into(),
+                    snapshots: 0,
+                    lan_ports: true,
+                },
+            ]
+        );
     }
 
     #[test]

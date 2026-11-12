@@ -129,6 +129,7 @@ virtum run --os debian-12 --network bridge --name demo-lan   # IP du LAN (macvta
 # Si échec IP : vérifiez `ip route` puis par ex. --bridge-interface wlp3s0 (interface du partage téléphone)
 virtum plan -f examples/Virtumfile   # prévisualise create / update / resume (sans rien modifier)
 virtum apply -f examples/Virtumfile  # applique RAM, bind, ports, disk_size sur VMs existantes
+virtum apply --prune -f examples/Virtumfile  # v0.7 : supprime aussi les machines retirées du fichier (confirmation, ou --yes)
 virtum up                    # crée ou relance le lab (Virtumfile) ; après `down`, relance sans recréer
 virtum up -f examples/Virtumfile   # ex. bind: lan → http://<IP-PC>:18080 depuis le téléphone
 virtum open -f examples/Virtumfile # sudo ufw allow (ports bind: lan)
@@ -152,6 +153,7 @@ Virtum utilise **libvirt système** (`qemu:///system`).
 - **`virtum run`** (VM seule) : réseau libvirt **`default`** (`192.168.122.x`). Option **`--network bridge`** : macvtap sur l’interface physique (IP LAN via DHCP). Voir `virtum doctor` ; Wi‑Fi / partage téléphone souvent instable.
 - **`virtum up`** (lab) : réseau dédié **`virtum-lab-<name>`** par lab (NAT isolé). Les machines du même lab se joignent entre elles.
 - **`bind: lan`** (Virtumfile) : les `ports:` écoutent sur `0.0.0.0` (joignable depuis le même Wi‑Fi/Ethernet que le PC). Ouvrez le pare-feu hôte avec **`virtum open`** après `virtum up`. **`virtum plan`** compare les ports du Virtumfile à l’état enregistré dans `firewall-<lab>.json` (aligné, absent, ou désaligné après changement de port).
+- **Machines retirées du Virtumfile (v0.7)** : elles restent déployées. `virtum plan` les liste (`- remove`, avec le nombre d'instantanés perdus) et `virtum up` le rappelle. `virtum apply --prune` les supprime comme `virtum destroy` (VM, disque, instantanés, réservation `ip:`) après confirmation ; `--yes` pour les scripts, refus sans terminal sinon. Les dossiers `mounts:` de l'hôte sont conservés.
 - **`ip:` par machine (v0.7, optionnel)** : adresse fixe sur le réseau du lab (`ip: 192.168.68.20`), via une réservation DHCP libvirt ; l'invité reste en DHCP. Le sous-réseau du lab est affiché par `virtum plan`. Ajout ou changement : `virtum apply` (redémarre la VM). Sans `ip:`, DHCP libre comme avant. Impossible en `network: bridge` seul.
 - **Virtumfile `network: bridge`** : lab entier sur le LAN (`examples/Virtumfile.bridge-lab`) ou mix web LAN + db privée (`examples/Virtumfile.bridge-mixed`, dual NIC). `virtum ps` affiche **IP** et **LAN**.
 - **VM isolée** sur le LAN : `virtum run --network bridge`.

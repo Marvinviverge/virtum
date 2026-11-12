@@ -31,7 +31,7 @@ pub enum Commands {
     },
     /// Launch a headless VM
     Run(RunArgs),
-    /// Apply Virtumfile changes to existing lab VMs (RAM, CPU, bind, ports, disk_size, mounts, ssh_port, restart)
+    /// Apply Virtumfile changes to existing lab VMs (RAM, CPU, bind, ports, disk_size, mounts, ssh_port, restart, ip)
     Apply {
         /// Path to Virtumfile
         #[arg(short, long)]
@@ -39,6 +39,12 @@ pub enum Commands {
         /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
         #[arg(long)]
         insecure_ssh: bool,
+        /// Supprime aussi les machines du lab absentes du Virtumfile (VM, disque, instantanés)
+        #[arg(long)]
+        prune: bool,
+        /// Avec `--prune` : pas de confirmation interactive (scripts / CI)
+        #[arg(short, long, requires = "prune")]
+        yes: bool,
     },
     /// Preview lab deploy (create/resume, updates, warnings) without changes
     Plan {

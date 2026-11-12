@@ -287,6 +287,18 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
         println!("      instance: {}", inst_dir.display());
     }
 
+    let removals = crate::lab_diff::collect_removals(&lab, &metadata, &paths.instances);
+    for r in &removals {
+        println!(
+            "  - remove    {:<12} ({})  hors du Virtumfile — supprimée par `virtum apply --prune`",
+            r.machine_name, r.vm_id
+        );
+        if r.snapshots > 0 {
+            println!("      {} instantané(s) virtum-* seront perdus", r.snapshots);
+        }
+    }
+    let remove_n = removals.len();
+
     print_images(&paths, &lab, &mut warnings)?;
 
     if needs_socat && !command_exists("socat") {
@@ -340,8 +352,8 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
     }
 
     println!(
-        "\nRésumé : {create_n} à créer, {update_n} à mettre à jour (apply), {resume_n} à reprendre, {unchanged_n} inchangée(s). \
-         {} avertissement(s), {} erreur(s).",
+        "\nRésumé : {create_n} à créer, {update_n} à mettre à jour (apply), {resume_n} à reprendre, {unchanged_n} inchangée(s), \
+         {remove_n} hors du Virtumfile. {} avertissement(s), {} erreur(s).",
         warnings.len(),
         errors.len()
     );
@@ -356,6 +368,12 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
     if update_n > 0 {
         println!(
             "Modifications détectées : virtum apply -f {}",
+            virtumfile_path.display()
+        );
+    }
+    if remove_n > 0 {
+        println!(
+            "Machines hors du Virtumfile : virtum apply --prune -f {}",
             virtumfile_path.display()
         );
     }

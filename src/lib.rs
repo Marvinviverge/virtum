@@ -45,7 +45,12 @@ fn dispatch(command: Commands) -> Result<()> {
         Commands::Open { file } => firewall::open(file)?,
         Commands::Close { file } => firewall::close(file)?,
         Commands::Plan { file } => plan::plan(file)?,
-        Commands::Apply { file, insecure_ssh } => apply::apply(file, insecure_ssh)?,
+        Commands::Apply {
+            file,
+            insecure_ssh,
+            prune,
+            yes,
+        } => apply::apply(file, insecure_ssh, prune, yes)?,
         Commands::Up {
             file,
             yes_lan,

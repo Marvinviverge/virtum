@@ -256,6 +256,20 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
     }
 
     println!("Lab '{}' prêt ({} VM).", lab.name, ready);
+    let leftover: Vec<String> = {
+        let meta = metadata::load_metadata(&paths.metadata).await?;
+        crate::lab_diff::removed_instances(&lab, &meta)
+            .iter()
+            .map(|i| i.machine_name.clone().unwrap_or_else(|| i.id.clone()))
+            .collect()
+    };
+    if !leftover.is_empty() {
+        eprintln!(
+            "  Machines hors du Virtumfile, toujours présentes : {}. Voir `virtum plan` / `virtum apply --prune -f {}`.",
+            leftover.join(", "),
+            path.display()
+        );
+    }
     for (machine_name, spec) in &lab.machines {
         let autostarts = virtumfile::effective_restart(&lab, machine_name)
             .is_some_and(|r| r != RestartPolicy::No);
