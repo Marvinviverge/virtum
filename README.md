@@ -38,6 +38,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`specs/001-security-hardening/spec.md`](./specs/001-security-hardening/spec.md) | Spec Kit feature v0.5 |
 | [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md) | Contrat technique **v0.6** (instantanés, `ssh_port`, `restart`) |
 | [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md) | Contrat technique **v0.7** (convergence : `ip:`, `apply --prune`, dérive) |
+| [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md) | Contrat technique **v0.8** (prévu : Ansible intégré, `virtum inventory`, `virtum provision`) |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 
