@@ -339,20 +339,31 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
         if let Err(e) = crate::ansible::require_tools(spec) {
             errors.push(format!("{e:#}"));
         }
-        let status = match crate::ansible::load_state(&paths, &lab.name)? {
+        let (status, will_run) = match crate::ansible::load_state(&paths, &lab.name)? {
             Some(state) if state.succeeded() => {
                 let when = state.provisioned_at.unwrap_or_default();
                 if any_create {
-                    format!("provisionné ({when}) ; sera rejoué au up (machines à créer)")
+                    (
+                        format!("provisionné ({when}) ; sera rejoué au up (machines à créer)"),
+                        true,
+                    )
                 } else {
-                    format!("déjà provisionné ({when}) — `virtum provision` pour rejouer")
+                    (
+                        format!("déjà provisionné ({when}) — `virtum provision` pour rejouer"),
+                        false,
+                    )
                 }
             }
-            Some(_) => "dernier provisionnement en échec — sera rejoué au up".to_string(),
-            None => "sera joué au up (lab non provisionné)".to_string(),
+            Some(_) => (
+                "dernier provisionnement en échec — sera rejoué au up".to_string(),
+                true,
+            ),
+            None => ("sera joué au up (lab non provisionné)".to_string(), true),
         };
+        // L'instantané n'est pris qu'après un provisionnement joué par `up`.
         let snapshot = spec
             .snapshot_name()
+            .filter(|_| will_run)
             .map(|n| format!(", puis instantané '{n}'"))
             .unwrap_or_default();
         println!("\nAnsible : {} — {status}{snapshot}", spec.playbook);
