@@ -148,6 +148,9 @@ pub struct MachineSpec {
     /// Adresse déclarée sur le réseau du lab (réservation DHCP) ; absente = DHCP libre.
     #[serde(default)]
     pub ip: Option<String>,
+    /// Groupes Ansible de la machine (`virtum inventory`, v0.8).
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 /// Démarrage automatique au boot de l'hôte (`restart:`, comme docker compose).
@@ -331,6 +334,53 @@ fn validate_static_ips(lab: &Virtumfile) -> Result<()> {
     Ok(())
 }
 
+/// Groupe Ansible implicite du lab : nom du lab, `-` → `_` (préfixe `lab_` si besoin).
+pub fn lab_group_name(lab_name: &str) -> String {
+    let name = lab_name.trim().replace('-', "_");
+    if is_ansible_group_name(&name) {
+        name
+    } else {
+        format!("lab_{name}")
+    }
+}
+
+fn is_ansible_group_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Règles de `groups:` : identifiants Ansible, ni `all` / `ungrouped`, pas de doublon,
+/// pas de groupe homonyme d'une machine ni du groupe implicite du lab… sauf s'il s'agit
+/// du même groupe (déclarer le groupe du lab est inutile mais accepté).
+fn validate_groups(lab: &Virtumfile) -> Result<()> {
+    for (machine_name, spec) in &lab.machines {
+        let mut seen = std::collections::BTreeSet::new();
+        for group in &spec.groups {
+            if !is_ansible_group_name(group) {
+                bail!(
+                    "Machine '{machine_name}' : groupe '{group}' invalide — lettres, chiffres et `_`, \
+                     sans commencer par un chiffre (Ansible refuse `-`)."
+                );
+            }
+            if group == "all" || group == "ungrouped" {
+                bail!("Machine '{machine_name}' : '{group}' est un groupe réservé d'Ansible.");
+            }
+            if lab.machines.contains_key(group.as_str()) {
+                bail!(
+                    "Machine '{machine_name}' : le groupe '{group}' porte le nom d'une machine du lab."
+                );
+            }
+            if !seen.insert(group.as_str()) {
+                bail!("Machine '{machine_name}' : groupe '{group}' en double.");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Port SSH standard (image cloud fraîche).
 pub const DEFAULT_SSH_PORT: u16 = 22;
 
@@ -460,6 +510,7 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
     }
     port_forward::validate_lab_port_uniqueness(&port_machines)?;
     validate_static_ips(lab)?;
+    validate_groups(lab)?;
 
     if lab_uses_bridge(lab) {
         let explicit = lab_bridge_interface_for_validation(lab);
@@ -972,5 +1023,36 @@ machines:
         let mut with_ip = lab.clone();
         with_ip.machines.get_mut("cp").unwrap().ip = Some("192.168.100.10".into());
         assert!(format!("{:#}", validate_static_ips(&with_ip).unwrap_err()).contains("bridge"));
+    }
+
+    #[test]
+    fn groups_validation_and_lab_group() {
+        assert_eq!(lab_group_name("kubernetes-lab"), "kubernetes_lab");
+        assert_eq!(lab_group_name("1lab"), "lab_1lab");
+        let load = |groups: &str| {
+            load_from_str(&format!(
+                "name: k8s\nmachines:\n  cp:\n    os: debian-12\n    groups: {groups}\n  w1:\n    os: debian-12\n"
+            ))
+            .unwrap()
+        };
+        assert!(validate_groups(&load("[control_plane, k8s_cluster]")).is_ok());
+        assert_eq!(load("[a, b]").machines["cp"].groups, vec!["a", "b"]);
+        assert!(
+            load_from_str("name: k8s\nmachines:\n  cp:\n    os: debian-12\n")
+                .unwrap()
+                .machines["cp"]
+                .groups
+                .is_empty()
+        );
+        for (bad, needle) in [
+            ("[control-plane]", "invalide"),
+            ("[1st]", "invalide"),
+            ("[all]", "réservé"),
+            ("[w1]", "nom d'une machine"),
+            ("[a, a]", "en double"),
+        ] {
+            let err = validate_groups(&load(bad)).unwrap_err().to_string();
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
     }
 }

@@ -46,6 +46,21 @@ pub enum Commands {
         #[arg(short, long, requires = "prune")]
         yes: bool,
     },
+    /// Print an Ansible inventory for the running machines of a lab (v0.8)
+    Inventory {
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = InventoryFormat::Ini)]
+        format: InventoryFormat,
+        /// Write to this file (atomic) instead of stdout
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Inventaire sans vérification de clé SSH (StrictHostKeyChecking=no, comme --insecure-ssh).
+        #[arg(long)]
+        insecure_ssh: bool,
+    },
     /// Preview lab deploy (create/resume, updates, warnings) without changes
     Plan {
         /// Path to Virtumfile
@@ -221,6 +236,16 @@ pub struct RunArgs {
     /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
     #[arg(long)]
     pub insecure_ssh: bool,
+}
+
+/// Format de `virtum inventory`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum InventoryFormat {
+    /// INI (format historique d'Ansible).
+    #[default]
+    Ini,
+    /// YAML (plugin d'inventaire yaml d'Ansible).
+    Yaml,
 }
 
 /// Réseau `virtum run` (hors Virtumfile).

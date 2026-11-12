@@ -57,6 +57,11 @@ pub fn known_hosts_path(instance_dir: &Path) -> PathBuf {
     instance_dir.join("known_hosts")
 }
 
+/// Chemin de la clé privée Virtum (sans la créer).
+pub fn private_key_path(keys_dir: &Path) -> PathBuf {
+    keys_dir.join(PRIVATE_KEY_NAME)
+}
+
 #[derive(Debug, Clone)]
 pub struct SshKeyPaths {
     pub private_key: PathBuf,

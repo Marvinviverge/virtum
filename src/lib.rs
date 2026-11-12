@@ -8,6 +8,7 @@ pub mod disk;
 pub mod doctor;
 pub mod firewall;
 pub mod images;
+pub mod inventory;
 pub mod lab;
 pub mod lab_diff;
 pub mod lab_network;
@@ -45,6 +46,12 @@ fn dispatch(command: Commands) -> Result<()> {
         Commands::Open { file } => firewall::open(file)?,
         Commands::Close { file } => firewall::close(file)?,
         Commands::Plan { file } => plan::plan(file)?,
+        Commands::Inventory {
+            file,
+            format,
+            output,
+            insecure_ssh,
+        } => inventory::inventory(file, format, output, insecure_ssh)?,
         Commands::Apply {
             file,
             insecure_ssh,
