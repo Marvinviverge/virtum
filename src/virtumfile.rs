@@ -93,7 +93,91 @@ pub struct Virtumfile {
     /// Démarrage au boot de l'hôte (`no`, `always`, `unless-stopped`), hérité par les machines.
     #[serde(default)]
     pub restart: Option<RestartPolicy>,
+    /// Provisionnement Ansible du lab depuis l'hôte (v0.8).
+    #[serde(default)]
+    pub ansible: Option<AnsibleSpec>,
     pub machines: BTreeMap<String, MachineSpec>,
+}
+
+/// Section `ansible:` du Virtumfile.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnsibleSpec {
+    /// Playbook, relatif au répertoire du Virtumfile.
+    pub playbook: String,
+    /// Fichier requirements (collections / rôles) pour `ansible-galaxy`.
+    #[serde(default)]
+    pub requirements: Option<String>,
+    /// Instantané de lab après le premier provisionnement : nom, `true` (défaut) ou `false`.
+    #[serde(default)]
+    pub snapshot: Option<SnapshotSetting>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum SnapshotSetting {
+    Enabled(bool),
+    Name(String),
+}
+
+/// Nom d'instantané par défaut après provisionnement.
+pub const DEFAULT_PROVISION_SNAPSHOT: &str = "provisioned";
+
+impl AnsibleSpec {
+    /// Nom de l'instantané à prendre, `None` si désactivé.
+    pub fn snapshot_name(&self) -> Option<String> {
+        match &self.snapshot {
+            None | Some(SnapshotSetting::Enabled(true)) => {
+                Some(DEFAULT_PROVISION_SNAPSHOT.to_string())
+            }
+            Some(SnapshotSetting::Enabled(false)) => None,
+            Some(SnapshotSetting::Name(name)) => Some(name.clone()),
+        }
+    }
+}
+
+/// Chemin d'un fichier de la section `ansible:` : relatif, sous le répertoire du
+/// Virtumfile (liens résolus), fichier existant.
+pub fn resolve_ansible_path(
+    virtumfile_dir: &Path,
+    field: &str,
+    value: &str,
+) -> Result<std::path::PathBuf> {
+    let rel = Path::new(value.trim());
+    if value.trim().is_empty() || rel.is_absolute() {
+        bail!("ansible.{field} : chemin relatif au Virtumfile attendu ('{value}').");
+    }
+    let base = virtumfile_dir.canonicalize().with_context(|| {
+        format!(
+            "Répertoire du Virtumfile introuvable : {}",
+            virtumfile_dir.display()
+        )
+    })?;
+    let full = base.join(rel);
+    let resolved = full
+        .canonicalize()
+        .with_context(|| format!("ansible.{field} : fichier introuvable ({})", full.display()))?;
+    if !resolved.starts_with(&base) {
+        bail!("ansible.{field} : '{value}' sort du répertoire du Virtumfile.");
+    }
+    if !resolved.is_file() {
+        bail!("ansible.{field} : '{value}' n'est pas un fichier.");
+    }
+    Ok(resolved)
+}
+
+fn validate_ansible(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
+    let Some(ref spec) = lab.ansible else {
+        return Ok(());
+    };
+    resolve_ansible_path(virtumfile_dir, "playbook", &spec.playbook)?;
+    if let Some(ref req) = spec.requirements {
+        resolve_ansible_path(virtumfile_dir, "requirements", req)?;
+    }
+    if let Some(name) = spec.snapshot_name() {
+        crate::snapshot::validate_snapshot_name(&name).context("ansible.snapshot invalide")?;
+    }
+    Ok(())
 }
 
 /// Volume virtiofs déclaré dans le Virtumfile.
@@ -511,6 +595,7 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
     port_forward::validate_lab_port_uniqueness(&port_machines)?;
     validate_static_ips(lab)?;
     validate_groups(lab)?;
+    validate_ansible(lab, virtumfile_dir)?;
 
     if lab_uses_bridge(lab) {
         let explicit = lab_bridge_interface_for_validation(lab);
@@ -1054,5 +1139,58 @@ machines:
             let err = validate_groups(&load(bad)).unwrap_err().to_string();
             assert!(err.contains(needle), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn ansible_section_validation() {
+        let dir = std::env::temp_dir().join(format!("virtum-ansible-vf-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("pb")).unwrap();
+        std::fs::write(dir.join("pb/site.yml"), "---\n").unwrap();
+        std::fs::write(dir.join("pb/req.yml"), "---\n").unwrap();
+        let lab = |ansible: &str| {
+            load_from_str(&format!(
+                "name: k8s\nansible:\n{ansible}machines:\n  cp:\n    os: debian-12\n"
+            ))
+            .unwrap()
+        };
+        let ok = lab("  playbook: pb/site.yml\n  requirements: pb/req.yml\n");
+        validate(&ok, &dir).unwrap();
+        assert_eq!(
+            ok.ansible.as_ref().unwrap().snapshot_name().as_deref(),
+            Some("provisioned")
+        );
+        assert_eq!(
+            lab("  playbook: pb/site.yml\n  snapshot: false\n")
+                .ansible
+                .unwrap()
+                .snapshot_name(),
+            None
+        );
+        assert_eq!(
+            lab("  playbook: pb/site.yml\n  snapshot: cluster-ok\n")
+                .ansible
+                .unwrap()
+                .snapshot_name()
+                .as_deref(),
+            Some("cluster-ok")
+        );
+        for (bad, needle) in [
+            ("  playbook: pb/missing.yml\n", "introuvable"),
+            ("  playbook: /etc/hosts\n", "relatif"),
+            (
+                "  playbook: ../../../../../../../etc/hosts\n",
+                "sort du répertoire",
+            ),
+            ("  playbook: pb\n", "n'est pas un fichier"),
+            ("  playbook: pb/site.yml\n  snapshot: '-bad'\n", "snapshot"),
+        ] {
+            let err = format!("{:#}", validate(&lab(bad), &dir).unwrap_err());
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
+        assert!(load_from_str(
+            "name: k8s\nansible:\n  playbook: pb/site.yml\n  playbok: x\nmachines:\n  cp:\n    os: debian-12\n"
+        )
+        .is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

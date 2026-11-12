@@ -1,3 +1,4 @@
+pub mod ansible;
 pub mod apply;
 pub mod bridge_network;
 pub mod cli;
@@ -46,6 +47,11 @@ fn dispatch(command: Commands) -> Result<()> {
         Commands::Open { file } => firewall::open(file)?,
         Commands::Close { file } => firewall::close(file)?,
         Commands::Plan { file } => plan::plan(file)?,
+        Commands::Provision {
+            file,
+            insecure_ssh,
+            args,
+        } => ansible::provision(file, args, insecure_ssh)?,
         Commands::Inventory {
             file,
             format,

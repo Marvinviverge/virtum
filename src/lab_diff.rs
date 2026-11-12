@@ -1184,6 +1184,7 @@ mod tests {
             mounts: None,
             restart: None,
             ssh_port: None,
+            ansible: None,
             machines: BTreeMap::from([(
                 "db".into(),
                 MachineSpec {
@@ -1249,6 +1250,7 @@ mod tests {
             mounts: None,
             restart: None,
             ssh_port: None,
+            ansible: None,
             machines: BTreeMap::from([(
                 "web".into(),
                 MachineSpec {

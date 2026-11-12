@@ -61,6 +61,18 @@ pub enum Commands {
         #[arg(long)]
         insecure_ssh: bool,
     },
+    /// Run the lab's Ansible playbook again (`ansible:` section, v0.8); args after `--` go to ansible-playbook
+    Provision {
+        /// Path to Virtumfile
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+        #[arg(long)]
+        insecure_ssh: bool,
+        /// Arguments transmis à ansible-playbook (ex. `-- --tags init --limit node-1`)
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Preview lab deploy (create/resume, updates, warnings) without changes
     Plan {
         /// Path to Virtumfile
