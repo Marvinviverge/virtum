@@ -35,6 +35,7 @@ struct MachinePlan {
     port_bind: PortBind,
     forwards: Vec<PortForward>,
     provision_steps: usize,
+    static_ip: Option<String>,
     updates: Vec<String>,
 }
 
@@ -72,6 +73,30 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
 
     if let Err(e) = port_forward::validate_lab_port_uniqueness(&port_plan) {
         errors.push(e.to_string());
+    }
+    if let Ok(net) = crate::lab_network::lab_network_name(&lab.name) {
+        let owners = crate::lab_network::lab_instance_macs(
+            &paths.instances,
+            &metadata::instances_for_lab(&metadata, &lab.name),
+        );
+        let (ip_errors, ip_warnings) = crate::lab::declared_ip_checks(&lab, &net, &owners);
+        errors.extend(ip_errors);
+        warnings.extend(ip_warnings);
+    }
+    for (machine_name, spec) in &lab.machines {
+        let declared = virtumfile::machine_static_ip(spec).map(|ip| ip.to_string());
+        let Some(inst) = metadata::find_by_lab_machine(&metadata, &lab.name, machine_name) else {
+            continue;
+        };
+        if let (Some(want), Some(have)) = (inst.static_ip.as_ref(), inst.ip.as_ref()) {
+            if declared.as_ref() == Some(want) && want != have {
+                warnings.push(format!(
+                    "Machine '{machine_name}' : adresse actuelle {have}, déclarée {want} \
+                     (ancien bail ?). `virtum stop {machine_name}` / `virtum start {machine_name}` \
+                     une fois le bail expiré."
+                ));
+            }
+        }
     }
 
     let needs_socat = port_plan.iter().any(|(_, f)| !f.is_empty());
@@ -181,6 +206,7 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
             port_bind,
             forwards,
             provision_steps: spec.provision.len(),
+            static_ip: virtumfile::machine_static_ip(spec).map(|ip| ip.to_string()),
             updates,
         });
     }
@@ -242,6 +268,9 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
             "  {sym} {action_label:<9} {:<12} ({})  os={} ram={} cpu={} network={} bind={} ports=[{ports}]",
             m.name, m.vm_id, m.os, m.ram, m.cpu, net, bind
         );
+        if let Some(ref ip) = m.static_ip {
+            println!("      ip: {ip} (déclarée)");
+        }
         if m.provision_steps > 0 {
             println!("      provision: {} commande(s)", m.provision_steps);
         }

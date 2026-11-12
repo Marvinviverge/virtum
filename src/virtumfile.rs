@@ -145,6 +145,9 @@ pub struct MachineSpec {
     /// Démarrage au boot de l'hôte pour cette machine (surcharge `restart` du lab).
     #[serde(default)]
     pub restart: Option<RestartPolicy>,
+    /// Adresse déclarée sur le réseau du lab (réservation DHCP) ; absente = DHCP libre.
+    #[serde(default)]
+    pub ip: Option<String>,
 }
 
 /// Démarrage automatique au boot de l'hôte (`restart:`, comme docker compose).
@@ -290,6 +293,44 @@ pub fn effective_port_bind(lab: &Virtumfile, machine_name: &str) -> PortBind {
     spec.bind.or(lab.bind).unwrap_or(PortBind::Local)
 }
 
+/// La machine a une carte sur le réseau `virtum-lab-*` (mode `lab` ou hybride).
+pub fn machine_has_lab_nic(lab: &Virtumfile, machine_name: &str) -> bool {
+    match effective_network_mode(lab, machine_name) {
+        NetworkMode::Lab => lab.network != Some(NetworkMode::Bridge),
+        NetworkMode::Bridge => lab_has_bridge_lab_mix(lab),
+    }
+}
+
+/// Adresse `ip:` déclarée (déjà validée par [`validate`]).
+pub fn machine_static_ip(spec: &MachineSpec) -> Option<std::net::Ipv4Addr> {
+    spec.ip.as_deref().and_then(|ip| ip.trim().parse().ok())
+}
+
+/// Règles statiques de `ip:` : IPv4, réseau du lab, pas réservée, unique, carte lab présente.
+fn validate_static_ips(lab: &Virtumfile) -> Result<()> {
+    let mut seen: BTreeMap<std::net::Ipv4Addr, &str> = BTreeMap::new();
+    for (machine_name, spec) in &lab.machines {
+        let Some(raw) = spec.ip.as_deref() else {
+            continue;
+        };
+        let ip: std::net::Ipv4Addr = raw.trim().parse().map_err(|_| {
+            anyhow::anyhow!("Machine '{machine_name}' : ip: '{raw}' n'est pas une adresse IPv4.")
+        })?;
+        if !machine_has_lab_nic(lab, machine_name) {
+            bail!(
+                "Machine '{machine_name}' : `ip:` n'est possible que sur le réseau du lab. \
+                 En `network: bridge`, l'adresse vient du DHCP du LAN, que Virtum ne contrôle pas."
+            );
+        }
+        crate::lab_network::validate_lab_ip(&lab.name, ip)
+            .with_context(|| format!("Machine '{machine_name}' : ip: {ip} invalide"))?;
+        if let Some(other) = seen.insert(ip, machine_name) {
+            bail!("ip: {ip} est déclarée pour '{other}' et '{machine_name}'.");
+        }
+    }
+    Ok(())
+}
+
 /// Port SSH standard (image cloud fraîche).
 pub const DEFAULT_SSH_PORT: u16 = 22;
 
@@ -418,6 +459,7 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
             .with_context(|| format!("Machine '{machine_name}' : mounts invalides"))?;
     }
     port_forward::validate_lab_port_uniqueness(&port_machines)?;
+    validate_static_ips(lab)?;
 
     if lab_uses_bridge(lab) {
         let explicit = lab_bridge_interface_for_validation(lab);
@@ -869,5 +911,66 @@ machines:
 "#;
         let lab = load_from_str(yaml).unwrap();
         assert!(validate(&lab, Path::new("/tmp")).is_err());
+    }
+
+    #[test]
+    fn static_ip_validation() {
+        let octet = crate::lab_network::lab_subnet_third_octet("k8s");
+        let lab_with = |ips: &[(&str, &str)], extra: &str| {
+            let mut yaml = format!("name: k8s\n{extra}machines:\n");
+            for (m, ip) in ips {
+                yaml.push_str(&format!("  {m}:\n    os: debian-12\n    ip: {ip}\n"));
+            }
+            load_from_str(&yaml).unwrap()
+        };
+        let dir = Path::new(".");
+        let ok = lab_with(
+            &[
+                ("cp", &format!("192.168.{octet}.10")),
+                ("w1", &format!("192.168.{octet}.11")),
+            ],
+            "",
+        );
+        validate(&ok, dir).unwrap();
+        assert_eq!(
+            machine_static_ip(&ok.machines["cp"]),
+            Some(std::net::Ipv4Addr::new(192, 168, octet, 10))
+        );
+
+        let not_ip = lab_with(&[("cp", "192.168.1")], "");
+        assert!(format!("{:#}", validate(&not_ip, dir).unwrap_err()).contains("IPv4"));
+
+        let gateway = lab_with(&[("cp", &format!("192.168.{octet}.1"))], "");
+        assert!(format!("{:#}", validate(&gateway, dir).unwrap_err()).contains("passerelle"));
+
+        let dup = lab_with(
+            &[
+                ("cp", &format!("192.168.{octet}.10")),
+                ("w1", &format!("192.168.{octet}.10")),
+            ],
+            "",
+        );
+        assert!(format!("{:#}", validate(&dup, dir).unwrap_err()).contains("'cp' et 'w1'"));
+
+        let outside = lab_with(&[("cp", "10.0.0.5")], "");
+        assert!(format!("{:#}", validate(&outside, dir).unwrap_err()).contains("hors du réseau"));
+    }
+
+    #[test]
+    fn static_ip_needs_lab_nic() {
+        let lab =
+            load_from_str("name: k8s\nnetwork: bridge\nmachines:\n  cp:\n    os: debian-12\n")
+                .unwrap();
+        assert!(!machine_has_lab_nic(&lab, "cp"));
+        let mixed = load_from_str(
+            "name: k8s\nmachines:\n  cp:\n    os: debian-12\n    network: bridge\n  db:\n    os: debian-12\n",
+        )
+        .unwrap();
+        assert!(machine_has_lab_nic(&mixed, "cp"));
+        assert!(machine_has_lab_nic(&mixed, "db"));
+        assert!(validate_static_ips(&lab).is_ok());
+        let mut with_ip = lab.clone();
+        with_ip.machines.get_mut("cp").unwrap().ip = Some("192.168.100.10".into());
+        assert!(format!("{:#}", validate_static_ips(&with_ip).unwrap_err()).contains("bridge"));
     }
 }

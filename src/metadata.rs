@@ -63,6 +63,9 @@ pub struct Instance {
     /// Virtumfile `restart:` ; absent = autostart libvirt non géré par Virtum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<RestartPolicy>,
+    /// Virtumfile `ip:` (réservation DHCP sur le réseau du lab) ; absent = DHCP libre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_ip: Option<String>,
     pub created_at: String,
 }
 
@@ -302,6 +305,7 @@ mod tests {
             lan_ip: None,
             mounts: None,
             restart: None,
+            static_ip: None,
             created_at: "2026-06-02T10:00:00Z".to_string(),
         }
     }

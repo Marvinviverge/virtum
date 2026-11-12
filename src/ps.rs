@@ -236,6 +236,7 @@ mod tests {
             lan_ip: None,
             mounts: None,
             restart: None,
+            static_ip: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(format_ip(&inst), "127.0.0.1:22422");
@@ -268,6 +269,7 @@ mod tests {
             lan_ip: None,
             mounts: None,
             restart: None,
+            static_ip: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         };
         assert_eq!(super::resolve_disk_size(&inst, &paths), "20G");

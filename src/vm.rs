@@ -74,6 +74,10 @@ pub struct VmLaunchConfig {
     pub ssh_port: u16,
     /// Démarrage au boot de l'hôte (Virtumfile `restart`).
     pub restart: Option<RestartPolicy>,
+    /// MAC imposée à la carte principale (machine de lab neuve) ; `None` = libvirt la choisit.
+    pub nic_mac: Option<String>,
+    /// Virtumfile `ip:` (réservation déjà posée sur le réseau du lab).
+    pub static_ip: Option<String>,
 }
 
 impl VmLaunchConfig {
@@ -96,6 +100,8 @@ impl VmLaunchConfig {
             insecure_ssh: false,
             ssh_port: SSH_PORT,
             restart: None,
+            nic_mac: None,
+            static_ip: None,
         }
     }
 
@@ -287,7 +293,7 @@ pub async fn launch_vm_inner(
     }
 
     let network_attach = resolve_network_attach(config)?;
-    let spec = build_domain_spec(
+    let mut spec = build_domain_spec(
         instance_dir,
         vm_id,
         config.ram,
@@ -297,6 +303,9 @@ pub async fn launch_vm_inner(
         &network_attach,
         &resolved_mounts,
     );
+    if spec.nic_mac.is_none() {
+        spec.nic_mac = config.nic_mac.clone();
+    }
     let xml_path = write_domain_xml(instance_dir, &spec)?;
 
     define_domain(&xml_path).with_context(|| {
@@ -330,7 +339,16 @@ pub async fn launch_vm_inner(
         network_attach.label(),
         ip_timeout.as_secs()
     );
-    let ip = match wait_for_ip(vm_id, hostname, &network_attach, ip_timeout, None).await {
+    let ip = match wait_for_ip(
+        vm_id,
+        hostname,
+        &network_attach,
+        ip_timeout,
+        None,
+        config.static_ip.as_deref(),
+    )
+    .await
+    {
         Ok(ip) => ip,
         Err(err) => {
             if config.bridge_host_interface.is_some() {
@@ -472,6 +490,7 @@ pub async fn launch_vm_inner(
             Some(mounts::mounts_to_instance_specs(&resolved_mounts))
         },
         restart: config.restart,
+        static_ip: config.static_ip.clone(),
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
     sync_autostart(&instance, true)?;
@@ -673,8 +692,13 @@ async fn wait_for_ip(
     attach: &NetworkAttach,
     timeout: Duration,
     resume_hint: Option<ResumeIpHint<'_>>,
+    expected_ip: Option<&str>,
 ) -> Result<String> {
     let started = Instant::now();
+    // `ip:` déclarée : juste après un redémarrage, libvirt montre encore l'ancien bail de
+    // la MAC tant que l'invité n'a pas redemandé d'adresse. On attend l'adresse déclarée ;
+    // une autre adresse n'est retenue qu'au bout du délai (ancien bail d'une autre MAC).
+    let mut other_ip: Option<String> = None;
     let grace = if resume_hint.is_some() {
         Duration::from_secs(2)
     } else {
@@ -684,11 +708,16 @@ async fn wait_for_ip(
 
     loop {
         if let Some(ip) = try_discover_ip(vm_id, hostname, attach)? {
-            return Ok(ip);
+            match expected_ip {
+                Some(expected) if ip != expected => other_ip = Some(ip),
+                _ => return Ok(ip),
+            }
         }
 
         if let Some(hint) = resume_hint.as_ref() {
-            if is_usable_ssh_ip(hint.known_ip, attach.prefer_non_libvirt_default())
+            // Adresse connue différente de l'adresse déclarée : pas de réutilisation.
+            if expected_ip.is_none_or(|e| e == hint.known_ip)
+                && is_usable_ssh_ip(hint.known_ip, attach.prefer_non_libvirt_default())
                 && hint.ssh_ports.iter().any(|&port| {
                     ssh_auth_probe(
                         hint.private_key,
@@ -708,6 +737,11 @@ async fn wait_for_ip(
             break;
         }
         sleep(IP_POLL_INTERVAL).await;
+    }
+
+    if let (Some(ip), Some(expected)) = (other_ip, expected_ip) {
+        eprintln!("Avertissement: {vm_id} a obtenu {ip} au lieu de l'adresse déclarée {expected}.");
+        return Ok(ip);
     }
 
     let dhcp_hint = match attach {
@@ -1044,6 +1078,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         &network_attach,
         ip_timeout,
         resume_hint,
+        instance.static_ip.as_deref(),
     )
     .await?;
     if !is_usable_ssh_ip(&ip, network_attach.prefer_non_libvirt_default()) {
@@ -1237,6 +1272,16 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
 
     port_forward::stop_instance_proxies(&instance_dir);
 
+    // Réservation `ip:` du lab : sinon l'adresse resterait bloquée pour cette MAC.
+    // Lue avant l'undefine (la MAC vient de config.xml ou du domaine).
+    let lab_reservation = {
+        let metadata = metadata::load_metadata(&paths.metadata).await?;
+        metadata::find_instance(&metadata, &vm_id)
+            .and_then(|inst| inst.lab_name.clone())
+            .and_then(|lab| lab_network::lab_network_name(&lab).ok())
+            .zip(libvirt::resolve_nic_mac(&instance_dir, &vm_id))
+    };
+
     if domain_exists(&vm_id) {
         if domain_is_active(&domain_state(&vm_id)?) {
             destroy_domain(&vm_id)
@@ -1252,6 +1297,14 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
     } else {
         Vec::new()
     };
+
+    if let Some((net, mac)) = lab_reservation {
+        match lab_network::remove_dhcp_reservations(&net, &mac) {
+            Ok(0) => {}
+            Ok(_) => eprintln!("Réservation DHCP retirée du réseau {net}."),
+            Err(err) => eprintln!("Avertissement: réservation DHCP non retirée ({err:#})."),
+        }
+    }
 
     if instance_dir.exists() {
         mounts::teardown_virtiofs(&instance_dir);

@@ -24,3 +24,6 @@ machines:
     os: ubuntu-24.04
     ram: 1024
     cpu: 1
+    # v0.7 (optionnel) : adresse déclarée sur le réseau du lab (192.168.68.0/24 pour demo-lab,
+    # affiché par `virtum plan`) ; sans ip:, DHCP libre.
+    # ip: 192.168.68.20

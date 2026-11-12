@@ -73,6 +73,11 @@ pub enum MachineChange {
         from: Option<RestartPolicy>,
         to: Option<RestartPolicy>,
     },
+    /// Adresse `ip:` déclarée (réservation DHCP ; redémarrage si une adresse est posée).
+    StaticIp {
+        from: Option<String>,
+        to: Option<String>,
+    },
 }
 
 impl MachineChange {
@@ -109,6 +114,15 @@ impl MachineChange {
             Self::SshPort { from, to } => format!("ssh_port: {from} → {to}"),
             Self::Restart { from, to } => {
                 format!("restart: {} → {}", restart_label(*from), restart_label(*to))
+            }
+            Self::StaticIp { from, to } => {
+                let label = |ip: &Option<String>| ip.clone().unwrap_or_else(|| "(dhcp)".into());
+                let note = if to.is_some() {
+                    " (redémarrage de la VM)"
+                } else {
+                    " (adresse actuelle conservée jusqu'à la fin du bail)"
+                };
+                format!("ip: {} → {}{note}", label(from), label(to))
             }
         }
     }
@@ -339,6 +353,14 @@ pub fn diff_machine(
         changes.push(MachineChange::MountsAdd { volumes: additions });
     }
 
+    let desired_ip = virtumfile::machine_static_ip(spec).map(|ip| ip.to_string());
+    if instance.static_ip != desired_ip {
+        changes.push(MachineChange::StaticIp {
+            from: instance.static_ip.clone(),
+            to: desired_ip,
+        });
+    }
+
     let desired_restart = virtumfile::effective_restart(lab, machine_name);
     if instance.restart != desired_restart {
         changes.push(MachineChange::Restart {
@@ -385,6 +407,13 @@ pub async fn build_lab_diff(virtumfile_path: PathBuf, lab: Virtumfile) -> Result
         .collect::<Result<_>>()?;
     if let Err(e) = port_forward::validate_lab_port_uniqueness(&port_plan) {
         blocking_errors.push(e.to_string());
+    }
+    if let Ok(net) = lab_network::lab_network_name(&lab.name) {
+        let owners = lab_network::lab_instance_macs(
+            &paths.instances,
+            &metadata::instances_for_lab(&metadata, &lab.name),
+        );
+        blocking_errors.extend(crate::lab::declared_ip_conflicts(&lab, &net, &owners));
     }
 
     for (machine_name, spec) in &lab.machines {
@@ -532,6 +561,11 @@ async fn apply_machine(
     let ssh_opts = SshSessionOpts::new(&instance_dir, insecure_ssh);
 
     let needs_stop = md.changes.iter().any(|c| c.needs_guest_stop());
+    // Nouvelle adresse : la VM doit redemander un bail (arrêt / démarrage, sans undefine).
+    let ip_renew = md
+        .changes
+        .iter()
+        .any(|c| matches!(c, MachineChange::StaticIp { to: Some(_), .. }));
     let was_running = domain_exists(vm_id)
         && domain_state(vm_id)
             .map(|s| domain_is_active(&s))
@@ -539,7 +573,7 @@ async fn apply_machine(
 
     port_forward::stop_instance_proxies(&instance_dir);
 
-    if needs_stop && was_running {
+    if (needs_stop || ip_renew) && was_running {
         eprintln!("  Arrêt de '{vm_id}' pour appliquer les changements…");
         vm::stop_vm_async(instance.name.as_deref().unwrap_or(vm_id)).await?;
     } else if needs_stop && domain_exists(vm_id) {
@@ -571,6 +605,15 @@ async fn apply_machine(
                         .await?;
             }
             MachineChange::SshPort { .. } | MachineChange::Restart { .. } => {}
+            MachineChange::StaticIp { to, .. } => {
+                apply_static_ip(
+                    lab_net,
+                    &instance_dir,
+                    vm_id,
+                    &instance.hostname,
+                    to.as_deref(),
+                )?;
+            }
             MachineChange::Os { .. } => unreachable!(),
         }
     }
@@ -618,6 +661,11 @@ async fn apply_machine(
         updated.disk_size = spec.disk_size.clone();
     }
     updated.ssh_port = vm::stored_ssh_port(virtumfile::effective_ssh_port(lab, &md.machine_name));
+    updated.static_ip = virtumfile::machine_static_ip(spec).map(|ip| ip.to_string());
+    if ip_renew {
+        // Indice pour `start` : la VM revient sur l'adresse déclarée.
+        updated.ip = updated.static_ip.clone();
+    }
     let previous_restart = updated.restart;
     updated.restart = virtumfile::effective_restart(lab, &md.machine_name);
     let desired_mounts = virtumfile::effective_mount_specs(lab, &md.machine_name);
@@ -628,7 +676,7 @@ async fn apply_machine(
     };
     metadata::upsert_instance(&paths.metadata, updated).await?;
 
-    if was_running && needs_stop {
+    if was_running && (needs_stop || ip_renew) {
         let reference = instance.name.clone().unwrap_or_else(|| vm_id.clone());
         eprintln!("  Redémarrage de '{reference}'…");
         vm::start_vm_async(&reference).await?;
@@ -729,6 +777,32 @@ async fn apply_machine(
     Ok(())
 }
 
+/// Pose, déplace ou retire la réservation DHCP de la carte lab d'une machine.
+fn apply_static_ip(
+    lab_net: Option<&str>,
+    instance_dir: &Path,
+    vm_id: &str,
+    hostname: &str,
+    ip: Option<&str>,
+) -> Result<()> {
+    let net = lab_net.context("`ip:` nécessite le réseau du lab (virtum-lab-*)")?;
+    let mac = crate::libvirt::resolve_nic_mac(instance_dir, vm_id)
+        .with_context(|| format!("MAC de la carte lab introuvable pour {vm_id}"))?;
+    match ip {
+        Some(ip) => {
+            lab_network::ensure_dhcp_reservation(net, &mac, hostname, ip)?;
+            eprintln!("  Réservation DHCP : {ip} pour {mac}.");
+        }
+        None => {
+            lab_network::remove_dhcp_reservations(net, &mac)?;
+            eprintln!(
+                "  Réservation DHCP retirée : la VM garde son adresse actuelle jusqu'à la fin du bail."
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn apply_mounts_add(
     paths: &VirtumPaths,
     lab: &Virtumfile,
@@ -824,6 +898,46 @@ mod tests {
     }
 
     #[test]
+    fn static_ip_change_is_detected() {
+        let octet = lab_network::lab_subnet_third_octet("lab");
+        let lab = virtumfile::load_from_str(&format!(
+            "name: lab\nmachines:\n  app:\n    os: ubuntu-24.04\n    ip: 192.168.{octet}.10\n"
+        ))
+        .unwrap();
+        let instance: Instance = serde_json::from_str(
+            r#"{"id":"vm-test-ip","name":"app","os":"ubuntu-24.04","status":"stopped",
+                "user":"virtum","hostname":"lab-app","created_at":"2026-11-12T09:00:00Z"}"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("virtum-diff-ip-{}", std::process::id()));
+        let diff = diff_machine(&lab, "app", &lab.machines["app"], &instance, &dir).unwrap();
+        let wanted = format!("192.168.{octet}.10");
+        assert_eq!(
+            diff.changes,
+            vec![MachineChange::StaticIp {
+                from: None,
+                to: Some(wanted.clone()),
+            }]
+        );
+        assert!(diff.changes[0].needs_apply());
+        assert_eq!(
+            diff.changes[0].summary_line(),
+            format!("ip: (dhcp) → {wanted} (redémarrage de la VM)")
+        );
+
+        let mut aligned = instance.clone();
+        aligned.static_ip = Some(wanted.clone());
+        let diff = diff_machine(&lab, "app", &lab.machines["app"], &aligned, &dir).unwrap();
+        assert!(diff.changes.is_empty());
+
+        let removed = MachineChange::StaticIp {
+            from: Some(wanted),
+            to: None,
+        };
+        assert!(removed.summary_line().contains("→ (dhcp)"));
+    }
+
+    #[test]
     fn ssh_port_drift_is_reported_but_left_to_up() {
         let lab = virtumfile::load_from_str(
             "name: lab\nssh_port: 2222\nmachines:\n  app:\n    os: ubuntu-24.04\n",
@@ -883,6 +997,7 @@ mod tests {
                     provision: vec![],
                     mounts: None,
                     restart: None,
+                    ip: None,
                     ssh_port: None,
                 },
             )]),
@@ -905,6 +1020,7 @@ mod tests {
             port_bind: Some(PortBind::Local),
             mounts: None,
             restart: None,
+            static_ip: None,
             created_at: "2020-01-01T00:00:00Z".into(),
         };
         let dir = std::env::temp_dir().join(format!("virtum-diff-bind-{}", std::process::id()));
@@ -945,6 +1061,7 @@ mod tests {
                     provision: vec![],
                     mounts: None,
                     restart: None,
+                    ip: None,
                     ssh_port: None,
                 },
             )]),
@@ -970,6 +1087,7 @@ mod tests {
             port_bind: Some(PortBind::Local),
             mounts: None,
             restart: None,
+            static_ip: None,
             created_at: "2020-01-01T00:00:00Z".into(),
         };
         let dir = std::env::temp_dir().join(format!("virtum-diff-bind2-{}", std::process::id()));

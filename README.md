@@ -18,7 +18,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.6 terminée (banc de test d'infra)** — instantanés `virtum snapshot` (VM ou lab), `ssh_port` (VM durcies), `restart:` au boot de l'hôte, alias `virtum list`, fiabilité (statut libvirt réel, images de base, orphelins dans `doctor`) : [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md).
 
-**v0.7 en cours (convergence)** — `ip:` fixe par machine, machines retirées du Virtumfile signalées par `plan` et supprimées par `apply --prune`, dérive RAM/vCPU lue dans libvirt : [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md).
+**v0.7 en cours (convergence)** — `ip:` déclarée (optionnelle) par machine, machines retirées du Virtumfile signalées par `plan` et supprimées par `apply --prune`, dérive RAM/vCPU lue dans libvirt : [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md).
 
 ## Documentation
 
@@ -152,6 +152,7 @@ Virtum utilise **libvirt système** (`qemu:///system`).
 - **`virtum run`** (VM seule) : réseau libvirt **`default`** (`192.168.122.x`). Option **`--network bridge`** : macvtap sur l’interface physique (IP LAN via DHCP). Voir `virtum doctor` ; Wi‑Fi / partage téléphone souvent instable.
 - **`virtum up`** (lab) : réseau dédié **`virtum-lab-<name>`** par lab (NAT isolé). Les machines du même lab se joignent entre elles.
 - **`bind: lan`** (Virtumfile) : les `ports:` écoutent sur `0.0.0.0` (joignable depuis le même Wi‑Fi/Ethernet que le PC). Ouvrez le pare-feu hôte avec **`virtum open`** après `virtum up`. **`virtum plan`** compare les ports du Virtumfile à l’état enregistré dans `firewall-<lab>.json` (aligné, absent, ou désaligné après changement de port).
+- **`ip:` par machine (v0.7, optionnel)** : adresse fixe sur le réseau du lab (`ip: 192.168.68.20`), via une réservation DHCP libvirt ; l'invité reste en DHCP. Le sous-réseau du lab est affiché par `virtum plan`. Ajout ou changement : `virtum apply` (redémarre la VM). Sans `ip:`, DHCP libre comme avant. Impossible en `network: bridge` seul.
 - **Virtumfile `network: bridge`** : lab entier sur le LAN (`examples/Virtumfile.bridge-lab`) ou mix web LAN + db privée (`examples/Virtumfile.bridge-mixed`, dual NIC). `virtum ps` affiche **IP** et **LAN**.
 - **VM isolée** sur le LAN : `virtum run --network bridge`.
 

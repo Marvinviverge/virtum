@@ -95,6 +95,24 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
         metadata::ensure_lab_machine_available(&metadata, &lab.name, machine_name)?;
     }
 
+    let owners = lab_network::lab_instance_macs(
+        &paths.instances,
+        &metadata::instances_for_lab(&metadata, &lab.name),
+    );
+    if let Some(net) = lab_net.as_deref() {
+        let (conflicts, ip_warnings) = declared_ip_checks(&lab, net, &owners);
+        for w in &ip_warnings {
+            eprintln!("Avertissement: {w}");
+        }
+        if !conflicts.is_empty() {
+            for c in &conflicts {
+                eprintln!("✗ {c}");
+            }
+            bail!("Adresse(s) `ip:` déjà utilisée(s) sur le réseau du lab.");
+        }
+    }
+    let mut taken_macs: Vec<String> = owners.iter().map(|(_, mac)| mac.clone()).collect();
+
     let keys = ensure_ssh_keypair(&paths.keys)?;
     let public_key = read_public_key(&keys.public_key)?;
 
@@ -127,6 +145,12 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             if !spec_ports.is_empty() {
                 port_forward::ensure_ports_available(&spec_ports, port_bind)?;
                 port_forward::ensure_ports_not_in_metadata(&metadata, Some(&vm_id), &spec_ports)?;
+            }
+            if let (Some(ip), Some(net)) = (existing.static_ip.as_deref(), lab_net.as_deref()) {
+                // Réseau recréé à la main : la réservation est reposée (idempotent).
+                if let Some((_, mac)) = owners.iter().find(|(m, _)| m == machine) {
+                    lab_network::ensure_dhcp_reservation(net, mac, &existing.hostname, ip)?;
+                }
             }
             let instance_dir = paths.instances.join(&vm_id);
             match resume_lab_machine(
@@ -164,6 +188,23 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
                 net_cfg.libvirt_network.as_deref().unwrap_or("?")
             );
         }
+        // MAC stable pour la carte lab : même MAC après destroy + up, réservation possible
+        // avant le premier démarrage.
+        let nic_mac = net_cfg.libvirt_network.as_ref().map(|_| {
+            let mac = lab_network::deterministic_mac(&vm_id, &taken_macs);
+            taken_macs.push(mac.clone());
+            mac
+        });
+        let static_ip = virtumfile::machine_static_ip(spec).map(|ip| ip.to_string());
+        if let (Some(ip), Some(mac), Some(net)) = (
+            static_ip.as_deref(),
+            nic_mac.as_deref(),
+            net_cfg.libvirt_network.as_deref(),
+        ) {
+            let hostname = format!("{}-{machine}", lab.name);
+            lab_network::ensure_dhcp_reservation(net, mac, &hostname, ip)?;
+            eprintln!("  Adresse déclarée : {ip} (réservation DHCP)");
+        }
         let resolved_mounts = crate::mounts::resolve_machine_mounts(&lab, machine, &vf_dir)
             .with_context(|| format!("Machine '{machine_name}' : résolution des mounts"))?;
         let config = VmLaunchConfig {
@@ -184,6 +225,8 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             insecure_ssh,
             ssh_port: virtumfile::effective_ssh_port(&lab, machine),
             restart: virtumfile::effective_restart(&lab, machine),
+            nic_mac,
+            static_ip: static_ip.clone(),
         };
         let hostname = config.hostname_for_vm(&vm_id);
         let instance_dir = paths.instances.join(&vm_id);
@@ -204,6 +247,9 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             cleanup_failed_run(&vm_id, &instance_dir).await;
             rollback_lab_vms(&paths, &created_this_run).await;
             return Err(err);
+        }
+        if let Some(ref declared) = static_ip {
+            warn_if_ip_differs(&paths, &vm_id, machine, declared).await;
         }
         created_this_run.push(vm_id);
         ready += 1;
@@ -234,6 +280,64 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
         );
     }
     Ok(())
+}
+
+/// Conflits bloquants des `ip:` du Virtumfile avec les autres machines déployées du lab.
+pub fn declared_ip_conflicts(
+    lab: &virtumfile::Virtumfile,
+    net_name: &str,
+    owners: &[(String, String)],
+) -> Vec<String> {
+    declared_ip_checks(lab, net_name, owners).0
+}
+
+/// `(erreurs bloquantes, avertissements)` pour les `ip:` du Virtumfile :
+/// adresse tenue par une autre machine vivante, ou encore louée à une VM supprimée.
+pub fn declared_ip_checks(
+    lab: &virtumfile::Virtumfile,
+    net_name: &str,
+    owners: &[(String, String)],
+) -> (Vec<String>, Vec<String>) {
+    let declared: Vec<lab_network::DeclaredIp<'_>> = lab
+        .machines
+        .iter()
+        .filter_map(|(machine, spec)| {
+            let ip = virtumfile::machine_static_ip(spec)?.to_string();
+            let mac = owners
+                .iter()
+                .find(|(m, _)| m == machine)
+                .map(|(_, mac)| mac.clone());
+            Some(lab_network::DeclaredIp {
+                machine: machine.as_str(),
+                ip,
+                mac,
+            })
+        })
+        .collect();
+    if declared.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let leases = lab_network::dhcp_leases(net_name);
+    let hosts = lab_network::dhcp_hosts(net_name).unwrap_or_default();
+    (
+        lab_network::ip_conflicts(&declared, owners, &leases, &hosts),
+        lab_network::stale_lease_warnings(&declared, owners, &leases),
+    )
+}
+
+/// Ancien bail d'une autre MAC encore actif : dnsmasq a pu donner une autre adresse.
+async fn warn_if_ip_differs(paths: &VirtumPaths, vm_id: &str, machine: &str, declared: &str) {
+    let Ok(meta) = metadata::load_metadata(&paths.metadata).await else {
+        return;
+    };
+    let got = metadata::find_instance(&meta, vm_id).and_then(|i| i.ip.clone());
+    if let Some(got) = got.filter(|ip| ip != declared) {
+        eprintln!(
+            "Avertissement '{machine}' : adresse obtenue {got} au lieu de {declared}. \
+             Un ancien bail DHCP occupe probablement encore {declared} ; \
+             il expire dans l'heure, puis `virtum stop {machine}` / `virtum start {machine}`."
+        );
+    }
 }
 
 fn confirm_lan_deploy() -> Result<()> {
