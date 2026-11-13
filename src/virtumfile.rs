@@ -183,6 +183,72 @@ fn validate_ansible(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Noms que `ansible-playbook` charge seul à côté du playbook.
+const ANSIBLE_ADJACENT: &[&str] = &[
+    "ansible.cfg",
+    "roles",
+    "group_vars",
+    "host_vars",
+    "collections",
+    "library",
+    "module_utils",
+    "action_plugins",
+    "callback_plugins",
+    "connection_plugins",
+    "filter_plugins",
+    "inventory_plugins",
+    "lookup_plugins",
+    "strategy_plugins",
+    "test_plugins",
+    "vars_plugins",
+];
+
+/// Un partage est inscriptible par l'invité : il ne doit contenir ni le Virtumfile ni ce
+/// qu'Ansible exécute sur l'hôte (playbook, son dossier, `requirements`, fichiers et
+/// dossiers chargés à côté du playbook). Sinon l'invité réécrit ce que l'hôte exécutera.
+fn ensure_host_code_outside_shares(
+    lab: &Virtumfile,
+    virtumfile_dir: &Path,
+    shares: &[(String, std::path::PathBuf)],
+) -> Result<()> {
+    if shares.is_empty() {
+        return Ok(());
+    }
+    let base = virtumfile_dir.canonicalize().with_context(|| {
+        format!(
+            "Répertoire du Virtumfile introuvable : {}",
+            virtumfile_dir.display()
+        )
+    })?;
+    let mut protected = vec![(base.clone(), "le Virtumfile".to_string())];
+    if let Some(ref spec) = lab.ansible {
+        let playbook = resolve_ansible_path(virtumfile_dir, "playbook", &spec.playbook)?;
+        let playbook_dir = playbook.parent().unwrap_or(&base).to_path_buf();
+        protected.push((playbook_dir.clone(), "le dossier du playbook".to_string()));
+        for name in ANSIBLE_ADJACENT {
+            protected.push((playbook_dir.join(name), format!("ansible ({name})")));
+        }
+        if let Some(ref req) = spec.requirements {
+            let req = resolve_ansible_path(virtumfile_dir, "requirements", req)?;
+            protected.push((req, "ansible.requirements".to_string()));
+        }
+    }
+    for (label, host) in shares {
+        for (path, what) in &protected {
+            if path.starts_with(host) {
+                bail!(
+                    "Mount '{label}' ({}) contient {what} ({}) : l'invité pourrait modifier ce que \
+                     l'hôte exécute. Partagez un sous-dossier qui ne contient ni le Virtumfile \
+                     ni les fichiers Ansible.",
+                    host.display(),
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Volume virtiofs déclaré dans le Virtumfile.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MountSpec {
@@ -622,6 +688,7 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
     validate_static_ips(lab)?;
     validate_groups(lab)?;
     validate_ansible(lab, virtumfile_dir)?;
+    ensure_host_code_outside_shares(lab, virtumfile_dir, &lab_mounts)?;
 
     if lab_uses_bridge(lab) {
         let explicit = lab_bridge_interface_for_validation(lab);
@@ -1165,6 +1232,41 @@ machines:
             let err = validate_groups(&load(bad)).unwrap_err().to_string();
             assert!(err.contains(needle), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn shares_must_not_contain_virtumfile_or_ansible_files() {
+        let dir = std::env::temp_dir().join(format!("virtum-share-ansible-{}", std::process::id()));
+        for d in ["ansible/roles", "src", "data"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("ansible/site.yml"), "---\n").unwrap();
+        std::fs::write(dir.join("req.yml"), "---\n").unwrap();
+        let lab = |host: &str, ansible: bool| {
+            let ansible = if ansible {
+                "ansible:\n  playbook: ansible/site.yml\n  requirements: req.yml\n"
+            } else {
+                ""
+            };
+            load_from_str(&format!(
+                "name: s\n{ansible}machines:\n  web:\n    os: debian-12\n    restart: no\n    \
+                 mounts:\n      - name: code\n        host: {host}\n        guest: ~/code\n"
+            ))
+            .unwrap()
+        };
+        // Un sous-dossier sans fichier exécuté par l'hôte : accepté.
+        validate(&lab("./src", true), &dir).unwrap();
+        validate(&lab("./data", false), &dir).unwrap();
+        for (host, ansible, needle) in [
+            (".", false, "le Virtumfile"),
+            (".", true, "le Virtumfile"),
+            ("./ansible", true, "le dossier du playbook"),
+            ("./ansible/roles", true, "ansible (roles)"),
+        ] {
+            let err = format!("{:#}", validate(&lab(host, ansible), &dir).unwrap_err());
+            assert!(err.contains(needle), "{host}: {err}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -920,16 +920,14 @@ fn try_discover_ip_bridge(vm_id: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// Vérifie que l'IP du bail DHCP correspond bien au MAC de cette VM.
+/// Vérifie que l'IP du bail DHCP correspond bien au MAC de cette VM (colonne MAC,
+/// jamais le client-id ou le nom d'hôte choisis par l'invité).
 fn dhcp_lease_mac_matches(leases: &str, ip: &str, mac: &str) -> bool {
-    let mac = mac.to_lowercase();
-    for line in leases.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains(&mac) && line.contains(ip) {
-            return true;
-        }
-    }
-    false
+    let mac = mac.to_ascii_lowercase();
+    leases
+        .lines()
+        .filter_map(libvirt::parse_dhcp_lease_line)
+        .any(|l| l.mac == mac && l.ip == ip)
 }
 
 /// IP du réseau libvirt `default` (NAT 192.168.122.0/24).
@@ -1433,6 +1431,20 @@ async fn resolve_destroy_target(paths: &VirtumPaths, reference: &str) -> Result<
     }
 
     if is_virtum_vm_id(reference) && domain_exists(reference) {
+        // Domaine absent de notre metadata : il peut être celui d'un autre Virtum.
+        let instance_dir = paths.instances.join(reference);
+        if !crate::ownership::domain_is_ours_for_instance(reference, &instance_dir) {
+            match crate::ownership::domain_owner(reference) {
+                crate::ownership::Owner::Other(id) => bail!(
+                    "Le domaine {reference} appartient à un autre Virtum ({id}) : refus de le supprimer."
+                ),
+                _ => bail!(
+                    "Le domaine {reference} n'a pas de marqueur Virtum et n'utilise pas le disque \
+                     de cet état : refus. S'il est bien à vous, supprimez-le avec \
+                     `virsh destroy {reference}` puis `virsh undefine {reference}`."
+                ),
+            }
+        }
         return Ok((reference.to_string(), true));
     }
 
@@ -1517,11 +1529,21 @@ pub async fn cleanup_failed_run(vm_id: &str, instance_dir: &Path) {
     crate::verr!("Nettoyage après échec de virtum run pour '{vm_id}'…");
     mounts::teardown_virtiofs(instance_dir);
     port_forward::stop_instance_proxies(instance_dir);
-    if let Err(err) = destroy_domain(vm_id) {
-        crate::verr!("  avertissement destroy: {err:#}");
-    }
-    if let Err(err) = undefine_domain(vm_id) {
-        crate::verr!("  avertissement undefine: {err:#}");
+    if domain_exists(vm_id) {
+        // Même nom de domaine qu'un autre Virtum du même libvirt : ne pas y toucher.
+        if crate::ownership::domain_is_ours_for_instance(vm_id, instance_dir) {
+            if let Err(err) = destroy_domain(vm_id) {
+                crate::verr!("  avertissement destroy: {err:#}");
+            }
+            if let Err(err) = undefine_domain(vm_id) {
+                crate::verr!("  avertissement undefine: {err:#}");
+            }
+        } else {
+            crate::verr!(
+                "  domaine {vm_id} conservé : il n'appartient pas à cet état Virtum \
+                 (fichiers locaux seuls supprimés)."
+            );
+        }
     }
     if instance_dir.exists() {
         if let Err(err) = fs::remove_dir_all(instance_dir).await {

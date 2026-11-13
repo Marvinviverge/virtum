@@ -6,6 +6,7 @@
 //! utilisateurs avec le même lab produisent les mêmes noms. Virtum n'arrête, ne supprime ni
 //! ne recrée un objet libvirt qu'après avoir vérifié qu'il porte son marqueur.
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::fsutil::current_uid;
@@ -95,28 +96,98 @@ pub fn network_owner(net_name: &str) -> Owner {
     classify(virsh_metadata("net-metadata", net_name))
 }
 
+/// Domaines libvirt (actifs ou non) qui ont une interface sur ce réseau. `None` si la
+/// liste n'a pas pu être établie (à traiter comme « réseau utilisé »).
+fn network_attached_domains(net_name: &str) -> Option<Vec<String>> {
+    let names = crate::libvirt::list_domain_names().ok()?;
+    let mut attached = Vec::new();
+    for dom in names {
+        let output = Command::new("virsh")
+            .args(["domiflist", &dom])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        if String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .any(|tok| tok == net_name)
+        {
+            attached.push(dom);
+        }
+    }
+    Some(attached)
+}
+
 /// Au moins un domaine libvirt (actif ou non) a une interface sur ce réseau.
 pub fn network_has_attached_domains(net_name: &str) -> bool {
-    let Ok(names) = crate::libvirt::list_domain_names() else {
-        // Dans le doute, considérer le réseau comme utilisé (pas de recréation).
-        return true;
-    };
-    names.iter().any(|dom| {
-        Command::new("virsh")
-            .args(["domiflist", dom])
+    network_attached_domains(net_name).is_none_or(|d| !d.is_empty())
+}
+
+/// Virtum peut modifier ce réseau (réservations DHCP) : marqué par ce Virtum, ou non
+/// marqué (créé avant le marqueur) sans domaine d'un autre Virtum attaché.
+pub fn network_may_modify(net_name: &str) -> bool {
+    match network_owner(net_name) {
+        Owner::Us => true,
+        Owner::Other(_) => false,
+        Owner::Unknown => network_attached_domains(net_name).is_some_and(|doms| {
+            doms.iter()
+                .all(|d| !matches!(domain_owner(d), Owner::Other(_)))
+        }),
+    }
+}
+
+/// Virtum peut détruire ce réseau : marqué par ce Virtum, ou non marqué sans aucun
+/// domaine attaché.
+pub fn network_may_destroy(net_name: &str) -> bool {
+    match network_owner(net_name) {
+        Owner::Us => true,
+        Owner::Other(_) => false,
+        Owner::Unknown => !network_has_attached_domains(net_name),
+    }
+}
+
+/// `true` si le XML de domaine utilise `disk` comme fichier source d'un disque.
+fn xml_uses_disk(xml: &str, disk: &Path) -> bool {
+    let disk = xml_escape(&disk.display().to_string());
+    [format!("file='{disk}'"), format!("file=\"{disk}\"")]
+        .iter()
+        .any(|needle| xml.contains(needle.as_str()))
+}
+
+/// Virtum peut arrêter et supprimer ce domaine pour l'instance `instance_dir` : marqué par
+/// ce Virtum, ou non marqué (créé avant le marqueur) et utilisant le disque de cette
+/// instance. Un domaine d'un autre Virtum, ou non marqué et étranger, est conservé.
+pub fn domain_is_ours_for_instance(vm_id: &str, instance_dir: &Path) -> bool {
+    match domain_owner(vm_id) {
+        Owner::Us => true,
+        Owner::Other(_) => false,
+        Owner::Unknown => Command::new("virsh")
+            .args(["dumpxml", "--inactive", vm_id])
             .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .split_whitespace()
-                    .any(|tok| tok == net_name)
-            })
-            .unwrap_or(true)
-    })
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| {
+                xml_uses_disk(
+                    &String::from_utf8_lossy(&o.stdout),
+                    &instance_dir.join("disk.qcow2"),
+                )
+            }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_disk_match_is_exact() {
+        let dir = Path::new("/var/lib/virtum/instances/vm-0123456789ab");
+        let xml = "<disk type='file'><source file='/var/lib/virtum/instances/vm-0123456789ab/disk.qcow2'/></disk>";
+        assert!(xml_uses_disk(xml, dir.join("disk.qcow2").as_path()));
+        let other = "<source file='/var/lib/virtum/instances/vm-0123456789abc/disk.qcow2'/>";
+        assert!(!xml_uses_disk(other, dir.join("disk.qcow2").as_path()));
+    }
 
     #[test]
     fn parses_owner_id_from_libvirt_output() {

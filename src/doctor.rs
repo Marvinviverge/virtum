@@ -398,7 +398,24 @@ fn check_orphans(paths: &config::VirtumPaths) -> CheckResult {
                 .collect()
         })
         .unwrap_or_default();
-    orphans_result(&find_orphans(&known, &domains, &dirs), &paths.instances)
+    let mut orphans = find_orphans(&known, &domains, &dirs);
+    // Domaines d'un autre Virtum (même libvirt, même nom de lab) : pas des orphelins à
+    // nettoyer, et `virtum destroy` les refuserait.
+    let (foreign, own): (Vec<String>, Vec<String>) = orphans.domains.into_iter().partition(|d| {
+        matches!(
+            crate::ownership::domain_owner(d),
+            crate::ownership::Owner::Other(_)
+        )
+    });
+    orphans.domains = own;
+    let mut result = orphans_result(&orphans, &paths.instances);
+    if !foreign.is_empty() {
+        result.detail.push_str(&format!(
+            " (ignorés, à un autre Virtum : {})",
+            foreign.join(", ")
+        ));
+    }
+    result
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]

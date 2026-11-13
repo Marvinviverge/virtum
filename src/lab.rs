@@ -111,22 +111,20 @@ async fn up_async(
         let instance_dir = paths.instances.join(&vm_id);
         let orphan_instance = instance_dir.join("disk.qcow2").is_file();
         let domain = domain_exists(&vm_id);
-        if domain && !orphan_instance {
-            // Domaine absent de notre metadata et sans disque dans notre état : il peut
-            // appartenir à un autre utilisateur du même libvirt (même nom de lab).
-            match crate::ownership::domain_owner(&vm_id) {
-                crate::ownership::Owner::Us => {}
-                other => bail!(
-                    "Le domaine libvirt {vm_id} ('{}' / '{machine_name}') existe déjà mais \
-                     n'appartient pas à cet état Virtum{}. Refus de le supprimer : renommez le lab \
-                     (`name:`) ou, s'il est bien à vous, `virtum destroy {vm_id}`.",
-                    lab.name,
-                    match other {
-                        crate::ownership::Owner::Other(id) => format!(" (propriétaire : {id})"),
-                        _ => String::new(),
-                    }
-                ),
-            }
+        if domain && !crate::ownership::domain_is_ours_for_instance(&vm_id, &instance_dir) {
+            // Domaine absent de notre metadata qui n'est pas à cet état Virtum (même nom de
+            // lab chez un autre utilisateur du même libvirt) : refus, même avec un disque
+            // orphelin de notre côté.
+            bail!(
+                "Le domaine libvirt {vm_id} ('{}' / '{machine_name}') existe déjà mais \
+                 n'appartient pas à cet état Virtum{}. Refus de le supprimer : renommez le lab \
+                 (`name:`).",
+                lab.name,
+                match crate::ownership::domain_owner(&vm_id) {
+                    crate::ownership::Owner::Other(id) => format!(" (propriétaire : {id})"),
+                    _ => String::new(),
+                }
+            );
         }
         if domain || orphan_instance {
             crate::verr!("Nettoyage avant déploiement de '{machine_name}' ({vm_id})…");

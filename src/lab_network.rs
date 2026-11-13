@@ -221,6 +221,13 @@ pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool)
     let net_name = lab_network_name(lab_name)?;
 
     if let Some(xml) = defined_network_xml(&net_name)? {
+        // Réseau d'un autre Virtum (même nom de lab) : ni réutilisé ni modifié.
+        if let crate::ownership::Owner::Other(id) = crate::ownership::network_owner(&net_name) {
+            bail!(
+                "Le réseau {net_name} appartient à un autre Virtum ({id}) : refus de l'utiliser. \
+                 Renommez le lab (`name:`)."
+            );
+        }
         let current = parse_network_ip(&xml);
         let subnet_differs = !current.is_some_and(|(addr, len)| len == 24 && subnet.contains(addr));
         if subnet_differs && !can_recreate {
@@ -433,6 +440,13 @@ pub fn destroy_lab_network(lab_name: &str) -> Result<()> {
     if !net_is_defined(&net_name)? {
         return Ok(());
     }
+    if !crate::ownership::network_may_destroy(&net_name) {
+        crate::verr!(
+            "Réseau {net_name} conservé : il n'est pas marqué par cet état Virtum ou des VM y sont \
+             encore attachées."
+        );
+        return Ok(());
+    }
     let _ = run_virsh(&["net-destroy", &net_name]);
     run_virsh(&["net-undefine", &net_name]).ok();
     crate::verr!("Réseau lab supprimé: {net_name}");
@@ -546,28 +560,11 @@ pub struct DhcpLease {
 pub fn parse_dhcp_leases(output: &str) -> Vec<DhcpLease> {
     output
         .lines()
-        .filter_map(|line| {
-            let tokens: Vec<&str> = line.split_whitespace().collect();
-            let mut mac = None;
-            let mut ip = None;
-            for token in &tokens {
-                if token.len() == 17 && token.matches(':').count() == 5 {
-                    mac = Some(token.to_lowercase());
-                } else if token.contains('/') && token.matches('.').count() == 3 {
-                    ip = token.split('/').next().map(str::to_string);
-                }
-            }
-            let expiry = match tokens.as_slice() {
-                [date, time, ..] if date.matches('-').count() == 2 && time.contains(':') => {
-                    Some(format!("{date} {time}"))
-                }
-                _ => None,
-            };
-            Some(DhcpLease {
-                mac: mac?,
-                ip: ip?,
-                expiry,
-            })
+        .filter_map(crate::libvirt::parse_dhcp_lease_line)
+        .map(|l| DhcpLease {
+            mac: l.mac,
+            ip: l.ip,
+            expiry: Some(l.expiry),
         })
         .collect()
 }
@@ -590,6 +587,11 @@ pub fn dhcp_leases(net_name: &str) -> Vec<DhcpLease> {
 }
 
 fn net_update(net_name: &str, command: &str, host: &DhcpHost) -> Result<()> {
+    if !crate::ownership::network_may_modify(net_name) {
+        bail!(
+            "Le réseau {net_name} n'appartient pas à cet état Virtum : réservation DHCP non modifiée."
+        );
+    }
     let xml = host.to_xml();
     let mut args = vec![
         "net-update",
@@ -954,6 +956,31 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn dhcp_lease_ignores_guest_chosen_client_id_and_hostname() {
+        // L'invité A (52:54:00:aa:aa:aa) annonce la MAC de B comme client-id et nom d'hôte.
+        let out = r#" Expiry Time           MAC address         Protocol   IP address          Hostname            Client ID or DUID
+---------------------------------------------------------------------------------------------------------------------
+ 2026-11-12 18:01:02   52:54:00:aa:aa:aa   ipv4       192.168.156.10/24   52:54:00:bb:bb:bb   52:54:00:bb:bb:bb
+"#;
+        let leases = parse_dhcp_leases(out);
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].mac, "52:54:00:aa:aa:aa");
+        assert_eq!(
+            crate::libvirt::parse_ipv4_from_dhcp_leases(out, "52:54:00:bb:bb:bb"),
+            None
+        );
+        assert_eq!(
+            crate::libvirt::parse_ipv4_from_dhcp_leases(out, "52:54:00:AA:AA:AA").as_deref(),
+            Some("192.168.156.10")
+        );
+        // Hostname absent (« - ») et IP invalide.
+        assert!(parse_dhcp_leases(
+            " 2026-11-12 18:01:02   52:54:00:aa:aa:aa   ipv4   999.1.1.1/24   -   -"
+        )
+        .is_empty());
     }
 
     #[test]

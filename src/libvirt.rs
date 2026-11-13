@@ -950,28 +950,50 @@ pub fn parse_mac_from_domiflist(output: &str) -> Option<String> {
     None
 }
 
-pub fn parse_ipv4_from_dhcp_leases(output: &str, mac: &str) -> Option<String> {
-    let mac = mac.to_lowercase();
-    for line in output.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains(&mac) {
-            if let Some(ip) = extract_ipv4_token(line) {
-                return Some(ip);
-            }
-        }
-    }
-    None
+/// Une ligne de `virsh net-dhcp-leases`, lue par colonnes fixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseLine {
+    pub expiry: String,
+    pub mac: String,
+    pub ip: String,
 }
 
-pub fn parse_ipv4_from_dhcp_leases_by_hostname(output: &str, hostname: &str) -> Option<String> {
-    for line in output.lines() {
-        if line.contains(hostname) {
-            if let Some(ip) = extract_ipv4_token(line) {
-                return Some(ip);
-            }
-        }
+fn is_mac_address(token: &str) -> bool {
+    token.len() == 17
+        && token.split(':').count() == 6
+        && token
+            .split(':')
+            .all(|b| b.len() == 2 && b.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Lit une ligne de `virsh net-dhcp-leases` : date, heure, MAC, protocole, IP/préfixe,
+/// puis nom d'hôte et client-id. Le nom d'hôte et le client-id sont choisis par
+/// l'invité : seules les colonnes MAC et IP sont lues, à leur position.
+pub fn parse_dhcp_lease_line(line: &str) -> Option<LeaseLine> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let [date, time, mac, proto, addr, ..] = tokens.as_slice() else {
+        return None;
+    };
+    if !proto.eq_ignore_ascii_case("ipv4") || !is_mac_address(mac) {
+        return None;
     }
-    None
+    let (ip, prefix) = addr.split_once('/')?;
+    ip.parse::<std::net::Ipv4Addr>().ok()?;
+    prefix.parse::<u8>().ok().filter(|p| *p <= 32)?;
+    Some(LeaseLine {
+        expiry: format!("{date} {time}"),
+        mac: mac.to_ascii_lowercase(),
+        ip: ip.to_string(),
+    })
+}
+
+pub fn parse_ipv4_from_dhcp_leases(output: &str, mac: &str) -> Option<String> {
+    let mac = mac.to_ascii_lowercase();
+    output
+        .lines()
+        .filter_map(parse_dhcp_lease_line)
+        .find(|l| l.mac == mac)
+        .map(|l| l.ip)
 }
 
 fn extract_ipv4_token(line: &str) -> Option<String> {
