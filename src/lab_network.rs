@@ -125,8 +125,11 @@ pub fn generate_lab_network_xml(lab_name: &str, subnet: LabSubnet) -> Result<Str
     let range_start = subnet.host(2);
     let range_end = subnet.host(254);
 
+    // dnsmasq (v0.9) : `no-ping` — pas de ping de 3 s avant d'attribuer une adresse ;
+    // `dhcp-ignore-clid` — baux indexés par la seule MAC : une VM recréée (MAC stable,
+    // nouvel identifiant client) retrouve son adresse au lieu d'en prendre une autre.
     Ok(format!(
-        r#"<network>
+        r#"<network xmlns:dnsmasq='{DNSMASQ_NS}'>
   <name>{net_name}</name>
   <forward mode='nat'/>
   <bridge name='{bridge}' stp='on' delay='0'/>
@@ -136,9 +139,29 @@ pub fn generate_lab_network_xml(lab_name: &str, subnet: LabSubnet) -> Result<Str
       <range start='{range_start}' end='{range_end}'/>
     </dhcp>
   </ip>
+  <dnsmasq:options>
+    <dnsmasq:option value='no-ping'/>
+    <dnsmasq:option value='dhcp-ignore-clid'/>
+  </dnsmasq:options>
 </network>
 "#
     ))
+}
+
+/// Espace de noms libvirt des options dnsmasq.
+const DNSMASQ_NS: &str = "http://libvirt.org/schemas/network/dnsmasq/1.0";
+
+/// Le réseau défini porte les réglages DHCP de la v0.9 (`no-ping`, `dhcp-ignore-clid`).
+pub fn has_dhcp_tuning(network_xml: &str) -> bool {
+    network_xml.contains("value='no-ping'") && network_xml.contains("value='dhcp-ignore-clid'")
+}
+
+fn defined_network_xml(net_name: &str) -> Result<Option<String>> {
+    if !net_is_defined(net_name)? {
+        return Ok(None);
+    }
+    let output = run_virsh(&["net-dumpxml", "--inactive", net_name])?;
+    Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
 }
 
 fn run_virsh(args: &[&str]) -> Result<std::process::Output> {
@@ -186,11 +209,7 @@ fn net_is_active(net_name: &str) -> Result<bool> {
 
 /// Sous-réseau d'un réseau libvirt déjà défini (`None` s'il n'existe pas).
 pub fn defined_subnet(net_name: &str) -> Result<Option<(Ipv4Addr, u8)>> {
-    if !net_is_defined(net_name)? {
-        return Ok(None);
-    }
-    let output = run_virsh(&["net-dumpxml", "--inactive", net_name])?;
-    Ok(parse_network_ip(&String::from_utf8_lossy(&output.stdout)))
+    Ok(defined_network_xml(net_name)?.and_then(|xml| parse_network_ip(&xml)))
 }
 
 /// Crée ou démarre le réseau isolé du lab ; retourne le nom libvirt (`virtum-lab-…`).
@@ -200,17 +219,25 @@ pub fn defined_subnet(net_name: &str) -> Result<Option<(Ipv4Addr, u8)>> {
 pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool) -> Result<String> {
     let net_name = lab_network_name(lab_name)?;
 
-    if let Some((addr, len)) = defined_subnet(&net_name)? {
-        if !(len == 24 && subnet.contains(addr)) {
-            if !can_recreate {
-                bail!(
-                    "Le réseau {net_name} existe en {addr}/{len}, le Virtumfile demande {subnet}. \
-                     Les VM du lab en dépendent : `virtum down -f … --destroy` puis `virtum up` pour changer de sous-réseau."
-                );
-            }
-            crate::verr!(
-                "Réseau {net_name} recréé en {subnet} (ancien : {addr}/{len}, aucune VM)."
+    if let Some(xml) = defined_network_xml(&net_name)? {
+        let current = parse_network_ip(&xml);
+        let subnet_differs = !current.is_some_and(|(addr, len)| len == 24 && subnet.contains(addr));
+        if subnet_differs && !can_recreate {
+            let (addr, len) = current.unwrap_or((Ipv4Addr::UNSPECIFIED, 0));
+            bail!(
+                "Le réseau {net_name} existe en {addr}/{len}, le Virtumfile demande {subnet}. \
+                 Les VM du lab en dépendent : `virtum down -f … --destroy` puis `virtum up` pour changer de sous-réseau."
             );
+        }
+        // Sans VM, le réseau est recréé (sous-réseau changé ou réglages DHCP d'avant la
+        // v0.9) ; avec des VM, un réseau sans réglages DHCP reste tel quel.
+        if can_recreate && (subnet_differs || !has_dhcp_tuning(&xml)) {
+            let why = if subnet_differs {
+                "sous-réseau changé"
+            } else {
+                "réglages DHCP v0.9"
+            };
+            crate::verr!("Réseau {net_name} recréé en {subnet} ({why}, aucune VM).");
             let _ = run_virsh(&["net-destroy", &net_name]);
             run_virsh(&["net-undefine", &net_name])
                 .with_context(|| format!("virsh net-undefine a échoué pour '{net_name}'"))?;
@@ -725,6 +752,11 @@ mod tests {
         let xml = generate_lab_network_xml("demo-lab", declared).unwrap();
         assert!(xml.contains("<ip address='10.20.30.1' netmask='255.255.255.0'>"));
         assert!(xml.contains("<range start='10.20.30.2' end='10.20.30.254'/>"));
+        assert!(xml.starts_with(
+            "<network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>"
+        ));
+        assert!(has_dhcp_tuning(&xml));
+        assert!(!has_dhcp_tuning("<network><name>old</name></network>"));
         assert_eq!(
             parse_network_ip(&xml),
             Some((Ipv4Addr::new(10, 20, 30, 1), 24))

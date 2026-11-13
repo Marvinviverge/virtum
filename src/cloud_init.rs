@@ -102,6 +102,9 @@ fn yaml_runcmd_block(entries: &[Vec<String>]) -> String {
 /// Writes `user-data` (cloud-config) with user, sudo and Virtum SSH public key.
 ///
 /// Si `grow_root` est vrai, cloud-init agrandit la partition racine au premier boot.
+/// `install_agent` : installer `qemu-guest-agent` (cartes bridge seulement : sur un réseau
+/// libvirt, l'IP vient des baux DHCP ; l'installation coûtait `apt update` + paquet, soit
+/// 25 à 40 s par VM, v0.9). Avec `grow_root`, il est installé après SSH (voir `vm.rs`).
 /// Les commandes `provision` ne sont pas injectées ici : exécutées via SSH après
 /// que la VM accepte les connexions (voir `ssh::run_provision_commands`).
 pub fn write_user_data(
@@ -109,6 +112,7 @@ pub fn write_user_data(
     user: &str,
     public_key: &str,
     grow_root: bool,
+    install_agent: bool,
     mounts: &[ResolvedMount],
 ) -> Result<PathBuf> {
     validate_cloud_init_user(user)?;
@@ -129,7 +133,7 @@ resize_rootfs: true
     };
     let mount_entries = mount_runcmd_entries(mounts);
     let mount_block = yaml_runcmd_block(&mount_entries);
-    let (package_block, runcmd_block) = if grow_root {
+    let (package_block, runcmd_block) = if grow_root || !install_agent {
         (String::new(), mount_block)
     } else if mounts.is_empty() {
         (
@@ -232,14 +236,22 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey virtum";
-        write_user_data(&dir, "virtum", key, false, &[]).unwrap();
+        write_user_data(&dir, "virtum", key, false, false, &[]).unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
         assert!(content.starts_with("#cloud-config\n"));
         assert!(content.contains("  - name: virtum\n"));
         assert!(content.contains(&format!("      - {key}")));
         assert!(content.contains("ssh_pwauth: false"));
         assert!(content.contains("/etc/profile.d/virtum-path.sh"));
+        // Réseau libvirt : ni apt ni qemu-guest-agent (v0.9).
+        assert!(!content.contains("package_update"));
+        assert!(!content.contains("qemu-guest-agent"));
+
+        // Carte bridge : l'agent sert à trouver l'IP, il est installé par cloud-init.
+        write_user_data(&dir, "virtum", key, false, true, &[]).unwrap();
+        let content = fs::read_to_string(dir.join("user-data")).unwrap();
         assert!(content.contains("package_update: true"));
+        assert!(content.contains("  - qemu-guest-agent"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -250,7 +262,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum", true, &[]).unwrap();
+        write_user_data(
+            &dir,
+            "virtum",
+            "ssh-ed25519 AAAATEST virtum",
+            true,
+            true,
+            &[],
+        )
+        .unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
         assert!(content.contains("growpart:"));
         assert!(content.contains("resize_rootfs: true"));
@@ -294,6 +314,7 @@ mod tests {
             "virtum",
             "ssh-ed25519 AAAATEST virtum",
             false,
+            false,
             &mounts,
         )
         .unwrap();
@@ -326,7 +347,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        write_user_data(&dir, "virtum", "ssh-ed25519 AAAATEST virtum", false, &[]).unwrap();
+        write_user_data(
+            &dir,
+            "virtum",
+            "ssh-ed25519 AAAATEST virtum",
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         write_meta_data(&dir, "vm-test", "vm-test").unwrap();
 
         let result = build_cloud_init_iso(&dir);

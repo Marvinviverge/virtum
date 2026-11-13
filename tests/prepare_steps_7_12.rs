@@ -21,7 +21,7 @@ async fn prepare_instance_assets_without_base_image_download() {
     let instance_dir = paths.instances.join(vm_id);
     fs::create_dir_all(&instance_dir).unwrap();
 
-    write_user_data(&instance_dir, "virtum", &pubkey, false, &[]).unwrap();
+    write_user_data(&instance_dir, "virtum", &pubkey, false, false, &[]).unwrap();
     write_meta_data(&instance_dir, vm_id, vm_id).unwrap();
 
     if std::process::Command::new("cloud-localds")

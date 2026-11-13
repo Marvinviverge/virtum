@@ -33,17 +33,18 @@ use crate::ssh::{
 };
 use crate::virtumfile::RestartPolicy;
 
-const IP_POLL_INTERVAL: Duration = Duration::from_secs(2);
+// v0.9 : sondages rapides, sans pause fixe sur un réseau libvirt (baux DHCP surveillés).
+const IP_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const IP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Premier boot + DHCP macvtap + guest-agent : plus long que le réseau libvirt NAT.
 const IP_TIMEOUT_BRIDGE: Duration = Duration::from_secs(180);
-const IP_BOOT_GRACE: Duration = Duration::from_secs(5);
+const IP_BOOT_GRACE: Duration = Duration::ZERO;
 const IP_BOOT_GRACE_BRIDGE: Duration = Duration::from_secs(15);
-const SSH_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const SSH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SSH_TIMEOUT: Duration = Duration::from_secs(120);
 const SSH_TIMEOUT_GROW_ROOT: Duration = Duration::from_secs(300);
 const SSH_TIMEOUT_PROVISION: Duration = Duration::from_secs(600);
-const SSH_BOOT_GRACE: Duration = Duration::from_secs(5);
+const SSH_BOOT_GRACE: Duration = Duration::ZERO;
 const STOP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_PORT: u16 = 22;
@@ -257,11 +258,14 @@ pub async fn launch_vm_inner(
         mounts::ensure_virtiofs_servers(instance_dir, &mut resolved_mounts)?;
     }
 
+    // qemu-guest-agent seulement avec une carte bridge (IP introuvable par les baux DHCP).
+    let install_agent = config.bridge_host_interface.is_some();
     write_user_data(
         instance_dir,
         &config.user,
         public_key,
         grow_root,
+        install_agent,
         &resolved_mounts,
     )?;
 
@@ -321,6 +325,10 @@ pub async fn launch_vm_inner(
         })?;
     }
 
+    let lease_watch = LeaseWatch::before_start(
+        network_attach.libvirt_network_name(),
+        libvirt::resolve_nic_mac(instance_dir, vm_id).as_deref(),
+    );
     start_domain(vm_id).with_context(|| {
         format!(
             "virsh start a échoué pour {vm_id}.\n{}",
@@ -346,6 +354,7 @@ pub async fn launch_vm_inner(
         ip_timeout,
         None,
         config.static_ip.as_deref(),
+        &lease_watch,
     )
     .await
     {
@@ -421,7 +430,7 @@ pub async fn launch_vm_inner(
 
     if !config.provision.is_empty() {
         let mut post_boot: Vec<String> = Vec::new();
-        if grow_root {
+        if grow_root && install_agent {
             post_boot.push(
                 "DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
                  apt-get install -y -qq qemu-guest-agent && \
@@ -444,7 +453,7 @@ pub async fn launch_vm_inner(
             SSH_TIMEOUT_PROVISION,
             &ssh_opts,
         )?;
-    } else if grow_root {
+    } else if grow_root && install_agent {
         crate::verr!("Installation qemu-guest-agent post-SSH…");
         run_provision_commands(
             &keys.private_key,
@@ -677,6 +686,60 @@ fn build_domain_spec<'a>(
     }
 }
 
+/// Baux DHCP déjà connus pour la carte de la VM **avant** son démarrage.
+///
+/// Une VM recréée avec la même MAC (MAC stables des labs) peut avoir d'anciens baux
+/// encore valides ; juste après un redémarrage, libvirt affiche aussi l'ancien bail tant
+/// que l'invité n'a pas redemandé d'adresse. Seul un bail nouveau ou renouvelé (adresse
+/// ou échéance différente) désigne l'adresse de ce démarrage.
+pub(crate) struct LeaseWatch {
+    network: Option<String>,
+    mac: Option<String>,
+    known: Vec<lab_network::DhcpLease>,
+}
+
+impl LeaseWatch {
+    /// À appeler juste avant `virsh start`.
+    pub(crate) fn before_start(network: Option<&str>, mac: Option<&str>) -> Self {
+        let mac = mac.map(str::to_lowercase);
+        let known = match (network, mac.as_deref()) {
+            (Some(net), Some(mac)) => lab_network::dhcp_leases(net)
+                .into_iter()
+                .filter(|l| l.mac == mac)
+                .collect(),
+            _ => Vec::new(),
+        };
+        Self {
+            network: network.map(str::to_string),
+            mac,
+            known,
+        }
+    }
+
+    /// Adresse du bail le plus récent obtenu depuis le démarrage, s'il existe.
+    fn fresh_ip(&self) -> Option<String> {
+        let (net, mac) = (self.network.as_deref()?, self.mac.as_deref()?);
+        fresh_lease_ip(&lab_network::dhcp_leases(net), mac, &self.known)
+    }
+
+    fn watches(&self) -> bool {
+        self.network.is_some() && self.mac.is_some()
+    }
+}
+
+/// Bail de `mac` absent de `known` (nouveau ou renouvelé), le plus récent d'abord.
+fn fresh_lease_ip(
+    leases: &[lab_network::DhcpLease],
+    mac: &str,
+    known: &[lab_network::DhcpLease],
+) -> Option<String> {
+    leases
+        .iter()
+        .filter(|l| l.mac.eq_ignore_ascii_case(mac) && !known.contains(l))
+        .max_by(|a, b| a.expiry.cmp(&b.expiry))
+        .map(|l| l.ip.clone())
+}
+
 /// Contexte pour réutiliser une IP connue au redémarrage (metadata).
 struct ResumeIpHint<'a> {
     known_ip: &'a str,
@@ -693,6 +756,7 @@ async fn wait_for_ip(
     timeout: Duration,
     resume_hint: Option<ResumeIpHint<'_>>,
     expected_ip: Option<&str>,
+    leases: &LeaseWatch,
 ) -> Result<String> {
     let started = Instant::now();
     // `ip:` déclarée : juste après un redémarrage, libvirt montre encore l'ancien bail de
@@ -700,14 +764,14 @@ async fn wait_for_ip(
     // une autre adresse n'est retenue qu'au bout du délai (ancien bail d'une autre MAC).
     let mut other_ip: Option<String> = None;
     let grace = if resume_hint.is_some() {
-        Duration::from_secs(2)
+        attach.ip_boot_grace().min(Duration::from_secs(2))
     } else {
         attach.ip_boot_grace()
     };
     sleep(grace).await;
 
     loop {
-        if let Some(ip) = try_discover_ip(vm_id, hostname, attach)? {
+        if let Some(ip) = try_discover_ip(vm_id, hostname, attach, leases)? {
             match expected_ip {
                 Some(expected) if ip != expected => other_ip = Some(ip),
                 _ => return Ok(ip),
@@ -767,12 +831,30 @@ async fn wait_for_ip(
     );
 }
 
-fn try_discover_ip(vm_id: &str, hostname: &str, attach: &NetworkAttach) -> Result<Option<String>> {
+fn try_discover_ip(
+    vm_id: &str,
+    hostname: &str,
+    attach: &NetworkAttach,
+    leases: &LeaseWatch,
+) -> Result<Option<String>> {
     if matches!(attach, NetworkAttach::MacvtapBridge { .. }) {
         return try_discover_ip_bridge(vm_id);
     }
 
     let prefer_lan = false;
+
+    // MAC connue sur un réseau libvirt : seuls les baux obtenus depuis ce démarrage font
+    // foi (`domifaddr --source lease` renverrait aussi les anciens), agent en secours.
+    if leases.watches() {
+        if let Some(ip) = leases
+            .fresh_ip()
+            .filter(|ip| is_usable_ssh_ip(ip, prefer_lan))
+        {
+            return Ok(Some(ip));
+        }
+        return Ok(libvirt::guest_network_ipv4_from_agent(vm_id)
+            .filter(|ip| is_usable_ssh_ip(ip, prefer_lan)));
+    }
 
     for output in libvirt::domifaddr_all_sources(vm_id) {
         if let Some(ip) = libvirt::parse_ipv4_from_domifaddr(&output) {
@@ -1030,6 +1112,12 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         )
     })?;
 
+    let network_attach =
+        network_attach_from_resume(libvirt_network.as_deref(), bridge_iface.as_deref())?;
+    let lease_watch = LeaseWatch::before_start(
+        network_attach.libvirt_network_name(),
+        libvirt::resolve_nic_mac(&instance_dir, &vm_id).as_deref(),
+    );
     start_domain(&vm_id).with_context(|| {
         format!(
             "virsh start a échoué pour {vm_id}.\n{}",
@@ -1042,8 +1130,6 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         bail!("La VM {vm_id} n'est pas en état running (état actuel: {state}).");
     }
 
-    let network_attach =
-        network_attach_from_resume(libvirt_network.as_deref(), bridge_iface.as_deref())?;
     let keys = ensure_ssh_keypair(&paths.keys)?;
     let ssh_ports = ssh_ports_to_try(instance.ssh_port.unwrap_or(SSH_PORT));
     let ssh_opts = SshSessionOpts::new(&instance_dir, false);
@@ -1081,6 +1167,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         ip_timeout,
         resume_hint,
         instance.static_ip.as_deref(),
+        &lease_watch,
     )
     .await?;
     if !is_usable_ssh_ip(&ip, network_attach.prefer_non_libvirt_default()) {
@@ -1435,6 +1522,39 @@ fn generate_vm_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_fresh_leases_designate_the_new_boot() {
+        let lease = |ip: &str, expiry: &str| lab_network::DhcpLease {
+            mac: "52:54:00:5d:10:b0".into(),
+            ip: ip.into(),
+            expiry: Some(expiry.into()),
+        };
+        let other_mac = lab_network::DhcpLease {
+            mac: "52:54:00:aa:aa:aa".into(),
+            ..lease("192.168.78.99", "2026-11-13 21:00:00")
+        };
+        // Avant le démarrage : deux anciens baux de la même MAC (VM détruites).
+        let known = vec![
+            lease("192.168.78.40", "2026-11-13 20:35:59"),
+            lease("192.168.78.41", "2026-11-13 20:36:42"),
+        ];
+        let mut now = known.clone();
+        now.push(other_mac);
+        assert_eq!(fresh_lease_ip(&now, "52:54:00:5D:10:B0", &known), None);
+        // Nouveau bail : c'est lui, pas le premier de la liste.
+        now.push(lease("192.168.78.43", "2026-11-13 20:40:58"));
+        assert_eq!(
+            fresh_lease_ip(&now, "52:54:00:5d:10:b0", &known).as_deref(),
+            Some("192.168.78.43")
+        );
+        // Même adresse renouvelée (dhcp-ignore-clid, redémarrage) : échéance différente.
+        let renewed = vec![lease("192.168.78.40", "2026-11-13 21:40:00")];
+        assert_eq!(
+            fresh_lease_ip(&renewed, "52:54:00:5d:10:b0", &known).as_deref(),
+            Some("192.168.78.40")
+        );
+    }
 
     #[test]
     fn ssh_port_storage_and_label() {
