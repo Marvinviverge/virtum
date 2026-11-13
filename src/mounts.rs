@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::libvirt_access::{self, KVM_GROUP};
+use crate::libvirt_access;
 use crate::virtumfile::{MountSpec, Virtumfile};
 
 pub const VIRTUM_GUEST_HOME: &str = "/home/virtum";
@@ -51,6 +51,10 @@ pub struct ResolvedMount {
     /// PID du virtiofsd lancé par Virtum (ne pas sonder le socket : une connexion le tue).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtiofsd_pid: Option<u32>,
+    /// Répertoire (canonique) du Virtumfile à la création : racine autorisée pour ce
+    /// partage (relance de virtiofsd, `destroy --purge`). Absent dans un état antérieur.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtumfile_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,7 +182,34 @@ pub fn resolve_machine_mounts(
         }
         resolved.push(resolve_mount_spec(&spec, &base)?);
     }
+    let pairs: Vec<_> = resolved
+        .iter()
+        .map(|m| (format!("{machine_name}/{}", m.name), m.host_abs.clone()))
+        .collect();
+    ensure_mounts_not_nested(&pairs)?;
     Ok(resolved)
+}
+
+/// Refuse un partage dont le répertoire hôte est strictement inclus dans celui d'un autre.
+///
+/// Un invité qui écrit dans le partage englobant pourrait remplacer le répertoire du
+/// partage inclus par un lien symbolique vers n'importe quel dossier de l'hôte. Le même
+/// répertoire partagé par plusieurs machines (mounts du lab) reste autorisé.
+pub fn ensure_mounts_not_nested(mounts: &[(String, PathBuf)]) -> Result<()> {
+    for (outer_label, outer) in mounts {
+        for (inner_label, inner) in mounts {
+            if inner != outer && inner.starts_with(outer) {
+                bail!(
+                    "Mounts imbriqués interdits : '{inner_label}' ({}) est à l'intérieur de \
+                     '{outer_label}' ({}). Un invité pourrait remplacer le dossier inclus par un \
+                     lien symbolique vers un autre dossier de l'hôte ; utilisez des dossiers disjoints.",
+                    inner.display(),
+                    outer.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Résout un seul `MountSpec` (validation chemins).
@@ -193,6 +224,7 @@ pub fn resolve_mount_spec(spec: &MountSpec, virtumfile_base: &Path) -> Result<Re
         guest_path,
         socket_path: PathBuf::new(), // rempli par ensure_virtiofs_servers
         virtiofsd_pid: None,
+        virtumfile_dir: Some(virtumfile_base.to_path_buf()),
     })
 }
 
@@ -207,48 +239,60 @@ pub fn resolve_host_path(virtumfile_base: &Path, host: &str) -> Result<PathBuf> 
              Utilisez un chemin relatif au Virtumfile (ex. ./src)."
         );
     }
-    let joined = virtumfile_base.join(host);
-    let mut normalized = PathBuf::new();
-    for component in joined.components() {
+    let base = virtumfile_base
+        .canonicalize()
+        .context("canonicalize virtumfile base")?;
+
+    // Composants relatifs, sans `.` ; `..` interdit.
+    let mut rel = Vec::new();
+    for component in Path::new(host).components() {
         match component {
             Component::ParentDir => {
                 bail!("Chemin hôte '{host}' sort du répertoire du Virtumfile (.. interdit).")
             }
             Component::CurDir => {}
-            Component::Normal(c) => normalized.push(c),
-            Component::RootDir => normalized.push(component),
-            Component::Prefix(p) => normalized.push(Component::Prefix(p)),
+            Component::Normal(c) => rel.push(c.to_os_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                bail!("Chemin hôte mount absolu interdit : {host}.")
+            }
         }
     }
-    let base = virtumfile_base
-        .canonicalize()
-        .context("canonicalize virtumfile base")?;
-    if !host_path_under_virtumfile_root(&normalized, &base) {
-        bail!(
-            "Chemin hôte '{}' résout hors du répertoire Virtumfile ({})",
-            host,
-            base.display()
-        );
-    }
-    if normalized.exists() {
-        if !normalized.is_dir() {
-            bail!(
+
+    // Parcours composant par composant depuis la base, sans suivre de lien symbolique :
+    // rien n'est créé tant que le chemin déjà parcouru n'est pas vérifié. Un lien
+    // symbolique (dépôt cloné, ou planté par un invité dans un partage) est refusé.
+    let mut current = base.clone();
+    for c in &rel {
+        current.push(c);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => bail!(
+                "Chemin hôte '{host}' : {} est un lien symbolique (refusé ; utilisez le \
+                 répertoire réel sous le Virtumfile).",
+                current.display()
+            ),
+            Ok(meta) if !meta.is_dir() => bail!(
                 "Le chemin hôte mount doit être un répertoire : {}",
-                normalized.display()
-            );
+                current.display()
+            ),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).with_context(|| {
+                    format!(
+                        "Impossible de créer le répertoire hôte mount {} (résolu depuis '{host}').",
+                        current.display()
+                    )
+                })?;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("Impossible de lire {}", current.display()))
+            }
         }
-    } else {
-        fs::create_dir_all(&normalized).with_context(|| {
-            format!(
-                "Impossible de créer le répertoire hôte mount {} (résolu depuis '{host}').",
-                normalized.display()
-            )
-        })?;
     }
-    let canonical = normalized
+
+    let canonical = current
         .canonicalize()
-        .with_context(|| format!("Impossible de résoudre {}", normalized.display()))?;
-    if !canonical.starts_with(&base) {
+        .with_context(|| format!("Impossible de résoudre {}", current.display()))?;
+    if canonical != current || !host_path_under_virtumfile_root(&canonical, &base) {
         bail!(
             "Chemin hôte '{}' résout hors du répertoire Virtumfile ({})",
             host,
@@ -347,7 +391,13 @@ fn path_is_socket(path: &Path) -> bool {
 /// virtiofsd tourne encore (PID enregistré + socket présent).
 /// Ne jamais se connecter au socket : virtiofsd s'arrête à la déconnexion du client.
 fn virtiofs_daemon_alive(socket_path: &Path, pid: Option<u32>) -> bool {
-    path_is_socket(socket_path) && pid.is_some_and(daemon_running)
+    path_is_socket(socket_path) && pid.is_some_and(|p| is_our_virtiofsd(p, socket_path))
+}
+
+/// Le PID est bien un virtiofsd de l'utilisateur servant ce socket (PID réutilisé ou
+/// état altéré : on ne le considère pas comme le nôtre).
+fn is_our_virtiofsd(pid: u32, socket_path: &Path) -> bool {
+    crate::procs::process_matches(pid, "virtiofsd", &socket_path.to_string_lossy())
 }
 
 /// Démarre virtiofsd pour chaque mount ; remplit `socket_path` et écrit `mounts-state.json`.
@@ -367,7 +417,7 @@ fn ensure_virtiofs_socket_running(instance_dir: &Path, mount: &mut ResolvedMount
         return Ok(());
     }
     if let Some(pid) = mount.virtiofsd_pid.take() {
-        let _ = stop_virtiofsd_pid(pid);
+        stop_virtiofsd_pid(pid, &mount.socket_path);
     }
     if mount.socket_path.exists() {
         std::fs::remove_file(&mount.socket_path).with_context(|| {
@@ -377,12 +427,118 @@ fn ensure_virtiofs_socket_running(instance_dir: &Path, mount: &mut ResolvedMount
             )
         })?;
     }
+    validate_stored_share(mount)?;
+    restrict_share_root(&mount.name, &mount.host_abs)?;
     mount.virtiofsd_pid = Some(start_virtiofsd(
         instance_dir,
         &mount.name,
         &mount.host_abs,
         &mount.socket_path,
     )?);
+    Ok(())
+}
+
+/// Ferme la racine d'un partage à tout autre compte local avant de lancer virtiofsd.
+///
+/// virtiofsd s'exécute sous l'utilisateur Virtum : root dans l'invité peut créer dans le
+/// partage un exécutable setuid/setgid appartenant à cet utilisateur (un `chmod 6755` du
+/// propriétaire n'est filtré ni par virtiofsd ni par le noyau ; `--killpriv-v2` n'efface ces
+/// bits qu'à l'écriture). Les partages imbriqués étant refusés, la racine est le seul chemin
+/// d'accès ; elle ne doit être traversable par personne d'autre :
+/// - entrée ACL nommée donnant `x` à un autre compte ou groupe : partage refusé (choix
+///   délibéré de l'utilisateur, on ne l'efface pas) ;
+/// - accès « autres » : retiré ;
+/// - accès groupe : retiré si le groupe du dossier contient un autre compte.
+fn restrict_share_root(name: &str, shared: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let uid = crate::fsutil::current_uid();
+    let meta = fs::symlink_metadata(shared)
+        .with_context(|| format!("Répertoire partagé {} introuvable", shared.display()))?;
+
+    let acl = crate::share_access::named_acl_traversers_of(shared, uid)?;
+    if !acl.is_empty() {
+        bail!(
+            "Volume '{name}' : une ACL sur {} permet à d'autres comptes de traverser le partage \
+             ({}). Un invité pourrait y déposer un exécutable setuid qu'ils pourraient lancer. \
+             Retirez ces entrées (setfacl -x …) puis relancez.",
+            shared.display(),
+            acl.join(", ")
+        );
+    }
+
+    let mode = meta.permissions().mode() & 0o7777;
+    let shared_group = crate::share_access::group_has_other_members(meta.gid(), uid);
+    let mut remove = 0o007;
+    if shared_group {
+        remove |= 0o070;
+    }
+    if mode & remove == 0 {
+        return Ok(());
+    }
+    let new_mode = mode & !remove;
+    if meta.uid() != uid {
+        bail!(
+            "Volume '{name}' : {} est accessible à d'autres comptes (mode {mode:o}) et \
+             n'appartient pas à l'utilisateur courant. Un invité pourrait y déposer un \
+             exécutable setuid atteignable par ces comptes : passez-le en {new_mode:o} puis \
+             relancez.",
+            shared.display()
+        );
+    }
+    fs::set_permissions(shared, fs::Permissions::from_mode(new_mode))
+        .with_context(|| format!("Impossible de restreindre l'accès à {}", shared.display()))?;
+    let who = if shared_group {
+        "« autres » et groupe partagé"
+    } else {
+        "« autres »"
+    };
+    crate::verr!(
+        "Volume '{name}' : accès {who} retiré sur {} ({mode:o} → {new_mode:o}), pour qu'aucun \
+         autre compte local n'atteigne les fichiers déposés par l'invité.",
+        shared.display()
+    );
+    Ok(())
+}
+
+/// Revalide le répertoire partagé juste avant de (re)lancer virtiofsd.
+///
+/// `host_abs` a été validé à la création, mais un invité qui écrit dans un autre partage,
+/// ou un état altéré, peut l'avoir redirigé : il doit encore être un répertoire réel,
+/// canonique (aucun composant devenu lien symbolique) et sous le répertoire du Virtumfile.
+fn validate_stored_share(mount: &ResolvedMount) -> Result<()> {
+    let shared = &mount.host_abs;
+    if !shared.is_absolute() {
+        bail!(
+            "Volume '{}' : chemin hôte enregistré non absolu ({}).",
+            mount.name,
+            shared.display()
+        );
+    }
+    let meta = fs::symlink_metadata(shared)
+        .with_context(|| format!("Répertoire partagé {} introuvable", shared.display()))?;
+    let canonical = shared
+        .canonicalize()
+        .with_context(|| format!("Répertoire partagé {}", shared.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() || canonical != *shared {
+        bail!(
+            "Volume '{}' : {} a été remplacé (lien symbolique ou autre chemin réel {}). \
+             Partage refusé ; vérifiez le dossier puis recréez la VM.",
+            mount.name,
+            shared.display(),
+            canonical.display()
+        );
+    }
+    if let Some(root) = &mount.virtumfile_dir {
+        if !host_path_under_virtumfile_root(&canonical, root) {
+            bail!(
+                "Volume '{}' : {} est hors du répertoire Virtumfile ({}). Partage refusé.",
+                mount.name,
+                canonical.display(),
+                root.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -396,9 +552,7 @@ fn start_virtiofsd(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Impossible de créer {}", parent.display()))?;
     }
-    let shared = shared_dir
-        .canonicalize()
-        .with_context(|| format!("Répertoire partagé {}", shared_dir.display()))?;
+    let shared = shared_dir.to_path_buf();
     let socket = socket_path.to_path_buf();
 
     let virtiofsd = resolve_virtiofsd_path().with_context(|| {
@@ -410,10 +564,14 @@ fn start_virtiofsd(
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&log_path)
         .with_context(|| format!("Impossible d'ouvrir {}", log_path.display()))?;
 
     // Sans --sandbox=none, virtiofsd peut quitter si uidmap/newuidmap est absent.
+    // --killpriv-v2 : toute écriture, chown ou troncature par l'invité efface les bits
+    // setuid/setgid (et capacités) des fichiers hôte. --socket-group seulement en repli
+    // sans setfacl (sinon socket 0600 + ACL libvirt-qemu).
     let mut cmd = Command::new(&virtiofsd);
     cmd.args([
         "--sandbox=none",
@@ -421,13 +579,15 @@ fn start_virtiofsd(
         socket.to_str().context("socket path non UTF-8")?,
         "--shared-dir",
         shared.to_str().context("shared-dir non UTF-8")?,
-        "--socket-group",
-        KVM_GROUP,
+        "--killpriv-v2",
         "--cache=auto",
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::from(log_file));
+    ]);
+    if let Some(group) = libvirt_access::virtiofs_socket_group() {
+        cmd.args(["--socket-group", group]);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file));
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
@@ -471,46 +631,73 @@ fn start_virtiofsd(
 }
 
 fn daemon_running(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::procs::alive(pid)
 }
 
+/// Lit `mounts-state.json` (fichier de l'utilisateur, pas un lien) et revalide les noms
+/// de volume : ils sont réinjectés dans le XML du domaine et les commandes de montage.
 pub fn load_mounts_state(instance_dir: &Path) -> Result<Vec<ResolvedMount>> {
     let path = instance_dir.join(MOUNTS_STATE_FILE);
-    if !path.is_file() {
+    let Some(content) = crate::fsutil::read_owned(&path)? else {
         return Ok(Vec::new());
+    };
+    let mounts: Vec<ResolvedMount> =
+        serde_json::from_str(&content).with_context(|| format!("{} invalide", path.display()))?;
+    for m in &mounts {
+        if validate_volume_name(&m.name)? != m.name {
+            bail!("{} : nom de volume '{}' invalide.", path.display(), m.name);
+        }
+        resolve_guest_path(&m.guest_path)
+            .with_context(|| format!("{} : chemin invité invalide", path.display()))?;
+        if m.socket_path != PathBuf::new()
+            && m.socket_path != socket_path_for(instance_dir, &m.name)
+        {
+            bail!(
+                "{} : socket inattendu pour '{}' ({}).",
+                path.display(),
+                m.name,
+                m.socket_path.display()
+            );
+        }
     }
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("Impossible de lire {}", path.display()))?;
-    serde_json::from_str(&content).with_context(|| format!("{} invalide", path.display()))
+    Ok(mounts)
 }
 
 fn save_mounts_state(instance_dir: &Path, mounts: &[ResolvedMount]) -> Result<()> {
     let path = instance_dir.join(MOUNTS_STATE_FILE);
     let content = serde_json::to_string_pretty(mounts).context("sérialisation mounts-state")?;
-    std::fs::write(&path, format!("{content}\n"))
-        .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
-    Ok(())
+    crate::fsutil::write_atomic(&path, format!("{content}\n").as_bytes(), 0o644)
 }
 
-fn stop_virtiofsd_pid(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// Arrête un virtiofsd seulement s'il s'agit bien du nôtre (même utilisateur, même socket).
+fn stop_virtiofsd_pid(pid: u32, socket_path: &Path) -> bool {
+    crate::procs::signal_if_matches(
+        pid,
+        libc::SIGTERM,
+        "virtiofsd",
+        &socket_path.to_string_lossy(),
+    )
 }
 
-/// Chemins hôte absolus des mounts d'une instance (`mounts-state.json`).
-pub fn host_dirs_from_instance(instance_dir: &Path) -> Vec<PathBuf> {
-    load_mounts_state(instance_dir)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|m| m.host_abs)
-        .collect()
+/// Répertoires hôte des mounts d'une instance et racine autorisée pour `--purge`
+/// (répertoire du Virtumfile enregistré à la création).
+pub fn purge_targets_from_instance(instance_dir: &Path) -> Result<(Vec<PathBuf>, PathBuf)> {
+    let mounts = load_mounts_state(instance_dir)?;
+    let dirs: Vec<PathBuf> = mounts.iter().map(|m| m.host_abs.clone()).collect();
+    let mut roots = mounts.iter().map(|m| m.virtumfile_dir.clone());
+    let root = match roots.next() {
+        None => bail!("--purge : aucun dossier mount enregistré pour cette VM"),
+        Some(first) => first,
+    };
+    let root = match root {
+        Some(r) if mounts.iter().all(|m| m.virtumfile_dir.as_ref() == Some(&r)) => r,
+        _ => bail!(
+            "--purge : répertoire du Virtumfile non enregistré pour cette VM (état antérieur). \
+             Utilisez `virtum down --destroy --purge -f <Virtumfile>`, ou supprimez les dossiers \
+             à la main."
+        ),
+    };
+    Ok((dirs, root))
 }
 
 /// Union des répertoires hôte `mounts:` pour toutes les machines du lab.
@@ -522,37 +709,6 @@ pub fn collect_host_dirs_for_lab(lab: &Virtumfile, virtumfile_dir: &Path) -> Res
         }
     }
     Ok(seen.into_keys().collect())
-}
-
-/// Plus long préfixe commun des chemins mount (répertoire du Virtumfile attendu).
-pub fn infer_mount_purge_root(dirs: &[PathBuf]) -> Result<PathBuf> {
-    let first = dirs
-        .first()
-        .context("--purge : aucun dossier mount enregistré pour cette VM")?;
-    let mut root = if first.is_dir() {
-        first.clone()
-    } else {
-        first
-            .parent()
-            .context("Chemin mount sans répertoire parent")?
-            .to_path_buf()
-    };
-    for dir in dirs.iter().skip(1) {
-        let d = if dir.is_dir() {
-            dir.clone()
-        } else {
-            dir.parent()
-                .context("Chemin mount sans répertoire parent")?
-                .to_path_buf()
-        };
-        while !d.starts_with(&root) {
-            root = root
-                .parent()
-                .context("Impossible de déterminer la racine des mounts")?
-                .to_path_buf();
-        }
-    }
-    Ok(root)
 }
 
 /// Supprime les répertoires hôte déclarés dans `mounts:` (option `--purge` au destroy).
@@ -602,18 +758,18 @@ pub fn teardown_virtiofs(instance_dir: &Path) {
     let mounts = load_mounts_state(instance_dir).unwrap_or_default();
     for mount in &mounts {
         if let Some(pid) = mount.virtiofsd_pid {
-            let _ = stop_virtiofsd_pid(pid);
+            stop_virtiofsd_pid(pid, &mount.socket_path);
         }
-        let _ = std::fs::remove_file(&mount.socket_path);
+        let _ = std::fs::remove_file(socket_path_for(instance_dir, &mount.name));
     }
     let state = instance_dir.join(MOUNTS_STATE_FILE);
     let _ = std::fs::remove_file(state);
-    // Les processus virtiofsd se terminent souvent quand le socket est supprimé ;
-    // sinon l'utilisateur peut les arrêter manuellement.
-    let _ = Command::new("pkill")
-        .args(["-f"])
-        .arg(format!("virtiofsd.*{}", instance_dir.display()))
-        .status();
+    // virtiofsd restants de cette instance (état perdu) : uniquement les nôtres, servant
+    // un socket de ce répertoire (pas de regex `pkill -f` construite depuis un chemin).
+    let needle = format!("{}/virtiofs-", instance_dir.display());
+    for pid in crate::procs::find_matching("virtiofsd", &needle) {
+        crate::procs::signal_if_matches(pid, libc::SIGTERM, "virtiofsd", &needle);
+    }
 }
 
 pub fn mounts_to_instance_specs(mounts: &[ResolvedMount]) -> Vec<MountSpec> {
@@ -763,6 +919,7 @@ mod tests {
             guest_path: "/home/virtum/app".into(),
             socket_path: PathBuf::new(),
             virtiofsd_pid: None,
+            virtumfile_dir: None,
         }];
         let steps = ssh_mount_steps(&mounts);
         assert_eq!(steps.len(), 3);
@@ -804,16 +961,196 @@ mod tests {
         }
     }
 
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("virtum-mount-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    /// Audit : un lien symbolique dans le chemin ne doit rien créer hors du Virtumfile.
     #[test]
-    fn infer_mount_purge_root_common_parent() {
-        let base = std::env::temp_dir().join(format!("virtum-purge-root-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(base.join("common")).unwrap();
-        fs::create_dir_all(base.join("backend")).unwrap();
-        let dirs = vec![base.join("common"), base.join("backend")];
-        let root = infer_mount_purge_root(&dirs).unwrap();
-        assert_eq!(root, base);
-        let _ = fs::remove_dir_all(base);
+    fn resolve_host_symlink_creates_nothing_outside() {
+        let d = scratch("symlink");
+        let proj = d.join("proj");
+        let outside = d.join("outside");
+        fs::create_dir_all(&proj).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, proj.join("link")).unwrap();
+
+        let err = resolve_host_path(&proj, "./link/created-by-virtum").unwrap_err();
+        assert!(format!("{err:#}").contains("lien symbolique"), "{err:#}");
+        assert!(!outside.join("created-by-virtum").exists());
+
+        // Lien vers l'intérieur du projet (ex. data/cache -> ..) : refusé aussi.
+        fs::create_dir_all(proj.join("data")).unwrap();
+        std::os::unix::fs::symlink("..", proj.join("data/cache")).unwrap();
+        assert!(resolve_host_path(&proj, "./data/cache").is_err());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn nested_mounts_are_rejected_but_identical_paths_allowed() {
+        let a = PathBuf::from("/p/data");
+        let b = PathBuf::from("/p/data/cache");
+        assert!(
+            ensure_mounts_not_nested(&[("w/data".into(), a.clone()), ("w/cache".into(), b)])
+                .is_err()
+        );
+        assert!(
+            ensure_mounts_not_nested(&[("w/data".into(), a.clone()), ("db/data".into(), a)])
+                .is_ok()
+        );
+        assert!(ensure_mounts_not_nested(&[
+            ("w/a".into(), PathBuf::from("/p/data")),
+            ("w/b".into(), PathBuf::from("/p/data2")),
+        ])
+        .is_ok());
+    }
+
+    /// Audit : un partage remplacé par un lien symbolique après la création est refusé
+    /// avant de relancer virtiofsd.
+    #[test]
+    fn stored_share_replaced_by_symlink_is_refused() {
+        let d = scratch("swap");
+        let proj = d.join("proj");
+        let outside = d.join("outside_home");
+        fs::create_dir_all(proj.join("data")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let mount = ResolvedMount {
+            name: "data".into(),
+            host: "./data".into(),
+            guest: "~/data".into(),
+            host_abs: proj.join("data"),
+            guest_path: "/home/virtum/data".into(),
+            socket_path: PathBuf::new(),
+            virtiofsd_pid: None,
+            virtumfile_dir: Some(proj.clone()),
+        };
+        validate_stored_share(&mount).unwrap();
+        fs::remove_dir(proj.join("data")).unwrap();
+        std::os::unix::fs::symlink(&outside, proj.join("data")).unwrap();
+        assert!(validate_stored_share(&mount).is_err());
+
+        // Chemin réel mais hors de la racine enregistrée : refusé.
+        let escaped = ResolvedMount {
+            host_abs: outside.clone(),
+            ..mount
+        };
+        assert!(validate_stored_share(&escaped).is_err());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    /// Audit : la racine d'un partage n'est plus accessible aux autres comptes locaux.
+    #[test]
+    fn share_root_loses_other_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("share-mode");
+        let share = d.join("share");
+        fs::create_dir_all(&share).unwrap();
+        fs::set_permissions(&share, fs::Permissions::from_mode(0o2775)).unwrap();
+        restrict_share_root("share", &share).unwrap();
+        let mode = fs::metadata(&share).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o2770);
+        // Idempotent.
+        restrict_share_root("share", &share).unwrap();
+        let _ = fs::remove_dir_all(d);
+    }
+
+    /// Audit : une ACL nommée qui ouvre la traversée du partage fait refuser le partage.
+    #[test]
+    fn share_root_with_named_acl_is_refused() {
+        let d = scratch("share-acl");
+        let share = d.join("share");
+        fs::create_dir_all(&share).unwrap();
+        let ok = std::process::Command::new("setfacl")
+            .args(["-m", "u:65534:x"])
+            .arg(&share)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            let err = restrict_share_root("share", &share).unwrap_err();
+            assert!(format!("{err:#}").contains("ACL"), "{err:#}");
+            // ACL retirée : le partage est accepté.
+            std::process::Command::new("setfacl")
+                .args(["-b"])
+                .arg(&share)
+                .status()
+                .unwrap();
+            restrict_share_root("share", &share).unwrap();
+        }
+        let _ = fs::remove_dir_all(d);
+    }
+
+    /// Audit : l'accès groupe est retiré quand le groupe du dossier contient d'autres comptes.
+    #[test]
+    fn share_root_loses_shared_group_access() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let d = scratch("share-group");
+        let share = d.join("share");
+        fs::create_dir_all(&share).unwrap();
+        // kvm contient souvent libvirt-qemu ; ignoré si on n'en est pas membre.
+        let chgrp_ok = std::process::Command::new("chgrp")
+            .arg("kvm")
+            .arg(&share)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if chgrp_ok {
+            fs::set_permissions(&share, fs::Permissions::from_mode(0o775)).unwrap();
+            let gid = fs::metadata(&share).unwrap().gid();
+            let shared =
+                crate::share_access::group_has_other_members(gid, crate::fsutil::current_uid());
+            restrict_share_root("share", &share).unwrap();
+            let mode = fs::metadata(&share).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, if shared { 0o700 } else { 0o770 });
+        }
+        let _ = fs::remove_dir_all(d);
+    }
+
+    /// Audit : la racine de `--purge` vient de l'état enregistré, pas des chemins eux-mêmes ;
+    /// un état sans racine (ancien) refuse la purge.
+    #[test]
+    fn purge_root_comes_from_recorded_virtumfile_dir() {
+        let d = scratch("purge");
+        let inst = d.join("inst");
+        fs::create_dir_all(&inst).unwrap();
+        let m = |name: &str, root: Option<PathBuf>| ResolvedMount {
+            name: name.into(),
+            host: format!("./{name}"),
+            guest: format!("~/{name}"),
+            host_abs: d.join("proj").join(name),
+            guest_path: format!("/home/virtum/{name}"),
+            socket_path: PathBuf::new(),
+            virtiofsd_pid: None,
+            virtumfile_dir: root,
+        };
+        save_mounts_state(
+            &inst,
+            &[m("a", Some(d.join("proj"))), m("b", Some(d.join("proj")))],
+        )
+        .unwrap();
+        let (dirs, root) = purge_targets_from_instance(&inst).unwrap();
+        assert_eq!(root, d.join("proj"));
+        assert_eq!(dirs.len(), 2);
+        save_mounts_state(&inst, &[m("a", None)]).unwrap();
+        assert!(purge_targets_from_instance(&inst).is_err());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    /// Audit : un nom de volume altéré (saut de ligne) dans mounts-state.json est refusé.
+    #[test]
+    fn tampered_mount_name_in_state_is_rejected() {
+        let d = scratch("names");
+        let state = d.join(MOUNTS_STATE_FILE);
+        fs::write(
+            &state,
+            r#"[{"name":"z\nssh-ed25519 AAAA x","host":"./z","guest":"~/z","host_abs":"/tmp/z","guest_path":"/home/virtum/z","socket_path":""}]"#,
+        )
+        .unwrap();
+        assert!(load_mounts_state(&d).is_err());
+        let _ = fs::remove_dir_all(d);
     }
 
     #[test]

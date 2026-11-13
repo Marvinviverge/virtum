@@ -151,6 +151,21 @@ pub struct MachineDiff {
     pub changes: Vec<MachineChange>,
 }
 
+/// `true` si l'apply ouvre des ports sur le LAN : passage à `bind: lan`, ou ports
+/// ajoutés/modifiés sur une machine en `bind: lan`.
+pub fn diff_exposes_lan(lab: &Virtumfile, machine_diffs: &[MachineDiff]) -> bool {
+    machine_diffs.iter().any(|md| {
+        virtumfile::effective_port_bind(lab, &md.machine_name) == PortBind::Lan
+            && md.changes.iter().any(|c| match c {
+                MachineChange::PortBind {
+                    to: PortBind::Lan, ..
+                } => true,
+                MachineChange::PortForwards { to, .. } => !to.is_empty(),
+                _ => false,
+            })
+    })
+}
+
 /// Machine du lab encore déployée mais absente du Virtumfile (`virtum apply --prune`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Removal {
@@ -506,6 +521,7 @@ pub async fn apply_lab(
     insecure_ssh: bool,
     prune: bool,
     yes: bool,
+    yes_lan: bool,
 ) -> Result<()> {
     let virtumfile_path = virtumfile::resolve_virtumfile_path(file)?;
     let lab = virtumfile::load(&virtumfile_path)?;
@@ -538,6 +554,11 @@ pub async fn apply_lab(
     if prune && !diff.removals.is_empty() && !yes && !confirm_prune(&diff.removals)? {
         println!("Apply annulé : aucune modification.");
         return Ok(());
+    }
+    // Même règle que `virtum up` (V-003) : exposer des ports sur 0.0.0.0 demande une
+    // confirmation interactive ou `--yes-lan`, et est refusé sans terminal.
+    if !yes_lan && diff_exposes_lan(&lab, &diff.machine_diffs) {
+        crate::lab::confirm_lan_deploy()?;
     }
 
     let paths = crate::config::ensure_layout().await?;

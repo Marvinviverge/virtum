@@ -72,17 +72,24 @@ pub struct SshKeyPaths {
 pub fn ensure_ssh_keypair(keys_dir: &Path) -> Result<SshKeyPaths> {
     fs::create_dir_all(keys_dir)
         .with_context(|| format!("Impossible de créer {}", keys_dir.display()))?;
+    restrict_keys_dir(keys_dir)?;
 
     let private_key = keys_dir.join(PRIVATE_KEY_NAME);
     let public_key = keys_dir.join(PUBLIC_KEY_NAME);
 
-    if private_key.is_file() && public_key.is_file() {
+    if let Ok(meta) = fs::symlink_metadata(&private_key) {
+        crate::fsutil::ensure_owned_regular_file(&private_key, &meta)
+            .context("Clé privée Virtum refusée")?;
         restrict_private_key_permissions(&private_key)?;
+        // La clé publique injectée dans les VM est recalculée depuis la clé privée :
+        // un .pub remplacé dans un dossier partagé ne peut pas autoriser une autre clé.
+        sync_public_key_from_private(&private_key, &public_key)?;
         return Ok(SshKeyPaths {
             private_key,
             public_key,
         });
     }
+    let _ = fs::remove_file(&public_key);
 
     let private = private_key.to_string_lossy();
     run_command(
@@ -550,6 +557,54 @@ fn exec_ssh_shell(
         .with_context(|| format!("Impossible d'exécuter ssh vers {target}"))?;
 
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// `keys/` réservé à l'utilisateur (0700) : QEMU n'a jamais besoin des clés.
+fn restrict_keys_dir(keys_dir: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(keys_dir)
+        .with_context(|| format!("Impossible de lire {}", keys_dir.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        anyhow::bail!(
+            "{} doit être un répertoire (pas un lien).",
+            keys_dir.display()
+        );
+    }
+    use std::os::unix::fs::MetadataExt;
+    if meta.uid() == crate::fsutil::current_uid() && meta.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(keys_dir, Permissions::from_mode(0o700))
+            .with_context(|| format!("Impossible de chmod 700 sur {}", keys_dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Réécrit la clé publique à partir de la clé privée (`ssh-keygen -y`) si elle diffère.
+fn sync_public_key_from_private(private_key: &Path, public_key: &Path) -> Result<()> {
+    let output = run_command(
+        "ssh-keygen",
+        &["-y", "-P", "", "-f", crate::command::path_arg(private_key)?],
+    )
+    .context("Impossible de dériver la clé publique Virtum (ssh-keygen -y)")?;
+    let derived = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if derived.is_empty() {
+        anyhow::bail!("ssh-keygen -y n'a renvoyé aucune clé publique.");
+    }
+    let wanted = format!("{derived} virtum\n");
+    let current = fs::symlink_metadata(public_key)
+        .ok()
+        .filter(|m| m.is_file() && !m.file_type().is_symlink())
+        .and_then(|_| fs::read_to_string(public_key).ok());
+    let same_key = current
+        .as_deref()
+        .and_then(|c| c.lines().next())
+        .is_some_and(|line| {
+            line.split_whitespace()
+                .take(2)
+                .eq(derived.split_whitespace().take(2))
+        });
+    if !same_key {
+        crate::fsutil::write_atomic(public_key, wanted.as_bytes(), 0o644)?;
+    }
+    Ok(())
 }
 
 fn restrict_private_key_permissions(private_key: &Path) -> Result<()> {

@@ -111,13 +111,22 @@ fn prepare_home_storage(
         .parent()
         .context("~/.virtum sans répertoire parent")?;
 
-    ensure_others_traverse(home)?;
-    ensure_others_traverse(&paths.root)?;
-    ensure_others_traverse(&paths.images)?;
-    ensure_others_traverse(&paths.instances)?;
-    ensure_others_traverse(instance_dir)?;
+    // Avec setfacl, l'ACL nominative suffit : pas de o+x sur $HOME (sinon tout compte
+    // local pourrait traverser $HOME et atteindre les dossiers partagés). Sans setfacl,
+    // seul o+x permet à libvirt-qemu d'atteindre les disques.
+    if !setfacl_available() {
+        for dir in [
+            home,
+            &paths.root,
+            &paths.images,
+            &paths.instances,
+            instance_dir,
+        ] {
+            ensure_others_traverse(dir)?;
+        }
+    }
 
-    grant_qemu_acl(home, true)?;
+    grant_qemu_traverse_acl(home)?;
     grant_qemu_acl(&paths.root, true)?;
     grant_qemu_acl(&paths.images, true)?;
     grant_qemu_acl(&paths.instances, true)?;
@@ -172,6 +181,23 @@ fn set_group_access(path: &Path, group: &str, is_dir: bool, is_socket: bool) -> 
         return Ok(());
     }
 
+    // Rien à changer : ne pas toucher au fichier (un chgrp/chmod modifie le ctime, utilisé
+    // pour savoir si une image de base doit être revérifiée).
+    let mode = if is_dir {
+        0o1775
+    } else if is_socket {
+        0o660
+    } else {
+        0o664
+    };
+    let current_mode = meta.permissions().mode() & 0o7777;
+    // Une image de base déjà en lecture seule (0444) le reste.
+    let mode_ok =
+        current_mode == mode || (!is_dir && !is_socket && current_mode == BASE_IMAGE_MODE);
+    if group_gid(group) == Some(meta.gid()) && mode_ok {
+        return Ok(());
+    }
+
     run_command("chgrp", &[group, path_arg(path)?]).with_context(|| {
         format!(
             "chgrp {group} a échoué sur {}. \
@@ -180,18 +206,25 @@ fn set_group_access(path: &Path, group: &str, is_dir: bool, is_socket: bool) -> 
         )
     })?;
 
-    let mode = if is_dir {
-        0o775
-    } else if is_socket {
-        0o660
-    } else {
-        0o664
-    };
+    // Répertoires partagés (racine, images, instances) : sticky bit (cf. `mode` ci-dessus),
+    // pour qu'un membre du groupe ne puisse ni renommer ni supprimer les fichiers de
+    // l'utilisateur Virtum.
     let mut perms = meta.permissions();
     perms.set_mode(mode);
     fs::set_permissions(path, perms)
         .with_context(|| format!("Impossible de chmod {mode:o} sur {}", path.display()))?;
     Ok(())
+}
+
+/// Gid d'un groupe système (`getgrnam`).
+fn group_gid(name: &str) -> Option<u32> {
+    let c = std::ffi::CString::new(name).ok()?;
+    let gr = unsafe { libc::getgrnam(c.as_ptr()) };
+    if gr.is_null() {
+        None
+    } else {
+        Some(unsafe { (*gr).gr_gid })
+    }
 }
 
 fn grant_qemu_acl(path: &Path, is_dir: bool) -> Result<()> {
@@ -210,6 +243,17 @@ fn grant_qemu_acl(path: &Path, is_dir: bool) -> Result<()> {
             path.display()
         )
     })?;
+    Ok(())
+}
+
+/// ACL traversée seule (`x`) : libvirt-qemu atteint les chemins sans lister le répertoire.
+fn grant_qemu_traverse_acl(path: &Path) -> Result<()> {
+    if !setfacl_available() {
+        return Ok(());
+    }
+    let spec = format!("u:{LIBVIRT_QEMU_USER}:x");
+    run_command("setfacl", &["-m", &spec, path_arg(path)?])
+        .with_context(|| format!("setfacl {spec} a échoué sur {}.", path.display()))?;
     Ok(())
 }
 
@@ -279,8 +323,7 @@ pub fn prepare_instance_dir_for_virtiofs(instance_dir: &Path) -> Result<()> {
                 ensure_qemu_can_traverse(root)?;
             }
         }
-        set_group_access(instance_dir, KVM_GROUP, true, false)?;
-        ensure_qemu_can_traverse(instance_dir)?;
+        set_private_instance_dir(instance_dir)?;
         return Ok(());
     }
     if instance_dir.is_dir() {
@@ -290,13 +333,85 @@ pub fn prepare_instance_dir_for_virtiofs(instance_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Socket vhost-user (0660, groupe kvm + ACL libvirt-qemu).
+/// Mode du répertoire d'instance en stockage /var/lib : propriétaire rwx, groupe kvm
+/// traversée seule. Personne d'autre ne peut y créer, renommer ou remplacer un fichier
+/// (mounts-state.json, port-forwards.json, config.xml… sont relus par Virtum).
+const INSTANCE_DIR_MODE: u32 = 0o710;
+
+fn set_private_instance_dir(instance_dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = fs::symlink_metadata(instance_dir).with_context(|| {
+        format!(
+            "Impossible de lire les métadonnées de {}",
+            instance_dir.display()
+        )
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        anyhow::bail!(
+            "{} n'est pas un répertoire d'instance valide (lien symbolique ?).",
+            instance_dir.display()
+        );
+    }
+    if meta.uid() != crate::fsutil::current_uid() {
+        anyhow::bail!(
+            "Le répertoire d'instance {} appartient à l'uid {} : refus de l'utiliser.",
+            instance_dir.display(),
+            meta.uid()
+        );
+    }
+    run_command("chgrp", &[KVM_GROUP, path_arg(instance_dir)?]).with_context(|| {
+        format!(
+            "chgrp {KVM_GROUP} a échoué sur {}. Ajoutez-vous au groupe kvm (virtum doctor).",
+            instance_dir.display()
+        )
+    })?;
+    fs::set_permissions(instance_dir, Permissions::from_mode(INSTANCE_DIR_MODE)).with_context(
+        || {
+            format!(
+                "Impossible de chmod {INSTANCE_DIR_MODE:o} sur {}",
+                instance_dir.display()
+            )
+        },
+    )?;
+    // L'ACL nominative (si setfacl existe) recalcule le masque à r-x : libvirt-qemu
+    // traverse ; l'entrée du groupe kvm reste --x ; aucune écriture pour personne d'autre.
+    grant_qemu_acl(instance_dir, true)
+}
+
+/// Socket vhost-user : propriétaire seul + ACL `libvirt-qemu:rw` (QEMU). Sans setfacl,
+/// repli sur le groupe kvm (0660) avec un avertissement.
 pub fn prepare_virtiofs_socket(socket_path: &Path) -> Result<()> {
     if !path_is_socket(socket_path) {
         return Ok(());
     }
-    set_group_access(socket_path, KVM_GROUP, false, true)?;
-    grant_qemu_socket_acl(socket_path)
+    if setfacl_available() {
+        fs::set_permissions(socket_path, Permissions::from_mode(0o600))
+            .with_context(|| format!("Impossible de chmod 600 sur {}", socket_path.display()))?;
+        return grant_qemu_socket_acl(socket_path);
+    }
+    warn_socket_group_fallback_once();
+    set_group_access(socket_path, KVM_GROUP, false, true)
+}
+
+/// `--socket-group` à passer à virtiofsd : seulement sans setfacl (repli groupe kvm).
+pub fn virtiofs_socket_group() -> Option<&'static str> {
+    if setfacl_available() {
+        None
+    } else {
+        Some(KVM_GROUP)
+    }
+}
+
+fn warn_socket_group_fallback_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        crate::verr!(
+            "Avertissement : setfacl absent ; les sockets virtiofs sont ouverts au groupe kvm \
+             (tout membre de kvm peut s'y connecter). Installez le paquet acl."
+        );
+    }
 }
 
 fn path_is_socket(path: &Path) -> bool {
@@ -323,7 +438,7 @@ fn set_base_image_read_only(path: &Path) -> Result<()> {
     let meta = fs::metadata(path)
         .with_context(|| format!("Impossible de lire les métadonnées de {}", path.display()))?;
     let current_uid = unsafe { libc::getuid() };
-    if meta.uid() != current_uid {
+    if meta.uid() != current_uid || meta.permissions().mode() & 0o7777 == BASE_IMAGE_MODE {
         return Ok(());
     }
     let mut perms = meta.permissions();

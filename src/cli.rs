@@ -45,6 +45,9 @@ pub enum Commands {
         /// Avec `--prune` : pas de confirmation interactive (scripts / CI)
         #[arg(short, long, requires = "prune")]
         yes: bool,
+        /// Confirme l'exposition `bind: lan` (0.0.0.0) sans invite interactive (CI / scripts).
+        #[arg(long)]
+        yes_lan: bool,
     },
     /// Print an Ansible inventory for the running machines of a lab (v0.8)
     Inventory {

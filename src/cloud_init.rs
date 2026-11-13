@@ -308,6 +308,7 @@ mod tests {
             guest_path: "/home/virtum/app".into(),
             socket_path: dir.join("virtiofs-app.sock"),
             virtiofsd_pid: None,
+            virtumfile_dir: None,
         }];
         write_user_data(
             &dir,

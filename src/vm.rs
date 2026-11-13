@@ -1,6 +1,6 @@
 //! VM lifecycle orchestration (steps 15–20).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -936,6 +936,9 @@ fn dhcp_lease_mac_matches(leases: &str, ip: &str, mac: &str) -> bool {
 const LIBVIRT_DEFAULT_SUBNET: &str = "192.168.122.";
 
 fn is_usable_ssh_ip(ip: &str, bridge_lan: bool) -> bool {
+    if ip.parse::<std::net::Ipv4Addr>().is_err() {
+        return false;
+    }
     if ip.starts_with("127.")
         || ip == libvirt::SLIRP_GUEST_IPV4
         || ip == "0.0.0.0"
@@ -1353,7 +1356,7 @@ pub fn destroy_vm(reference: &str, purge_mounts: bool) -> Result<()> {
 pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()> {
     let paths = config::ensure_layout().await?;
     let (vm_id, orphan) = resolve_destroy_target(&paths, reference).await?;
-    let instance_dir = paths.instances.join(&vm_id);
+    let instance_dir = instance_dir_for(&paths, &vm_id)?;
 
     if orphan {
         crate::verr!("Domaine Virtum orphelin (libvirt sans entrée metadata.json) : {vm_id}");
@@ -1381,10 +1384,12 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
         crate::verr!("Avertissement: le domaine libvirt '{vm_id}' est déjà absent.");
     }
 
-    let purge_dirs = if purge_mounts && instance_dir.is_dir() {
-        mounts::host_dirs_from_instance(&instance_dir)
+    // Racine autorisée = répertoire du Virtumfile enregistré à la création (pas déduite
+    // des chemins eux-mêmes) ; calculée avant de supprimer quoi que ce soit.
+    let purge_plan = if purge_mounts && instance_dir.is_dir() {
+        Some(mounts::purge_targets_from_instance(&instance_dir)?)
     } else {
-        Vec::new()
+        None
     };
 
     if let Some((net, mac)) = lab_reservation {
@@ -1402,8 +1407,7 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
             .with_context(|| format!("Impossible de supprimer {}", instance_dir.display()))?;
     }
 
-    if purge_mounts && !purge_dirs.is_empty() {
-        let root = mounts::infer_mount_purge_root(&purge_dirs)?;
+    if let Some((purge_dirs, root)) = purge_plan {
         let n = mounts::purge_host_mount_dirs(&purge_dirs, &root)?;
         if n == 0 {
             crate::verr!("Avertissement: --purge n'a supprimé aucun dossier (déjà absents).");
@@ -1444,6 +1448,21 @@ async fn resolve_destroy_target(paths: &VirtumPaths, reference: &str) -> Result<
          `virtum destroy vm-…` si un déploiement a échoué à mi-chemin, ou relancez `virtum up` \
          (les répertoires orphelins sont nettoyés automatiquement)."
     );
+}
+
+/// Répertoire d'instance pour un id venant de metadata.json ou de la CLI : un seul
+/// composant de chemin (pas de `/`, ni `.`/`..`), sinon refus.
+pub fn instance_dir_for(paths: &VirtumPaths, vm_id: &str) -> Result<PathBuf> {
+    let valid = !vm_id.is_empty()
+        && vm_id != "."
+        && vm_id != ".."
+        && vm_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        bail!("Identifiant d'instance invalide dans metadata.json : '{vm_id}'.");
+    }
+    Ok(paths.instances.join(vm_id))
 }
 
 /// Id libvirt généré par Virtum (`vm-` + 12 hex).
@@ -1578,6 +1597,11 @@ mod tests {
         assert!(!is_usable_ssh_ip("192.168.122.45", true));
         assert!(!is_usable_ssh_ip("127.0.0.1", false));
         assert!(!is_usable_ssh_ip("10.0.2.15", false));
+        // Audit : une « IP » de l'agent invité qui casserait l'inventaire Ansible.
+        assert!(!is_usable_ssh_ip(
+            "192.168.1.50' ansible_connection='local",
+            true
+        ));
     }
 
     #[test]

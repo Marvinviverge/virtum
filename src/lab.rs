@@ -110,7 +110,25 @@ async fn up_async(
         }
         let instance_dir = paths.instances.join(&vm_id);
         let orphan_instance = instance_dir.join("disk.qcow2").is_file();
-        if domain_exists(&vm_id) || orphan_instance {
+        let domain = domain_exists(&vm_id);
+        if domain && !orphan_instance {
+            // Domaine absent de notre metadata et sans disque dans notre état : il peut
+            // appartenir à un autre utilisateur du même libvirt (même nom de lab).
+            match crate::ownership::domain_owner(&vm_id) {
+                crate::ownership::Owner::Us => {}
+                other => bail!(
+                    "Le domaine libvirt {vm_id} ('{}' / '{machine_name}') existe déjà mais \
+                     n'appartient pas à cet état Virtum{}. Refus de le supprimer : renommez le lab \
+                     (`name:`) ou, s'il est bien à vous, `virtum destroy {vm_id}`.",
+                    lab.name,
+                    match other {
+                        crate::ownership::Owner::Other(id) => format!(" (propriétaire : {id})"),
+                        _ => String::new(),
+                    }
+                ),
+            }
+        }
+        if domain || orphan_instance {
             crate::verr!("Nettoyage avant déploiement de '{machine_name}' ({vm_id})…");
             cleanup_failed_run(&vm_id, &instance_dir).await;
         }
@@ -675,7 +693,7 @@ async fn take_provision_snapshot(
     Ok(())
 }
 
-fn confirm_lan_deploy() -> Result<()> {
+pub(crate) fn confirm_lan_deploy() -> Result<()> {
     use std::io::{self, IsTerminal, Write};
 
     if !io::stdin().is_terminal() {

@@ -13,7 +13,14 @@ ROOT="/var/lib/virtum"
 
 mkdir -p "$ROOT/images" "$ROOT/instances" "$ROOT/keys"
 chown -R "$USER_NAME:$GROUP" "$ROOT"
-chmod -R u=rwX,g=rwX,o= "$ROOT"
+# Répertoires partagés avec le groupe libvirt : sticky bit, pour qu'un membre du groupe ne
+# puisse ni renommer ni remplacer les fichiers de l'utilisateur (images, état).
+# Pas de chmod récursif : les répertoires d'instance gardent leurs droits restreints.
+chmod 1770 "$ROOT" "$ROOT/images" "$ROOT/instances"
+# Clés SSH : propriétaire seul (QEMU n'en a pas besoin).
+chmod 700 "$ROOT/keys"
+find "$ROOT/keys" -type f -name '*.pub' -exec chmod 644 {} +
+find "$ROOT/keys" -type f ! -name '*.pub' -exec chmod 600 {} +
 
 LEGACY_IMAGE="/home/$USER_NAME/.virtum/images/debian-12.qcow2"
 if [[ -f "$LEGACY_IMAGE" && ! -f "$ROOT/images/debian-12.qcow2" ]]; then

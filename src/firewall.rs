@@ -180,18 +180,14 @@ fn save_firewall_state(
     };
     let path = firewall_state_path(paths, lab_name);
     let content = serde_json::to_string_pretty(&state).context("sérialisation pare-feu")?;
-    std::fs::write(&path, format!("{content}\n"))
-        .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
-    Ok(())
+    crate::fsutil::write_atomic(&path, format!("{content}\n").as_bytes(), 0o644)
 }
 
 fn load_firewall_state(paths: &VirtumPaths, lab_name: &str) -> Result<Option<LabFirewallState>> {
     let path = firewall_state_path(paths, lab_name);
-    if !path.is_file() {
+    let Some(content) = crate::fsutil::read_owned(&path)? else {
         return Ok(None);
-    }
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("Impossible de lire {}", path.display()))?;
+    };
     let state: LabFirewallState = serde_json::from_str(&content)
         .with_context(|| format!("État pare-feu invalide: {}", path.display()))?;
     Ok(Some(state))

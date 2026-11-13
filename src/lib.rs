@@ -8,6 +8,7 @@ pub mod config;
 pub mod disk;
 pub mod doctor;
 pub mod firewall;
+pub mod fsutil;
 pub mod images;
 pub mod inventory;
 pub mod lab;
@@ -18,10 +19,13 @@ pub mod libvirt_access;
 pub mod metadata;
 pub mod mounts;
 pub mod output;
+pub mod ownership;
 pub mod parallel;
 pub mod plan;
 pub mod port_forward;
+pub mod procs;
 pub mod ps;
+pub mod share_access;
 pub mod snapshot;
 pub mod ssh;
 pub mod test_env;
@@ -65,7 +69,8 @@ fn dispatch(command: Commands) -> Result<()> {
             insecure_ssh,
             prune,
             yes,
-        } => apply::apply(file, insecure_ssh, prune, yes)?,
+            yes_lan,
+        } => apply::apply(file, insecure_ssh, prune, yes, yes_lan)?,
         Commands::Up {
             file,
             yes_lan,

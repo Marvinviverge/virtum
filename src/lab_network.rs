@@ -125,13 +125,14 @@ pub fn generate_lab_network_xml(lab_name: &str, subnet: LabSubnet) -> Result<Str
     let range_start = subnet.host(2);
     let range_end = subnet.host(254);
 
+    let owner = crate::ownership::metadata_xml("  ");
     // dnsmasq (v0.9) : `no-ping` — pas de ping de 3 s avant d'attribuer une adresse ;
     // `dhcp-ignore-clid` — baux indexés par la seule MAC : une VM recréée (MAC stable,
     // nouvel identifiant client) retrouve son adresse au lieu d'en prendre une autre.
     Ok(format!(
         r#"<network xmlns:dnsmasq='{DNSMASQ_NS}'>
   <name>{net_name}</name>
-  <forward mode='nat'/>
+{owner}  <forward mode='nat'/>
   <bridge name='{bridge}' stp='on' delay='0'/>
   <domain name='{net_name}'/>
   <ip address='{gateway}' netmask='{netmask}'>
@@ -231,7 +232,23 @@ pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool)
         }
         // Sans VM, le réseau est recréé (sous-réseau changé ou réglages DHCP d'avant la
         // v0.9) ; avec des VM, un réseau sans réglages DHCP reste tel quel.
-        if can_recreate && (subnet_differs || !has_dhcp_tuning(&xml)) {
+        // Réseau partagé sur qemu:///system : ne recréer qu'un réseau marqué par ce Virtum,
+        // ou un réseau non marqué (créé avant le marqueur) qu'aucune VM n'utilise.
+        let ours = match crate::ownership::network_owner(&net_name) {
+            crate::ownership::Owner::Us => true,
+            crate::ownership::Owner::Other(_) => false,
+            crate::ownership::Owner::Unknown => {
+                !crate::ownership::network_has_attached_domains(&net_name)
+            }
+        };
+        if can_recreate && !ours && subnet_differs {
+            bail!(
+                "Le réseau {net_name} existe déjà (autre utilisateur ou VM attachées) avec un autre \
+                 sous-réseau : refus de le recréer. Renommez le lab (`name:`) ou supprimez ce \
+                 réseau explicitement."
+            );
+        }
+        if can_recreate && ours && (subnet_differs || !has_dhcp_tuning(&xml)) {
             let why = if subnet_differs {
                 "sous-réseau changé"
             } else {
@@ -250,9 +267,12 @@ pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool)
 
     if !net_is_defined(&net_name)? {
         let xml = generate_lab_network_xml(lab_name, subnet)?;
-        let tmp = std::env::temp_dir().join(format!("{net_name}.xml"));
-        std::fs::write(&tmp, &xml)
-            .with_context(|| format!("Impossible d'écrire {}", tmp.display()))?;
+        // Fichier temporaire au nom imprévisible, créé en exclusif (pas de lien suivi).
+        let tmp = crate::fsutil::write_new_temp(
+            &std::env::temp_dir(),
+            &format!("virtum-{net_name}"),
+            xml.as_bytes(),
+        )?;
         run_virsh(&["net-define", path_arg(&tmp)?]).with_context(|| {
             format!(
                 "virsh net-define a échoué pour le réseau '{net_name}'. \
@@ -439,12 +459,17 @@ pub struct DhcpHost {
 
 impl DhcpHost {
     fn to_xml(&self) -> String {
+        use crate::libvirt::xml_escape;
         let name = self
             .name
             .as_deref()
-            .map(|n| format!(" name='{n}'"))
+            .map(|n| format!(" name='{}'", xml_escape(n)))
             .unwrap_or_default();
-        format!("<host mac='{}'{name} ip='{}'/>", self.mac, self.ip)
+        format!(
+            "<host mac='{}'{name} ip='{}'/>",
+            xml_escape(&self.mac),
+            xml_escape(&self.ip)
+        )
     }
 }
 

@@ -1,4 +1,4 @@
-# cargo-audit ignore list (Virtum v0.5)
+# cargo-audit ignore list (Virtum v0.5) — lu automatiquement par `cargo audit`
 # Document accepted advisories here: https://rustsec.org/advisories/
 #
 # Example:

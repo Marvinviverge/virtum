@@ -151,7 +151,7 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
     Ok(format!(
         r#"<domain type='kvm'>
   <name>{name}</name>
-  <memory unit='MiB'>{ram}</memory>
+{owner}  <memory unit='MiB'>{ram}</memory>
   <vcpu>{vcpus}</vcpu>
 {seclabel}{memory_backing}  <os>
     <type arch='x86_64' machine='{machine}'>hvm</type>
@@ -196,6 +196,7 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
         ram = spec.ram_mb,
         vcpus = spec.vcpus,
         seclabel = seclabel,
+        owner = crate::ownership::metadata_xml("  "),
         memory_backing = memory_backing,
         machine = QEMU_MACHINE,
         disk = xml_escape(&disk),
@@ -432,8 +433,9 @@ fn xml_attribute_value(line: &str, attr: &str) -> Option<String> {
 pub fn write_domain_xml(instance_dir: &Path, spec: &DomainSpec<'_>) -> Result<PathBuf> {
     let xml = generate_domain_xml(spec)?;
     let xml_path = instance_dir.join("config.xml");
-    std::fs::write(&xml_path, xml)
-        .with_context(|| format!("Impossible d'écrire {}", xml_path.display()))?;
+    // Atomique et sans suivre de lien : un config.xml remplacé par un lien symbolique ne
+    // peut pas rediriger l'écriture vers un autre fichier de l'utilisateur.
+    crate::fsutil::write_atomic(&xml_path, xml.as_bytes(), 0o644)?;
     Ok(xml_path)
 }
 
@@ -842,7 +844,13 @@ pub fn parse_all_ipv4_from_guest_agent_json(raw: &str) -> Vec<String> {
             if addr.get("ip-address-type").and_then(|t| t.as_str()) != Some("ipv4") {
                 continue;
             }
-            if let Some(ip) = addr.get("ip-address").and_then(|i| i.as_str()) {
+            // Réponse fournie par l'invité (root) : n'accepter qu'une IPv4 stricte, rendue
+            // sous forme canonique (elle finit dans metadata.json et l'inventaire Ansible).
+            if let Some(ip) = addr
+                .get("ip-address")
+                .and_then(|i| i.as_str())
+                .and_then(|i| i.parse::<std::net::Ipv4Addr>().ok())
+            {
                 ips.push(ip.to_string());
             }
         }
@@ -922,7 +930,10 @@ fn ipv4_prefix_three_octets(ip: &str) -> Option<String> {
 }
 
 fn is_usable_guest_ipv4(ip: &str) -> bool {
-    !ip.starts_with("127.") && !ip.starts_with("169.254.") && ip != "0.0.0.0"
+    ip.parse::<std::net::Ipv4Addr>().is_ok()
+        && !ip.starts_with("127.")
+        && !ip.starts_with("169.254.")
+        && ip != "0.0.0.0"
 }
 
 pub fn parse_mac_from_domiflist(output: &str) -> Option<String> {
@@ -987,13 +998,16 @@ fn absolute_path(path: &Path) -> Result<String> {
     Ok(abs.display().to_string())
 }
 
-fn xml_escape(value: &str) -> String {
+pub(crate) fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('\'', "&apos;")
         .replace('"', "&quot;")
+        .replace('\n', "&#10;")
+        .replace('\r', "&#13;")
+        .replace('\t', "&#9;")
 }
 
 #[cfg(test)]
@@ -1282,5 +1296,24 @@ mod tests {
         assert!(xml.contains("<source type='memfd'/>"));
         assert!(xml.contains("seclabel type='none'"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Audit : une adresse fournie par l'agent invité qui n'est pas une IPv4 stricte est
+    /// ignorée (elle finirait dans l'inventaire Ansible).
+    #[test]
+    fn guest_agent_ip_must_be_strict_ipv4() {
+        let raw = r#"{"return":[{"name":"eth1","ip-addresses":[
+            {"ip-address-type":"ipv4","ip-address":"192.168.1.50' ansible_connection='local"},
+            {"ip-address-type":"ipv4","ip-address":"192.168.1.51"}]}]}"#;
+        assert_eq!(
+            parse_all_ipv4_from_guest_agent_json(raw),
+            vec!["192.168.1.51"]
+        );
+        assert!(!is_usable_guest_ipv4("10.0.0.1 x"));
+    }
+
+    #[test]
+    fn xml_escape_encodes_line_breaks() {
+        assert_eq!(xml_escape("a\nb\r\tc"), "a&#10;b&#13;&#9;c");
     }
 }

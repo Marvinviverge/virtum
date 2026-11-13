@@ -98,7 +98,14 @@ pub async fn save_metadata_atomic(path: &Path, metadata: &Metadata) -> Result<()
     let content =
         serde_json::to_string_pretty(metadata).context("Impossible de sérialiser metadata.json")?;
 
-    let mut file = fs::File::create(&tmp_path)
+    // Pas de suivi de lien : un `.tmp` remplacé par un lien ne redirige pas l'écriture.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp_path)
         .await
         .with_context(|| format!("Impossible de créer {}", tmp_path.display()))?;
     file.write_all(format!("{content}\n").as_bytes()).await?;
@@ -141,6 +148,9 @@ fn find_by_name<'a>(metadata: &'a Metadata, name: &str) -> Option<&'a Instance> 
 /// Valide un nom utilisateur (`db`, `web`, …).
 pub fn validate_name(name: &str) -> Result<()> {
     let n = name.trim();
+    if n != name {
+        bail!("Le nom '{name}' ne doit pas commencer ni finir par un espace ou un saut de ligne.");
+    }
     if n.is_empty() {
         bail!("Le nom de VM ne peut pas être vide.");
     }

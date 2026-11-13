@@ -36,10 +36,10 @@ fmt:
 clippy:
 	$(CARGO) clippy -- -D warnings
 
-## cargo audit (ignore via .audit.toml) — warn si binaire absent
+## cargo audit (ignores via .cargo/audit.toml, lu automatiquement) — warn si binaire absent
 audit:
 	@if command -v cargo-audit >/dev/null 2>&1; then \
-		cargo audit --file .audit.toml; \
+		cargo audit; \
 	else \
 		echo "Avertissement: cargo-audit absent — installez-le pour le scan RustSec (cargo install cargo-audit)."; \
 	fi

@@ -90,7 +90,7 @@ pub async fn pull_image(os: &str, images_dir: &Path) -> Result<PathBuf> {
     let image = resolve_image(os, images_dir)?;
     if fs::try_exists(&image.local_path).await? {
         set_libvirt_image_access(&image.local_path).await?;
-        validate_base_image(&image.local_path).await?;
+        validate_base_image(&image).await?;
         crate::verr!(
             "Image {} déjà en cache: {}",
             image.os,
@@ -105,7 +105,7 @@ pub async fn pull_image(os: &str, images_dir: &Path) -> Result<PathBuf> {
 pub async fn ensure_image(image: &ResolvedImage) -> Result<PathBuf> {
     if fs::try_exists(&image.local_path).await? {
         set_libvirt_image_access(&image.local_path).await?;
-        validate_base_image(&image.local_path).await?;
+        validate_base_image(image).await?;
         return Ok(image.local_path.clone());
     }
     ensure_image_download(image).await
@@ -143,7 +143,7 @@ async fn ensure_image_download(image: &ResolvedImage) -> Result<PathBuf> {
         })?;
 
     set_libvirt_image_access(&image.local_path).await?;
-    validate_base_image(&image.local_path).await?;
+    record_verified(image)?;
 
     crate::verr!(
         "Image {} installée: {}",
@@ -165,7 +165,13 @@ async fn download_and_verify(image: &ResolvedImage, dest: &Path) -> Result<()> {
         );
     }
 
-    let mut file = fs::File::create(dest)
+    // Nouveau fichier uniquement, sans suivre de lien planté à cet emplacement.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dest)
         .await
         .with_context(|| format!("Impossible de créer {}", dest.display()))?;
     let mut hasher: Box<dyn DynDigest> = match image.algo {
@@ -245,8 +251,121 @@ async fn validate_qcow2_with_qemu_img(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn validate_base_image(path: &Path) -> Result<()> {
-    validate_qcow2_with_qemu_img(path).await
+/// Image en cache réutilisée sans retéléchargement.
+///
+/// Le condensat épinglé n'est vérifié qu'au téléchargement ; ensuite l'image peut changer
+/// de propriétaire (libvirt `dynamic_ownership` la passe souvent à `libvirt-qemu:kvm` en
+/// 0664) et donc devenir modifiable par d'autres. Avant chaque réemploi :
+/// - fichier régulier (pas un lien), format qcow2, **sans** fichier de base ;
+/// - si inode, taille, mtime ou ctime ont changé depuis la dernière vérification (tampon
+///   dans un fichier de l'utilisateur), le condensat épinglé est recalculé.
+async fn validate_base_image(image: &ResolvedImage) -> Result<()> {
+    let path = &image.local_path;
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Impossible de lire {}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        bail!(
+            "L'image en cache {} n'est pas un fichier régulier. Supprimez-la puis relancez \
+             `virtum pull`.",
+            path.display()
+        );
+    }
+    let output = run_command("qemu-img", &["info", "-U", crate::command::path_arg(path)?])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains("file format: qcow2") {
+        bail!(
+            "qemu-img info n'a pas confirmé le format qcow2 pour {}",
+            path.display()
+        );
+    }
+    if stdout
+        .lines()
+        .any(|l| l.trim_start().starts_with("backing file:"))
+    {
+        bail!(
+            "L'image en cache {} déclare un fichier de base qcow2 : refusée. Supprimez-la puis \
+             relancez `virtum pull`.",
+            path.display()
+        );
+    }
+    if stamp_matches(image, &meta) {
+        return Ok(());
+    }
+    crate::verr!(
+        "Vérification du condensat de l'image {} (modifiée depuis la dernière vérification)…",
+        image.os
+    );
+    let (algo, expected) = (image.algo, image.digest);
+    let p = path.clone();
+    let digest = tokio::task::spawn_blocking(move || hash_file(&p, algo))
+        .await
+        .context("spawn_blocking hash image")??;
+    if digest != expected {
+        bail!(
+            "L'image en cache {} ne correspond plus au condensat épinglé (modifiée ?).\n\
+             attendu: {expected}\nobtenu:  {digest}\n\
+             Supprimez-la puis relancez `virtum pull`.",
+            path.display()
+        );
+    }
+    record_verified(image)
+}
+
+/// Tampon de vérification : fichier de l'utilisateur à côté des images.
+fn stamp_path(image: &ResolvedImage) -> PathBuf {
+    image
+        .local_path
+        .with_file_name(format!(".{}.verified.json", image.os))
+}
+
+fn stamp_of(meta: &std::fs::Metadata, digest: &str) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!(
+        "{}:{}:{}:{}.{}:{}.{}:{digest}",
+        meta.dev(),
+        meta.ino(),
+        meta.size(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec()
+    )
+}
+
+fn stamp_matches(image: &ResolvedImage, meta: &std::fs::Metadata) -> bool {
+    crate::fsutil::read_owned(&stamp_path(image))
+        .ok()
+        .flatten()
+        .is_some_and(|s| s.trim() == stamp_of(meta, image.digest))
+}
+
+fn record_verified(image: &ResolvedImage) -> Result<()> {
+    let meta = std::fs::symlink_metadata(&image.local_path)
+        .with_context(|| format!("Impossible de lire {}", image.local_path.display()))?;
+    crate::fsutil::write_atomic(
+        &stamp_path(image),
+        format!("{}\n", stamp_of(&meta, image.digest)).as_bytes(),
+        0o644,
+    )
+}
+
+fn hash_file(path: &Path, algo: DigestAlgo) -> Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("Impossible d'ouvrir {}", path.display()))?;
+    let mut hasher: Box<dyn DynDigest> = match algo {
+        DigestAlgo::Sha512 => Box::new(Sha512::new()),
+        DigestAlgo::Sha256 => Box::new(Sha256::new()),
+    };
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize_hex())
 }
 
 /// Base image readable by the system libvirt QEMU user (group `libvirt`, mode 664).

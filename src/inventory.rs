@@ -106,13 +106,28 @@ pub fn build(
     )
 }
 
-/// Valeur INI : entre apostrophes si elle contient un blanc (parseur shlex d'Ansible).
+/// Valeur INI d'une variable d'hôte (Ansible découpe la ligne avec shlex).
+///
+/// Une valeur ne doit jamais pouvoir ajouter une autre variable (`x' ansible_connection='local`)
+/// ni couper la ligne : les caractères de contrôle sont remplacés, et une valeur contenant
+/// une apostrophe est mise entre guillemets doubles avec échappement.
 fn ini_value(value: &str) -> String {
-    if value.chars().any(char::is_whitespace) || value.contains('"') {
-        format!("'{value}'")
-    } else {
-        value.to_string()
+    let value: String = value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let needs_quotes = value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '#' | ';'));
+    if !needs_quotes {
+        return value;
     }
+    if !value.contains('\'') {
+        return format!("'{value}'");
+    }
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 pub fn render_ini(inv: &Inventory) -> String {
@@ -227,14 +242,7 @@ pub async fn lab_inventory(
 
 /// Écrit un fichier de façon atomique (temporaire + renommage), droits 0644.
 pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let tmp = path.with_extension("tmp-virtum");
-    std::fs::write(&tmp, content)
-        .with_context(|| format!("Impossible d'écrire {}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("Impossible de remplacer {}", path.display()))?;
-    Ok(())
+    crate::fsutil::write_atomic(path, content.as_bytes(), 0o644)
 }
 
 pub fn inventory(
@@ -277,6 +285,22 @@ pub fn inventory(
 
 #[cfg(test)]
 mod tests {
+    /// Audit : une valeur ne peut ni fermer sa citation ni couper la ligne.
+    #[test]
+    fn ini_value_cannot_break_out() {
+        assert_eq!(ini_value("192.168.1.5"), "192.168.1.5");
+        assert_eq!(ini_value("a b"), "'a b'");
+        assert_eq!(
+            ini_value("10.9.9.9' ansible_connection='local"),
+            "\"10.9.9.9' ansible_connection='local\""
+        );
+        assert_eq!(
+            ini_value("x\nansible_connection=local"),
+            "'x ansible_connection=local'"
+        );
+        assert_eq!(ini_value(r#"a"b'c"#), r#""a\"b'c""#);
+    }
+
     use super::*;
 
     fn fixture() -> (Virtumfile, Metadata, VirtumPaths) {

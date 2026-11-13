@@ -534,7 +534,7 @@ fn collect_bind_lan_warnings(
     );
     warnings.push(
         "Sécurité réseau : bind: lan expose les ports mappés sur toutes les interfaces (0.0.0.0) \
-         — accessible depuis le réseau local. `virtum up` demandera une confirmation."
+         — accessible depuis le réseau local. `virtum up` et `virtum apply` demanderont une confirmation (ou --yes-lan)."
             .to_string(),
     );
 

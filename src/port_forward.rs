@@ -180,54 +180,108 @@ pub fn start_instance_proxies(
 
     let path = pid_file(instance_dir);
     let content = serde_json::to_string_pretty(&records).context("sérialisation port-forwards")?;
-    std::fs::write(&path, format!("{content}\n"))
-        .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
+    crate::fsutil::write_atomic(&path, format!("{content}\n").as_bytes(), 0o644)?;
     Ok(())
 }
 
+/// Lance socat sur un port déjà lié par Virtum.
+///
+/// Virtum lie lui-même le port (`TcpListener`) puis transmet le socket à socat
+/// (`ACCEPT-FD:3`) : le port n'est jamais libre entre la vérification et l'écoute, donc un
+/// autre utilisateur local ne peut pas s'y glisser. socat qui s'arrête tout de suite fait
+/// échouer la commande au lieu d'annoncer une redirection morte.
 fn spawn_socat_forward(guest_ip: &str, pf: PortForward, bind: PortBind) -> Result<u32> {
+    use std::net::TcpListener;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
     let listen_addr = listen_bind_address(bind);
-    let listen = format!(
-        "TCP-LISTEN:{},bind={listen_addr},reuseaddr,fork",
-        pf.host_port
-    );
+    let listener = TcpListener::bind((listen_addr, pf.host_port)).with_context(|| {
+        format!(
+            "Le port hôte {} est déjà utilisé sur {listen_addr}. \
+             Choisissez un autre port dans le Virtumfile ou arrêtez le processus qui l'occupe.",
+            pf.host_port
+        )
+    })?;
+    let fd = listener.as_raw_fd();
     let target = format!("TCP:{guest_ip}:{}", pf.guest_port);
-    let child = Command::new("socat")
-        .arg(&listen)
+    let mut cmd = Command::new("socat");
+    cmd.arg(format!("ACCEPT-FD:{SOCAT_LISTEN_FD},fork"))
         .arg(&target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "Impossible de lancer socat pour {listen_addr}:{} → {guest_ip}:{}",
-                pf.host_port, pf.guest_port
-            )
-        })?;
+        .stderr(Stdio::null());
+    unsafe {
+        cmd.pre_exec(move || {
+            // Le socket devient le descripteur 3 de socat, sans FD_CLOEXEC.
+            if fd == SOCAT_LISTEN_FD {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(fd, SOCAT_LISTEN_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().with_context(|| {
+        format!(
+            "Impossible de lancer socat pour {listen_addr}:{} → {guest_ip}:{}",
+            pf.host_port, pf.guest_port
+        )
+    })?;
+    // socat détient maintenant le socket ; Virtum peut fermer sa copie.
+    drop(listener);
+
+    let deadline = std::time::Instant::now() + SOCAT_STARTUP_CHECK;
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = child.try_wait().context("Impossible de suivre socat")? {
+            bail!(
+                "socat s'est arrêté au démarrage ({status}) pour {listen_addr}:{} → {guest_ip}:{}. \
+                 Vérifiez que socat ≥ 1.7.4 est installé (ACCEPT-FD).",
+                pf.host_port,
+                pf.guest_port
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     Ok(child.id())
 }
 
+/// Descripteur sur lequel socat reçoit le socket d'écoute.
+const SOCAT_LISTEN_FD: i32 = 3;
+/// Délai pendant lequel un arrêt immédiat de socat est détecté.
+const SOCAT_STARTUP_CHECK: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Arrête les processus socat enregistrés pour cette instance.
+///
+/// Un PID n'est signalé que s'il s'agit bien d'un socat de l'utilisateur courant vers le
+/// port invité enregistré (PID réutilisé ou fichier altéré : ignoré).
 pub fn stop_instance_proxies(instance_dir: &Path) {
     let path = pid_file(instance_dir);
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    if let Ok(records) = serde_json::from_str::<Vec<ForwardPid>>(&content) {
-        for record in records {
-            signal_pid(record.pid);
+    if let Ok(Some(content)) = crate::fsutil::read_owned(&path) {
+        if let Ok(records) = serde_json::from_str::<Vec<ForwardPid>>(&content) {
+            for record in records {
+                let needle = format!(":{}", record.guest_port);
+                if crate::procs::signal_if_matches(record.pid, libc::SIGTERM, "socat", &needle) {
+                    wait_for_exit(record.pid);
+                }
+            }
         }
     }
     let _ = std::fs::remove_file(&path);
 }
 
-fn signal_pid(pid: u32) {
-    let _ = Command::new("kill")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+/// Attend brièvement la fin d'un socat signalé (le port est libéré pour la relance).
+fn wait_for_exit(pid: u32) {
+    for _ in 0..50 {
+        if !crate::procs::alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 pub fn format_forward_list(forwards: &[PortForward], bind: PortBind) -> String {
@@ -309,6 +363,41 @@ pub fn ensure_forwards_match_existing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn socat_installed() -> bool {
+        Command::new("socat").arg("-V").output().is_ok()
+    }
+
+    /// Audit : le port n'est jamais libre entre la vérification et l'écoute de socat, et
+    /// un port déjà pris fait échouer le lancement au lieu d'annoncer une redirection morte.
+    #[test]
+    fn socat_inherits_bound_port_and_refuses_taken_port() {
+        if !socat_installed() {
+            return;
+        }
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let pf = PortForward {
+            host_port: port,
+            guest_port: 9,
+        };
+        let pid = spawn_socat_forward("127.0.0.1", pf, PortBind::Local).unwrap();
+        // Le port est tenu par socat : un autre bind échoue.
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+        assert!(crate::procs::process_matches(pid, "socat", ":9"));
+        assert!(crate::procs::signal_if_matches(
+            pid,
+            libc::SIGTERM,
+            "socat",
+            ":9"
+        ));
+        wait_for_exit(pid);
+
+        let squatter = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        assert!(spawn_socat_forward("127.0.0.1", pf, PortBind::Local).is_err());
+        drop(squatter);
+    }
 
     #[test]
     fn listen_bind_address_local_and_lan() {

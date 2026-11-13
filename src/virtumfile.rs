@@ -566,6 +566,7 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
     }
 
     let mut port_machines: Vec<(String, Vec<PortForward>)> = Vec::new();
+    let mut lab_mounts: Vec<(String, std::path::PathBuf)> = Vec::new();
     for (machine_name, spec) in &lab.machines {
         validate_name(machine_name)
             .with_context(|| format!("Nom de machine '{machine_name}' invalide"))?;
@@ -606,9 +607,16 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
             });
         }
         port_machines.push((machine_name.clone(), forwards));
-        mounts::resolve_machine_mounts(lab, machine_name, virtumfile_dir)
+        let resolved = mounts::resolve_machine_mounts(lab, machine_name, virtumfile_dir)
             .with_context(|| format!("Machine '{machine_name}' : mounts invalides"))?;
+        lab_mounts.extend(
+            resolved
+                .into_iter()
+                .map(|m| (format!("{machine_name}/{}", m.name), m.host_abs)),
+        );
     }
+    // Entre machines aussi : le partage d'une machine ne doit pas contenir celui d'une autre.
+    mounts::ensure_mounts_not_nested(&lab_mounts)?;
     port_forward::validate_lab_port_uniqueness(&port_machines)?;
     validate_subnet(lab)?;
     validate_static_ips(lab)?;
