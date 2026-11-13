@@ -141,7 +141,7 @@ pub fn ensure_lab_network(lab_name: &str) -> Result<String> {
         bail!("Le réseau '{net_name}' n'est pas actif après net-start.");
     }
 
-    eprintln!(
+    crate::verr!(
         "Réseau lab actif: {net_name} (NAT 192.168.{}.0/24, pont {})",
         lab_subnet_third_octet(lab_name),
         lab_bridge_name(lab_name)
@@ -157,7 +157,7 @@ pub fn destroy_lab_network(lab_name: &str) -> Result<()> {
     }
     let _ = run_virsh(&["net-destroy", &net_name]);
     run_virsh(&["net-undefine", &net_name]).ok();
-    eprintln!("Réseau lab supprimé: {net_name}");
+    crate::verr!("Réseau lab supprimé: {net_name}");
     Ok(())
 }
 

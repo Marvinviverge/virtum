@@ -90,6 +90,9 @@ pub enum Commands {
         /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
         #[arg(long)]
         insecure_ssh: bool,
+        /// Machines créées / reprises en même temps (1 = une après l'autre, comme avant la v0.9)
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..))]
+        parallel: u16,
     },
     /// Open host firewall (ufw) for `bind: lan` ports in a Virtumfile
     Open {

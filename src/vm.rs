@@ -173,7 +173,7 @@ pub async fn run_vm_async(args: RunArgs) -> Result<()> {
                 .with_context(|| {
                     "Impossible d'utiliser `--network bridge`. Lancez `virtum doctor` pour diagnostiquer l'hôte."
                 })?;
-        eprintln!("Réseau bridge (macvtap) sur l'interface hôte {iface}…");
+        crate::verr!("Réseau bridge (macvtap) sur l'interface hôte {iface}…");
         config.bridge_host_interface = Some(iface);
     }
     let hostname = args
@@ -212,7 +212,7 @@ pub async fn run_vm_async(args: RunArgs) -> Result<()> {
 
     if let Err(err) = run_result {
         if retain_vm_on_error {
-            eprintln!(
+            crate::verr!(
                 "Avertissement: la VM '{vm_id}' est démarrée mais l'opération a échoué.\n\
                  Utilisez `virtum destroy {vm_id}` pour libérer les ressources."
             );
@@ -334,7 +334,7 @@ pub async fn launch_vm_inner(
     }
 
     let ip_timeout = network_attach.ip_timeout();
-    eprintln!(
+    crate::verr!(
         "Attente de l'adresse IP ({}, max {} s)…",
         network_attach.label(),
         ip_timeout.as_secs()
@@ -353,7 +353,7 @@ pub async fn launch_vm_inner(
         Err(err) => {
             if config.bridge_host_interface.is_some() {
                 *retain_vm_on_error = true;
-                eprintln!(
+                crate::verr!(
                     "La VM '{vm_id}' reste démarrée pour diagnostic bridge. \
                      Essayez `virsh domifaddr {vm_id}` puis `virtum destroy {vm_id}`."
                 );
@@ -379,12 +379,12 @@ pub async fn launch_vm_inner(
         SSH_TIMEOUT
     };
     if grow_root {
-        eprintln!(
+        crate::verr!(
             "Attente de SSH sur {ip} (cloud-init + agrandissement disque, max {} s)…",
             ssh_timeout.as_secs()
         );
     } else {
-        eprintln!(
+        crate::verr!(
             "Attente de SSH sur {ip} (cloud-init, max {} s)…",
             ssh_timeout.as_secs()
         );
@@ -430,7 +430,7 @@ pub async fn launch_vm_inner(
             );
         }
         post_boot.extend(config.provision.iter().cloned());
-        eprintln!(
+        crate::verr!(
             "Provision post-SSH ({} commande(s), max {} s)…",
             post_boot.len(),
             SSH_TIMEOUT_PROVISION.as_secs()
@@ -445,7 +445,7 @@ pub async fn launch_vm_inner(
             &ssh_opts,
         )?;
     } else if grow_root {
-        eprintln!("Installation qemu-guest-agent post-SSH…");
+        crate::verr!("Installation qemu-guest-agent post-SSH…");
         run_provision_commands(
             &keys.private_key,
             &config.user,
@@ -511,35 +511,35 @@ pub async fn launch_vm_inner(
         config.libvirt_network.as_deref(),
         config.bridge_host_interface.as_deref(),
     ) {
-        eprintln!("Avertissement: impossible d'enregistrer la MAC dans config.xml: {err:#}");
+        crate::verr!("Avertissement: impossible d'enregistrer la MAC dans config.xml: {err:#}");
     }
 
     let shell_ref = config.name.as_deref().unwrap_or(vm_id);
-    println!("VM démarrée: {vm_id}");
+    crate::vout!("VM démarrée: {vm_id}");
     if let Some(ref name) = config.name {
-        println!("  Name:     {name}");
+        crate::vout!("  Name:     {name}");
     }
     if let Some(ref lab) = config.lab_name {
-        println!("  Lab:      {lab}");
+        crate::vout!("  Lab:      {lab}");
     }
-    println!("  OS:       {}", config.os);
+    crate::vout!("  OS:       {}", config.os);
     match &network_attach {
-        NetworkAttach::MacvtapBridge { .. } => println!("  Réseau:   bridge (LAN)"),
-        NetworkAttach::LabAndBridge { .. } => println!("  Réseau:   lab + bridge (LAN)"),
+        NetworkAttach::MacvtapBridge { .. } => crate::vout!("  Réseau:   bridge (LAN)"),
+        NetworkAttach::LabAndBridge { .. } => crate::vout!("  Réseau:   lab + bridge (LAN)"),
         NetworkAttach::LibvirtNetwork { name } => {
             if config.lab_name.is_some() {
-                println!("  Réseau:   {name}");
+                crate::vout!("  Réseau:   {name}");
             }
         }
     }
     if let Some(ref lan) = lan_ip {
-        println!("  IP (lab): {ip}");
-        println!("  IP (LAN): {lan}");
+        crate::vout!("  IP (lab): {ip}");
+        crate::vout!("  IP (LAN): {lan}");
     } else {
-        println!("  IP:       {ip}");
+        crate::vout!("  IP:       {ip}");
     }
     port_forward::print_forward_lines(&config.port_forwards, config.port_bind);
-    println!("  SSH:      virtum shell {shell_ref}");
+    crate::vout!("  SSH:      virtum shell {shell_ref}");
     Ok(())
 }
 
@@ -728,7 +728,7 @@ async fn wait_for_ip(
                     )
                 })
             {
-                eprintln!("IP réutilisée (metadata / SSH) : {}", hint.known_ip);
+                crate::verr!("IP réutilisée (metadata / SSH) : {}", hint.known_ip);
                 return Ok(hint.known_ip.to_string());
             }
         }
@@ -740,7 +740,9 @@ async fn wait_for_ip(
     }
 
     if let (Some(ip), Some(expected)) = (other_ip, expected_ip) {
-        eprintln!("Avertissement: {vm_id} a obtenu {ip} au lieu de l'adresse déclarée {expected}.");
+        crate::verr!(
+            "Avertissement: {vm_id} a obtenu {ip} au lieu de l'adresse déclarée {expected}."
+        );
         return Ok(ip);
     }
 
@@ -902,7 +904,7 @@ pub async fn wait_for_ssh_login(
         }
 
         if last_progress.elapsed() >= Duration::from_secs(30) {
-            eprintln!(
+            crate::verr!(
                 "  … cloud-init / SSH pas encore prêt ({:.0} s / {} s)",
                 started.elapsed().as_secs_f64(),
                 timeout.as_secs()
@@ -981,13 +983,13 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     let mut mount_state = mounts::load_mounts_state(&instance_dir)?;
     if mount_state.is_empty() {
         if instance.mounts.as_ref().is_some_and(|m| !m.is_empty()) {
-            eprintln!(
+            crate::verr!(
                 "Avertissement: metadata contient des mounts mais mounts-state.json est absent. \
                  Les partages virtiofs peuvent être incomplets."
             );
         }
     } else if let Err(err) = mounts::ensure_virtiofs_servers(&instance_dir, &mut mount_state) {
-        eprintln!("Avertissement: virtiofsd : {err:#}");
+        crate::verr!("Avertissement: virtiofsd : {err:#}");
     }
     let xml_path = libvirt::refresh_domain_xml(
         &instance_dir,
@@ -997,7 +999,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     )?;
     if let Some(ref mac) = libvirt::parse_mac_address_from_xml(&std::fs::read_to_string(&xml_path)?)
     {
-        eprintln!("  Interface MAC conservée : {mac}");
+        crate::verr!("  Interface MAC conservée : {mac}");
     }
     for path in [&disk_path, &iso_path, &xml_path] {
         if !path.is_file() {
@@ -1059,13 +1061,13 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         }
     });
     if resume_hint.is_some() {
-        eprintln!(
+        crate::verr!(
             "Attente de l'adresse IP ({}, max {} s, réutilisation metadata si joignable)…",
             network_attach.label(),
             IP_TIMEOUT.as_secs()
         );
     } else {
-        eprintln!(
+        crate::verr!(
             "Attente de l'adresse IP ({}, max {} s)…",
             network_attach.label(),
             IP_TIMEOUT.as_secs()
@@ -1088,7 +1090,7 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         );
     }
 
-    eprintln!(
+    crate::verr!(
         "Attente de SSH sur {ip} (port {}, max {} s)…",
         format_ssh_ports(&ssh_ports),
         SSH_TIMEOUT.as_secs()
@@ -1124,17 +1126,17 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         port_forward::start_instance_proxies(&instance_dir, &ip, forwards, port_bind)?;
     }
 
-    println!("VM démarrée: {vm_id}");
+    crate::vout!("VM démarrée: {vm_id}");
     if let Some(ref lan) = lan_ip {
-        println!("  IP (lab): {ip}");
-        println!("  IP (LAN): {lan}");
+        crate::vout!("  IP (lab): {ip}");
+        crate::vout!("  IP (LAN): {lan}");
     } else {
-        println!("  IP:       {ip}");
+        crate::vout!("  IP:       {ip}");
     }
     if let Some(ref forwards) = forwards_snapshot {
         port_forward::print_forward_lines(forwards, port_bind);
     }
-    println!("  SSH:      virtum shell {shell_ref}");
+    crate::vout!("  SSH:      virtum shell {shell_ref}");
     Ok(())
 }
 
@@ -1206,7 +1208,7 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
     if domain_exists(&vm_id) {
         shutdown_domain(&vm_id).with_context(|| format!("virsh shutdown a échoué pour {vm_id}"))?;
         if !wait_for_domain_inactive(&vm_id, STOP_TIMEOUT).await {
-            eprintln!(
+            crate::verr!(
                 "La VM '{vm_id}' ne s'est pas arrêtée en {} s ; arrêt forcé (virsh destroy).",
                 STOP_TIMEOUT.as_secs()
             );
@@ -1214,7 +1216,7 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
                 .with_context(|| format!("virsh destroy a échoué pour {vm_id}"))?;
         }
     } else {
-        eprintln!(
+        crate::verr!(
             "Avertissement: le domaine libvirt '{vm_id}' est introuvable ; \
              mise à jour du statut metadata uniquement."
         );
@@ -1229,7 +1231,7 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
     }
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
-    println!("VM arrêtée: {vm_id}");
+    crate::vout!("VM arrêtée: {vm_id}");
     Ok(())
 }
 
@@ -1248,7 +1250,7 @@ pub async fn kill_vm_async(reference: &str) -> Result<()> {
     }
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
-    println!("VM arrêtée (forcé): {vm_id}");
+    crate::vout!("VM arrêtée (forcé): {vm_id}");
     Ok(())
 }
 
@@ -1267,7 +1269,7 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
     let instance_dir = paths.instances.join(&vm_id);
 
     if orphan {
-        eprintln!("Domaine Virtum orphelin (libvirt sans entrée metadata.json) : {vm_id}");
+        crate::verr!("Domaine Virtum orphelin (libvirt sans entrée metadata.json) : {vm_id}");
     }
 
     port_forward::stop_instance_proxies(&instance_dir);
@@ -1289,7 +1291,7 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
         }
         undefine_domain(&vm_id).with_context(|| format!("virsh undefine a échoué pour {vm_id}"))?;
     } else {
-        eprintln!("Avertissement: le domaine libvirt '{vm_id}' est déjà absent.");
+        crate::verr!("Avertissement: le domaine libvirt '{vm_id}' est déjà absent.");
     }
 
     let purge_dirs = if purge_mounts && instance_dir.is_dir() {
@@ -1301,8 +1303,8 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
     if let Some((net, mac)) = lab_reservation {
         match lab_network::remove_dhcp_reservations(&net, &mac) {
             Ok(0) => {}
-            Ok(_) => eprintln!("Réservation DHCP retirée du réseau {net}."),
-            Err(err) => eprintln!("Avertissement: réservation DHCP non retirée ({err:#})."),
+            Ok(_) => crate::verr!("Réservation DHCP retirée du réseau {net}."),
+            Err(err) => crate::verr!("Avertissement: réservation DHCP non retirée ({err:#})."),
         }
     }
 
@@ -1317,7 +1319,7 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
         let root = mounts::infer_mount_purge_root(&purge_dirs)?;
         let n = mounts::purge_host_mount_dirs(&purge_dirs, &root)?;
         if n == 0 {
-            eprintln!("Avertissement: --purge n'a supprimé aucun dossier (déjà absents).");
+            crate::verr!("Avertissement: --purge n'a supprimé aucun dossier (déjà absents).");
         }
     }
 
@@ -1326,7 +1328,7 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
         metadata::remove_instance(&paths.metadata, &vm_id).await?;
     }
 
-    println!("VM supprimée: {vm_id}");
+    crate::vout!("VM supprimée: {vm_id}");
     Ok(())
 }
 
@@ -1406,18 +1408,18 @@ async fn wait_for_domain_inactive(vm_id: &str, timeout: Duration) -> bool {
 }
 
 pub async fn cleanup_failed_run(vm_id: &str, instance_dir: &Path) {
-    eprintln!("Nettoyage après échec de virtum run pour '{vm_id}'…");
+    crate::verr!("Nettoyage après échec de virtum run pour '{vm_id}'…");
     mounts::teardown_virtiofs(instance_dir);
     port_forward::stop_instance_proxies(instance_dir);
     if let Err(err) = destroy_domain(vm_id) {
-        eprintln!("  avertissement destroy: {err:#}");
+        crate::verr!("  avertissement destroy: {err:#}");
     }
     if let Err(err) = undefine_domain(vm_id) {
-        eprintln!("  avertissement undefine: {err:#}");
+        crate::verr!("  avertissement undefine: {err:#}");
     }
     if instance_dir.exists() {
         if let Err(err) = fs::remove_dir_all(instance_dir).await {
-            eprintln!(
+            crate::verr!(
                 "  avertissement suppression {}: {err:#}",
                 instance_dir.display()
             );

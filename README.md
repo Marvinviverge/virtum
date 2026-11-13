@@ -22,6 +22,8 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.8 terminée (Ansible intégré)** — `groups:` et `virtum inventory`, section `ansible:` jouée par `virtum up` puis instantané `provisioned`, `virtum provision` ; l'exemple [`examples/Virtumfile-kubernetes`](./examples/Virtumfile-kubernetes) monte un cluster Kubernetes `Ready` en un `virtum up` : [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md).
 
+**v0.9 en cours (création parallèle)** — `virtum up` crée et reprend les machines d'un lab en parallèle (`--parallel N`, défaut 4 ; `--parallel 1` = une après l'autre), sortie préfixée par machine et récapitulatif ; verrou sur `metadata.json` : [`SPEC_TECH_V0.9.md`](./SPEC_TECH_V0.9.md).
+
 ## Documentation
 
 | Document | Rôle |
@@ -41,6 +43,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md) | Contrat technique **v0.6** (instantanés, `ssh_port`, `restart`) |
 | [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md) | Contrat technique **v0.7** (convergence : `ip:`, `apply --prune`, dérive) |
 | [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md) | Contrat technique **v0.8** (Ansible intégré : `groups:`, `virtum inventory`, `ansible:`, `virtum provision`) |
+| [`SPEC_TECH_V0.9.md`](./SPEC_TECH_V0.9.md) | Contrat technique **v0.9** (création parallèle : `virtum up --parallel`) |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 
@@ -134,6 +137,7 @@ virtum plan -f examples/Virtumfile   # prévisualise create / update / resume (s
 virtum apply -f examples/Virtumfile  # applique RAM, bind, ports, disk_size sur VMs existantes
 virtum apply --prune -f examples/Virtumfile  # v0.7 : supprime aussi les machines retirées du fichier (confirmation, ou --yes)
 virtum up                    # crée ou relance le lab (Virtumfile) ; après `down`, relance sans recréer
+virtum up --parallel 2       # v0.9 : au plus 2 machines créées / reprises à la fois (défaut 4, 1 = séquentiel)
 virtum up -f examples/Virtumfile   # ex. bind: lan → http://<IP-PC>:18080 depuis le téléphone
 virtum open -f examples/Virtumfile # sudo ufw allow (ports bind: lan)
 virtum close -f examples/Virtumfile  # retire les règles ouvertes par virtum open

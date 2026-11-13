@@ -120,7 +120,7 @@ pub fn read_public_key(public_key_path: &Path) -> Result<String> {
 
 fn warn_insecure_ssh_once() {
     if !INSECURE_SSH_WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!(
+        crate::verr!(
             "Avertissement : --insecure-ssh désactive la vérification de clé SSH \
              (StrictHostKeyChecking=no). À réserver aux scripts / CI de confiance. \
              OpenSSH peut afficher « Permanently added » (écriture dans /dev/null) : bruit sans effet."
@@ -231,7 +231,7 @@ pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
         };
 
         if (ip == "127.0.0.1" || ip == SLIRP_GUEST_IPV4) && instance.ssh_port.is_some() {
-            eprintln!(
+            crate::verr!(
                 "Avertissement: instance '{vm_id}' utilise l'ancien mode SLIRP (127.0.0.1:{port}). \
                  Relancez `virtum run` pour une IP dédiée (192.168.122.x)."
             );
@@ -280,7 +280,7 @@ pub fn run_provision_commands(
         if started.elapsed() > timeout {
             bail!("Provision interrompue : délai global dépassé ({timeout:?}).");
         }
-        eprintln!("  [{}/{}] {trimmed}", i + 1, commands.len());
+        crate::verr!("  [{}/{}] {trimmed}", i + 1, commands.len());
         ssh_run_provision_command(private_key, user, host, port, trimmed, opts).with_context(
             || {
                 format!(

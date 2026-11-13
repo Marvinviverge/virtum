@@ -17,6 +17,8 @@ pub mod libvirt;
 pub mod libvirt_access;
 pub mod metadata;
 pub mod mounts;
+pub mod output;
+pub mod parallel;
 pub mod plan;
 pub mod port_forward;
 pub mod ps;
@@ -68,7 +70,8 @@ fn dispatch(command: Commands) -> Result<()> {
             file,
             yes_lan,
             insecure_ssh,
-        } => lab::up(file, insecure_ssh, yes_lan)?,
+            parallel,
+        } => lab::up(file, insecure_ssh, yes_lan, usize::from(parallel))?,
         Commands::Down {
             file,
             destroy,

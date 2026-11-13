@@ -591,7 +591,7 @@ pub fn purge_host_mount_dirs(dirs: &[PathBuf], allowed_root: &Path) -> Result<us
                 canonical.display()
             )
         })?;
-        eprintln!("Dossier mount supprimé : {}", canonical.display());
+        crate::verr!("Dossier mount supprimé : {}", canonical.display());
         purged += 1;
     }
     Ok(purged)

@@ -246,7 +246,46 @@ pub fn ensure_lab_machine_available(
 }
 
 /// Inserts a new instance or replaces an existing one with the same `id`.
+/// Verrou exclusif sur `metadata.json` (fichier `metadata.json.lock`, `flock`), relâché
+/// à la destruction. Sérialise les lectures-modifications-écritures entre les fils d'un
+/// `up` parallèle et entre deux commandes Virtum lancées en même temps.
+pub struct MetadataLock {
+    _file: std::fs::File,
+}
+
+pub fn lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "metadata.json".to_string());
+    path.with_file_name(format!("{name}.lock"))
+}
+
+pub fn lock_metadata(path: &Path) -> Result<MetadataLock> {
+    use std::os::fd::AsRawFd;
+    let lock = lock_path(path);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock)
+        .with_context(|| format!("Impossible d'ouvrir le verrou {}", lock.display()))?;
+    loop {
+        // SAFETY: descripteur valide tant que `file` vit ; flock n'accède à aucune mémoire.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc == 0 {
+            return Ok(MetadataLock { _file: file });
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err).with_context(|| format!("Verrou {} impossible", lock.display()));
+        }
+    }
+}
+
 pub async fn upsert_instance(path: &Path, instance: Instance) -> Result<Metadata> {
+    let _lock = lock_metadata(path)?;
     let mut metadata = load_metadata(path).await?;
     if let Some(existing) = metadata
         .instances
@@ -263,6 +302,7 @@ pub async fn upsert_instance(path: &Path, instance: Instance) -> Result<Metadata
 
 /// Removes an instance by `id`. Errors if the instance is not found.
 pub async fn remove_instance(path: &Path, id: &str) -> Result<Metadata> {
+    let _lock = lock_metadata(path)?;
     let mut metadata = load_metadata(path).await?;
     let before = metadata.instances.len();
     metadata.instances.retain(|instance| instance.id != id);
@@ -308,6 +348,61 @@ mod tests {
             static_ip: None,
             created_at: "2026-06-02T10:00:00Z".to_string(),
         }
+    }
+
+    /// Plusieurs fils (comme un `up` parallèle) écrivent en même temps : aucune perte.
+    #[test]
+    fn concurrent_upserts_and_removes_lose_nothing() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (path, _state) = rt.block_on(temp_metadata_path());
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 15;
+        let ids = |t: usize| (0..PER_THREAD).map(move |i| format!("vm-{t}-{i}"));
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                let path = &path;
+                s.spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    for id in ids(t) {
+                        rt.block_on(upsert_instance(path, sample_instance(&id)))
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        let all = rt.block_on(load_metadata(&path)).unwrap();
+        assert_eq!(all.instances.len(), THREADS * PER_THREAD);
+        assert!(lock_path(&path).ends_with("metadata.json.lock"));
+
+        std::thread::scope(|s| {
+            for t in 0..THREADS {
+                let path = &path;
+                s.spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    for id in ids(t).filter(|id| !id.ends_with("-0")) {
+                        rt.block_on(remove_instance(path, &id)).unwrap();
+                    }
+                });
+            }
+        });
+        let left = rt.block_on(load_metadata(&path)).unwrap();
+        let mut names: Vec<_> = left.instances.iter().map(|i| i.id.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            (0..THREADS)
+                .map(|t| format!("vm-{t}-0"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

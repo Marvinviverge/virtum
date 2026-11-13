@@ -5,22 +5,24 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 
 use crate::config::{self, VirtumPaths};
+use crate::images::{ensure_image, resolve_image};
 use crate::lab_network;
 use crate::libvirt::domain_exists;
 use crate::metadata::{self, Instance, InstanceStatus};
 use crate::mounts;
+use crate::parallel::{JobReport, JobStatus};
 use crate::port_forward::{self, PortBind, PortForward};
 use crate::ssh::{ensure_ssh_keypair, read_public_key};
 use crate::virtumfile::{self, RestartPolicy};
 use crate::vm::{self, cleanup_failed_run, lab_vm_id, launch_vm_inner, VmLaunchConfig};
 
-pub fn up(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> Result<()> {
+pub fn up(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool, parallel: usize) -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .context("Impossible de démarrer le runtime Tokio")?
-        .block_on(up_async(file, insecure_ssh, yes_lan))
+        .block_on(up_async(file, insecure_ssh, yes_lan, parallel))
 }
 
 pub fn down(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result<()> {
@@ -37,11 +39,16 @@ pub fn down(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result<()> {
         .block_on(down_async(file, destroy, purge))
 }
 
-async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> Result<()> {
+async fn up_async(
+    file: Option<PathBuf>,
+    insecure_ssh: bool,
+    yes_lan: bool,
+    parallel: usize,
+) -> Result<()> {
     let path = virtumfile::resolve_virtumfile_path(file)?;
     let vf_dir = virtumfile::virtumfile_dir(&path);
     let lab = virtumfile::load(&path)?;
-    eprintln!(
+    crate::verr!(
         "Lab '{}' ({} machine(s)) depuis {}…",
         lab.name,
         lab.machines.len(),
@@ -93,7 +100,7 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
         let instance_dir = paths.instances.join(&vm_id);
         let orphan_instance = instance_dir.join("disk.qcow2").is_file();
         if domain_exists(&vm_id) || orphan_instance {
-            eprintln!("Nettoyage avant déploiement de '{machine_name}' ({vm_id})…");
+            crate::verr!("Nettoyage avant déploiement de '{machine_name}' ({vm_id})…");
             cleanup_failed_run(&vm_id, &instance_dir).await;
         }
         metadata::ensure_lab_machine_available(&metadata, &lab.name, machine_name)?;
@@ -106,11 +113,11 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
     if let Some(net) = lab_net.as_deref() {
         let (conflicts, ip_warnings) = declared_ip_checks(&lab, net, &owners);
         for w in &ip_warnings {
-            eprintln!("Avertissement: {w}");
+            crate::verr!("Avertissement: {w}");
         }
         if !conflicts.is_empty() {
             for c in &conflicts {
-                eprintln!("✗ {c}");
+                crate::verr!("✗ {c}");
             }
             bail!("Adresse(s) `ip:` déjà utilisée(s) sur le réseau du lab.");
         }
@@ -120,20 +127,17 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
     let keys = ensure_ssh_keypair(&paths.keys)?;
     let public_key = read_public_key(&keys.public_key)?;
 
-    let mut created_this_run: Vec<String> = Vec::new();
-    let mut ready = 0usize;
+    // --- Préparation (séquentielle) : tout ce qui est partagé est décidé ici, dans
+    // l'ordre du Virtumfile (MAC, réservations DHCP, images), avant tout lancement.
+    let mut jobs: Vec<UpJob> = Vec::new();
     for (machine_name, spec) in &lab.machines {
         let machine = machine_name.as_str();
         let vm_id = lab_vm_id(&lab.name, machine);
-        let metadata = metadata::load_metadata(&paths.metadata).await?;
-
-        eprintln!("--- Machine '{machine_name}' ({vm_id}) ---");
-
+        let instance_dir = paths.instances.join(&vm_id);
         let spec_ports = virtumfile::machine_port_forwards(spec)?;
         let port_bind = virtumfile::effective_port_bind(&lab, machine);
 
         if let Some(existing) = metadata::find_by_lab_machine(&metadata, &lab.name, machine) {
-            let instance_dir = paths.instances.join(&vm_id);
             if let Ok(diff) =
                 crate::lab_diff::diff_machine(&lab, machine_name, spec, existing, &instance_dir)
             {
@@ -159,39 +163,26 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
                     lab_network::ensure_dhcp_reservation(net, mac, &existing.hostname, ip)?;
                 }
             }
-            let instance_dir = paths.instances.join(&vm_id);
-            match resume_lab_machine(
-                existing,
-                &vm_id,
-                machine_name,
-                &instance_dir,
-                &spec_ports,
+            jobs.push(UpJob::Resume {
+                machine: machine.to_string(),
+                vm_id,
+                instance_dir,
+                existing: Box::new(existing.clone()),
+                spec_ports,
                 port_bind,
-                &lab,
-            )
-            .await
-            {
-                Ok(()) => {
-                    ready += 1;
-                    continue;
-                }
-                Err(err) => {
-                    eprintln!("Échec sur la machine '{machine_name}': {err:#}");
-                    rollback_lab_vms(&paths, &created_this_run).await;
-                    return Err(err);
-                }
-            }
+            });
+            continue;
         }
 
         let net_cfg = virtumfile::resolve_machine_network(&lab, machine, lab_net.as_deref())?;
         if net_cfg.mode == virtumfile::NetworkMode::Bridge {
-            eprintln!(
-                "  Réseau : bridge (LAN) sur {}",
+            crate::verr!(
+                "  '{machine_name}' : réseau bridge (LAN) sur {}",
                 net_cfg.bridge_host_interface.as_deref().unwrap_or("?")
             );
         } else if net_cfg.bridge_host_interface.is_some() {
-            eprintln!(
-                "  Réseau : lab {} + bridge (LAN)",
+            crate::verr!(
+                "  '{machine_name}' : réseau lab {} + bridge (LAN)",
                 net_cfg.libvirt_network.as_deref().unwrap_or("?")
             );
         }
@@ -210,7 +201,7 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
         ) {
             let hostname = format!("{}-{machine}", lab.name);
             lab_network::ensure_dhcp_reservation(net, mac, &hostname, ip)?;
-            eprintln!("  Adresse déclarée : {ip} (réservation DHCP)");
+            crate::verr!("  '{machine_name}' : adresse déclarée {ip} (réservation DHCP)");
         }
         let resolved_mounts = crate::mounts::resolve_machine_mounts(&lab, machine, &vf_dir)
             .with_context(|| format!("Machine '{machine_name}' : résolution des mounts"))?;
@@ -233,36 +224,74 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             ssh_port: virtumfile::effective_ssh_port(&lab, machine),
             restart: virtumfile::effective_restart(&lab, machine),
             nic_mac,
-            static_ip: static_ip.clone(),
+            static_ip,
         };
         let hostname = config.hostname_for_vm(&vm_id);
-        let instance_dir = paths.instances.join(&vm_id);
-
-        let mut retain = false;
-        if let Err(err) = launch_vm_inner(
-            &config,
-            &paths,
-            &instance_dir,
-            &vm_id,
-            &hostname,
-            &public_key,
-            &mut retain,
-        )
-        .await
-        {
-            eprintln!("Échec sur la machine '{machine_name}': {err:#}");
-            cleanup_failed_run(&vm_id, &instance_dir).await;
-            rollback_lab_vms(&paths, &created_this_run).await;
-            return Err(err);
-        }
-        if let Some(ref declared) = static_ip {
-            warn_if_ip_differs(&paths, &vm_id, machine, declared).await;
-        }
-        created_this_run.push(vm_id);
-        ready += 1;
+        jobs.push(UpJob::Create {
+            machine: machine.to_string(),
+            vm_id,
+            instance_dir,
+            hostname,
+            config: Box::new(config),
+        });
     }
 
-    println!("Lab '{}' prêt ({} VM).", lab.name, ready);
+    // Images de base : une fois par OS, avant les créations parallèles (sinon plusieurs
+    // fils téléchargeraient la même image).
+    let mut oses: Vec<&str> = jobs
+        .iter()
+        .filter_map(|j| match j {
+            UpJob::Create { config, .. } => Some(config.os.as_str()),
+            UpJob::Resume { .. } => None,
+        })
+        .collect();
+    oses.sort_unstable();
+    oses.dedup();
+    for os in oses {
+        let image = resolve_image(os, &paths.images)?;
+        ensure_image(&image).await?;
+    }
+
+    // --- Exécution (parallèle, au plus `parallel` machines à la fois).
+    let workers = parallel.clamp(1, jobs.len().max(1));
+    let concurrent = workers > 1;
+    if concurrent {
+        crate::verr!(
+            "Création / reprise de {} machine(s), {} à la fois…",
+            jobs.len(),
+            workers
+        );
+    }
+    let labels: Vec<String> = jobs.iter().map(|j| j.machine().to_string()).collect();
+    let started_all = std::time::Instant::now();
+    let reports = crate::parallel::run_jobs(&labels, workers, concurrent, |i| {
+        let job = &jobs[i];
+        let (paths, lab, public_key) = (&paths, &lab, &public_key);
+        Box::pin(async move { run_up_job(job, paths, lab, public_key, concurrent).await })
+    });
+    let total = started_all.elapsed();
+
+    // --- Récapitulatif, puis retour arrière si une machine a échoué.
+    let meta = metadata::load_metadata(&paths.metadata).await?;
+    print_up_summary(&jobs, &reports, &meta, total);
+    let created_this_run: Vec<String> = jobs
+        .iter()
+        .zip(&reports)
+        .filter(|(job, report)| job.is_create() && report.status == JobStatus::Done)
+        .map(|(job, _)| job.vm_id().to_string())
+        .collect();
+    if let Some((job, cause)) = first_failure(&jobs, &reports) {
+        let to_rollback = vms_to_rollback(&jobs, &reports);
+        crate::verr!("Échec sur la machine '{}': {cause}", job.machine());
+        rollback_lab_vms(&paths, &to_rollback).await;
+        bail!("Échec sur la machine '{}': {cause}", job.machine());
+    }
+    let ready = reports
+        .iter()
+        .filter(|r| r.status == JobStatus::Done)
+        .count();
+
+    crate::vout!("Lab '{}' prêt ({} VM).", lab.name, ready);
     let leftover: Vec<String> = {
         let meta = metadata::load_metadata(&paths.metadata).await?;
         crate::lab_diff::removed_instances(&lab, &meta)
@@ -271,7 +300,7 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
             .collect()
     };
     if !leftover.is_empty() {
-        eprintln!(
+        crate::verr!(
             "  Machines hors du Virtumfile, toujours présentes : {}. Voir `virtum plan` / `virtum apply --prune -f {}`.",
             leftover.join(", "),
             path.display()
@@ -289,20 +318,20 @@ async fn up_async(file: Option<PathBuf>, insecure_ssh: bool, yes_lan: bool) -> R
         let autostarts = virtumfile::effective_restart(&lab, machine_name)
             .is_some_and(|r| r != RestartPolicy::No);
         if autostarts && !spec.ports.is_empty() {
-            eprintln!(
+            crate::verr!(
                 "  Note '{machine_name}' : après un redémarrage de l'hôte, la VM repart seule \
                  mais les `ports:` (socat) ne reviennent qu'avec `virtum up`."
             );
         }
     }
-    println!("  virtum ps");
-    println!("  virtum shell <name>   # ex. virtum shell web");
-    println!(
+    crate::vout!("  virtum ps");
+    crate::vout!("  virtum shell <name>   # ex. virtum shell web");
+    crate::vout!(
         "  virtum plan -f {}   # virtum apply si le Virtumfile a changé",
         path.display()
     );
     if crate::firewall::lab_needs_firewall_hint(&lab) {
-        println!(
+        crate::vout!(
             "  Accès LAN (bind: lan) : ouvrez le pare-feu hôte avec :\n    \
              virtum open -f {}",
             path.display()
@@ -361,7 +390,7 @@ async fn warn_if_ip_differs(paths: &VirtumPaths, vm_id: &str, machine: &str, dec
     };
     let got = metadata::find_instance(&meta, vm_id).and_then(|i| i.ip.clone());
     if let Some(got) = got.filter(|ip| ip != declared) {
-        eprintln!(
+        crate::verr!(
             "Avertissement '{machine}' : adresse obtenue {got} au lieu de {declared}. \
              Un ancien bail DHCP occupe probablement encore {declared} ; \
              il expire dans l'heure, puis `virtum stop {machine}` / `virtum start {machine}`."
@@ -385,6 +414,159 @@ fn ports_not_owned(
     spec_ports.iter().filter(|pf| !owned(pf)).cloned().collect()
 }
 
+/// Machine à créer ou à reprendre pendant `up` (préparée séquentiellement).
+enum UpJob {
+    Create {
+        machine: String,
+        vm_id: String,
+        instance_dir: PathBuf,
+        hostname: String,
+        config: Box<VmLaunchConfig>,
+    },
+    Resume {
+        machine: String,
+        vm_id: String,
+        instance_dir: PathBuf,
+        existing: Box<Instance>,
+        spec_ports: Vec<PortForward>,
+        port_bind: PortBind,
+    },
+}
+
+impl UpJob {
+    fn machine(&self) -> &str {
+        match self {
+            Self::Create { machine, .. } | Self::Resume { machine, .. } => machine,
+        }
+    }
+
+    fn vm_id(&self) -> &str {
+        match self {
+            Self::Create { vm_id, .. } | Self::Resume { vm_id, .. } => vm_id,
+        }
+    }
+
+    fn is_create(&self) -> bool {
+        matches!(self, Self::Create { .. })
+    }
+}
+
+/// Crée ou reprend une machine (exécuté dans le fil de la machine).
+async fn run_up_job(
+    job: &UpJob,
+    paths: &VirtumPaths,
+    lab: &virtumfile::Virtumfile,
+    public_key: &str,
+    concurrent: bool,
+) -> Result<()> {
+    if !concurrent {
+        crate::verr!("--- Machine '{}' ({}) ---", job.machine(), job.vm_id());
+    }
+    match job {
+        UpJob::Create {
+            machine,
+            vm_id,
+            instance_dir,
+            hostname,
+            config,
+        } => {
+            let mut retain = false;
+            launch_vm_inner(
+                config,
+                paths,
+                instance_dir,
+                vm_id,
+                hostname,
+                public_key,
+                &mut retain,
+            )
+            .await?;
+            if let Some(ref declared) = config.static_ip {
+                warn_if_ip_differs(paths, vm_id, machine, declared).await;
+            }
+            Ok(())
+        }
+        UpJob::Resume {
+            machine,
+            vm_id,
+            instance_dir,
+            existing,
+            spec_ports,
+            port_bind,
+        } => {
+            resume_lab_machine(
+                existing,
+                vm_id,
+                machine,
+                instance_dir,
+                spec_ports,
+                *port_bind,
+                lab,
+            )
+            .await
+        }
+    }
+}
+
+/// Première machine en échec et sa cause.
+fn first_failure<'a>(jobs: &'a [UpJob], reports: &[JobReport]) -> Option<(&'a UpJob, String)> {
+    jobs.iter()
+        .zip(reports)
+        .find_map(|(job, r)| match &r.status {
+            JobStatus::Failed(cause) => Some((job, cause.clone())),
+            _ => None,
+        })
+}
+
+/// Machines à défaire après un échec : toutes celles **créées** par ce `up` qui ont
+/// commencé (terminées, en échec ou annulées en cours). Les reprises ne sont pas touchées.
+fn vms_to_rollback(jobs: &[UpJob], reports: &[JobReport]) -> Vec<String> {
+    rollback_ids(jobs.iter().map(|j| (j.is_create(), j.vm_id())), reports)
+}
+
+/// `(création ?, vm_id)` par machine → identifiants à défaire.
+fn rollback_ids<'a>(
+    jobs: impl Iterator<Item = (bool, &'a str)>,
+    reports: &[JobReport],
+) -> Vec<String> {
+    jobs.zip(reports)
+        .filter(|((is_create, _), report)| *is_create && report.started())
+        .map(|((_, vm_id), _)| vm_id.to_string())
+        .collect()
+}
+
+fn print_up_summary(
+    jobs: &[UpJob],
+    reports: &[JobReport],
+    meta: &metadata::Metadata,
+    total: std::time::Duration,
+) {
+    let width = jobs.iter().map(|j| j.machine().len()).max().unwrap_or(0);
+    crate::verr!(
+        "Récapitulatif ({} machine(s), {}) :",
+        jobs.len(),
+        crate::parallel::format_duration(total)
+    );
+    for (job, report) in jobs.iter().zip(reports) {
+        let state = match (&report.status, job.is_create()) {
+            (JobStatus::Done, true) => "créée",
+            (JobStatus::Done, false) => "reprise",
+            (JobStatus::Failed(_), _) => "échec",
+            (JobStatus::Cancelled, _) => "annulée",
+            (JobStatus::NotStarted, _) => "non lancée",
+        };
+        let ip = metadata::find_instance(meta, job.vm_id())
+            .and_then(|i| i.ip.clone())
+            .filter(|_| report.status == JobStatus::Done)
+            .unwrap_or_else(|| "-".to_string());
+        crate::verr!(
+            "  {:<width$}  {state:<10}  {ip:<15}  {}",
+            job.machine(),
+            crate::parallel::format_duration(report.elapsed)
+        );
+    }
+}
+
 /// Joue le playbook `ansible:` à la fin de `up` si le lab n'a jamais été provisionné avec
 /// succès ou si des machines viennent d'être créées ; puis prend l'instantané de lab.
 async fn provision_after_up(
@@ -403,20 +585,20 @@ async fn provision_after_up(
             .as_ref()
             .and_then(|s| s.provisioned_at.clone())
             .unwrap_or_default();
-        println!(
+        crate::vout!(
             "Lab déjà provisionné ({when}) — `virtum provision -f {}` pour rejouer le playbook.",
             path.display()
         );
         return Ok(());
     };
-    eprintln!("--- Provisionnement Ansible ({reason}) ---");
+    crate::verr!("--- Provisionnement Ansible ({reason}) ---");
     match crate::ansible::run_playbook(lab, path, paths, &[], insecure_ssh).await? {
         crate::ansible::RunOutcome::Failed(code) => bail!(
             "Provisionnement en échec (ansible-playbook, code {code}) : VM conservées pour le diagnostic. \
              Corrigez puis relancez `virtum provision -f {p}` (ou `virtum up -f {p}`).",
             p = path.display()
         ),
-        crate::ansible::RunOutcome::Success => println!("Provisionnement Ansible réussi."),
+        crate::ansible::RunOutcome::Success => crate::vout!("Provisionnement Ansible réussi."),
     }
     if let Some(name) = spec.snapshot_name() {
         take_provision_snapshot(lab, path, paths, &name).await?;
@@ -455,25 +637,25 @@ async fn take_provision_snapshot(
                 without.join(", ")
             )
         };
-        eprintln!(
+        crate::verr!(
             "Avertissement: l'instantané '{name}' existe déjà (non écrasé).{missing} Pour le reprendre : \
              `virtum snapshot rm {name} -f {p}` puis `virtum snapshot create {name} -f {p}`.",
             p = path.display()
         );
         return Ok(());
     }
-    eprintln!("--- Instantané '{name}' du lab provisionné ---");
+    crate::verr!("--- Instantané '{name}' du lab provisionné ---");
     match crate::snapshot::create_async(name, &[], Some(path.to_path_buf()), false).await {
         Ok(()) => {
             let mut state = crate::ansible::load_state(paths, &lab.name)?.unwrap_or_default();
             state.snapshot = Some(name.to_string());
             crate::ansible::save_state(paths, &lab.name, &state)?;
-            println!(
+            crate::vout!(
                 "Retour à ce lab provisionné : virtum snapshot restore {name} -f {}",
                 path.display()
             );
         }
-        Err(err) => eprintln!(
+        Err(err) => crate::verr!(
             "Avertissement: instantané '{name}' non pris ({err:#}). Provisionnement conservé ; \
              relancez `virtum snapshot create {name} -f {}`.",
             path.display()
@@ -497,14 +679,14 @@ fn confirm_lan_deploy() -> Result<()> {
     io::stderr().flush().ok();
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
-        eprintln!("\nDéploiement annulé.");
+        crate::verr!("\nDéploiement annulé.");
         std::process::exit(0);
     }
     let answer = line.trim();
     if answer == "y" || answer == "Y" {
         return Ok(());
     }
-    eprintln!("Déploiement annulé.");
+    crate::verr!("Déploiement annulé.");
     std::process::exit(0);
 }
 
@@ -535,12 +717,12 @@ async fn resume_lab_machine(
     let mut existing = existing.clone();
     let stored_port = vm::stored_ssh_port(ssh_port);
     if existing.ssh_port != stored_port {
-        eprintln!("  Port SSH de '{machine_name}' : {ssh_port}");
+        crate::verr!("  Port SSH de '{machine_name}' : {ssh_port}");
         existing.ssh_port = stored_port;
         metadata::upsert_instance(&paths.metadata, existing.clone()).await?;
     }
     if existing.restart != restart {
-        eprintln!(
+        crate::verr!(
             "  Démarrage au boot de '{machine_name}' : restart: {}",
             restart.map_or("(non géré)", RestartPolicy::label)
         );
@@ -557,17 +739,17 @@ async fn resume_lab_machine(
         if live.status == InstanceStatus::Running {
             vm::sync_autostart(&existing, true)?;
             let ip = existing.ip.as_deref().unwrap_or("-");
-            eprintln!("Machine '{machine_name}' déjà en cours d'exécution (IP: {ip}).");
+            crate::verr!("Machine '{machine_name}' déjà en cours d'exécution (IP: {ip}).");
             if !spec_ports.is_empty() && ip != "-" {
                 port_forward::start_instance_proxies(instance_dir, ip, spec_ports, port_bind)?;
             }
             port_forward::print_forward_lines(spec_ports, port_bind);
-            println!("  SSH:      virtum shell {reference}");
+            crate::vout!("  SSH:      virtum shell {reference}");
             return Ok(());
         }
     }
 
-    eprintln!("Relance de la machine '{machine_name}'…");
+    crate::verr!("Relance de la machine '{machine_name}'…");
     vm::start_vm_async(&reference).await
 }
 
@@ -575,7 +757,7 @@ async fn rollback_lab_vms(paths: &VirtumPaths, vm_ids: &[String]) {
     if vm_ids.is_empty() {
         return;
     }
-    eprintln!("Nettoyage des machines déjà créées dans ce lab…");
+    crate::verr!("Nettoyage des machines déjà créées dans ce lab…");
     for vm_id in vm_ids {
         let instance_dir = paths.instances.join(vm_id);
         cleanup_failed_run(vm_id, &instance_dir).await;
@@ -597,7 +779,7 @@ async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result
     let instances = metadata::instances_for_lab(&metadata, &lab.name);
 
     if instances.is_empty() {
-        eprintln!("Aucune VM active pour le lab '{}'.", lab.name);
+        crate::verr!("Aucune VM active pour le lab '{}'.", lab.name);
         return Ok(());
     }
 
@@ -607,7 +789,7 @@ async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result
         .collect();
 
     if destroy {
-        eprintln!("Suppression de {} VM du lab '{}'…", refs.len(), lab.name);
+        crate::verr!("Suppression de {} VM du lab '{}'…", refs.len(), lab.name);
         let purge_dirs = if purge {
             mounts::collect_host_dirs_for_lab(&lab, &vf_dir)?
         } else {
@@ -619,7 +801,7 @@ async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result
         if purge {
             let n = mounts::purge_host_mount_dirs(&purge_dirs, &vf_dir)?;
             if n > 0 {
-                eprintln!(
+                crate::verr!(
                     "Dossiers mounts hôte supprimés ({n}) sous {}.",
                     vf_dir.display()
                 );
@@ -627,20 +809,20 @@ async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result
         }
         if virtumfile::lab_needs_isolated_network(&lab) {
             if let Err(err) = lab_network::destroy_lab_network(&lab.name) {
-                eprintln!(
+                crate::verr!(
                     "Avertissement: impossible de supprimer le réseau du lab '{}': {err:#}",
                     lab.name
                 );
             }
         }
         crate::ansible::remove_state(&paths, &lab.name);
-        println!("Lab '{}' supprimé.", lab.name);
+        crate::vout!("Lab '{}' supprimé.", lab.name);
     } else {
-        eprintln!("Arrêt de {} VM du lab '{}'…", refs.len(), lab.name);
+        crate::verr!("Arrêt de {} VM du lab '{}'…", refs.len(), lab.name);
         for reference in &refs {
             vm::stop_vm_async(reference).await?;
         }
-        println!("Lab '{}' arrêté.", lab.name);
+        crate::vout!("Lab '{}' arrêté.", lab.name);
     }
     Ok(())
 }
@@ -648,6 +830,31 @@ async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_only_started_creations() {
+        let report = |status| JobReport {
+            label: String::new(),
+            status,
+            elapsed: std::time::Duration::ZERO,
+        };
+        let jobs = [
+            (true, "vm-a"),  // créée, terminée
+            (false, "vm-b"), // reprise en échec : existait avant, intouchée
+            (true, "vm-c"),  // créée, annulée en cours
+            (true, "vm-d"),  // jamais lancée : rien à défaire
+        ];
+        let reports = [
+            report(JobStatus::Done),
+            report(JobStatus::Failed("boom".into())),
+            report(JobStatus::Cancelled),
+            report(JobStatus::NotStarted),
+        ];
+        assert_eq!(
+            rollback_ids(jobs.iter().copied(), &reports),
+            vec!["vm-a".to_string(), "vm-c".to_string()]
+        );
+    }
 
     #[test]
     fn ports_already_owned_are_not_rechecked() {

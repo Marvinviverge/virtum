@@ -156,13 +156,13 @@ pub fn start_instance_proxies(
 
     if bind == PortBind::Lan {
         if let Some(ip) = bridge_network::host_primary_ipv4() {
-            eprintln!("Ports exposés sur le LAN (écoute 0.0.0.0) — IP hôte typique : {ip}");
+            crate::verr!("Ports exposés sur le LAN (écoute 0.0.0.0) — IP hôte typique : {ip}");
         } else {
-            eprintln!(
+            crate::verr!(
                 "Ports exposés sur le LAN (0.0.0.0) ; impossible de détecter l'IP hôte (ip route)."
             );
         }
-        eprintln!(
+        crate::verr!(
             "Si un pare-feu bloque l'accès (ufw), autorisez le port ou testez depuis le même réseau."
         );
     }
@@ -254,18 +254,19 @@ pub fn format_forward_list(forwards: &[PortForward], bind: PortBind) -> String {
 pub fn print_forward_lines(forwards: &[PortForward], bind: PortBind) {
     let lan_ip = bridge_network::host_primary_ipv4();
     for pf in forwards {
-        println!(
+        crate::vout!(
             "  Forward (local): http://127.0.0.1:{} → invité :{}",
-            pf.host_port, pf.guest_port
+            pf.host_port,
+            pf.guest_port
         );
         if bind == PortBind::Lan {
             if let Some(ref ip) = lan_ip {
-                println!(
+                crate::vout!(
                     "  Forward (LAN):   http://{ip}:{} → invité :{}  (téléphone / collègue même réseau)",
                     pf.host_port, pf.guest_port
                 );
             } else {
-                println!(
+                crate::vout!(
                     "  Forward (LAN):   http://<IP-hôte>:{} → invité :{}  (écoute 0.0.0.0, voir `ip route`)",
                     pf.host_port, pf.guest_port
                 );

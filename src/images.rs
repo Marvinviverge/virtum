@@ -91,7 +91,7 @@ pub async fn pull_image(os: &str, images_dir: &Path) -> Result<PathBuf> {
     if fs::try_exists(&image.local_path).await? {
         set_libvirt_image_access(&image.local_path).await?;
         validate_base_image(&image.local_path).await?;
-        eprintln!(
+        crate::verr!(
             "Image {} déjà en cache: {}",
             image.os,
             image.local_path.display()
@@ -123,11 +123,12 @@ async fn ensure_image_download(image: &ResolvedImage) -> Result<PathBuf> {
         fs::remove_file(&tmp_path).await.ok();
     }
 
-    eprintln!(
+    crate::verr!(
         "Téléchargement de l'image {} depuis {}…",
-        image.os, image.source_label
+        image.os,
+        image.source_label
     );
-    eprintln!("URL: {}", image.url);
+    crate::verr!("URL: {}", image.url);
 
     download_and_verify(image, &tmp_path).await?;
     validate_qcow2_with_qemu_img(&tmp_path).await?;
@@ -144,7 +145,7 @@ async fn ensure_image_download(image: &ResolvedImage) -> Result<PathBuf> {
     set_libvirt_image_access(&image.local_path).await?;
     validate_base_image(&image.local_path).await?;
 
-    eprintln!(
+    crate::verr!(
         "Image {} installée: {}",
         image.os,
         image.local_path.display()
@@ -181,7 +182,7 @@ async fn download_and_verify(image: &ResolvedImage, dest: &Path) -> Result<()> {
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
         if downloaded > 0 && downloaded.is_multiple_of(50 * 1024 * 1024) {
-            eprintln!("  … {} MiB téléchargés", downloaded / (1024 * 1024));
+            crate::verr!("  … {} MiB téléchargés", downloaded / (1024 * 1024));
         }
     }
 
