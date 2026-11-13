@@ -20,6 +20,8 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.7 terminée (convergence)** — `ip:` déclarée (optionnelle) par machine, machines retirées du Virtumfile signalées par `plan` et supprimées par `apply --prune`, dérive RAM/vCPU lue dans libvirt : [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md).
 
+**v0.8 terminée (Ansible intégré)** — `groups:` et `virtum inventory`, section `ansible:` jouée par `virtum up` puis instantané `provisioned`, `virtum provision` ; l'exemple [`examples/Virtumfile-kubernetes`](./examples/Virtumfile-kubernetes) monte un cluster Kubernetes `Ready` en un `virtum up` : [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md).
+
 ## Documentation
 
 | Document | Rôle |
@@ -38,7 +40,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`specs/001-security-hardening/spec.md`](./specs/001-security-hardening/spec.md) | Spec Kit feature v0.5 |
 | [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md) | Contrat technique **v0.6** (instantanés, `ssh_port`, `restart`) |
 | [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md) | Contrat technique **v0.7** (convergence : `ip:`, `apply --prune`, dérive) |
-| [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md) | Contrat technique **v0.8** (prévu : Ansible intégré, `virtum inventory`, `virtum provision`) |
+| [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md) | Contrat technique **v0.8** (Ansible intégré : `groups:`, `virtum inventory`, `ansible:`, `virtum provision`) |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 
@@ -328,6 +330,23 @@ virtum down -f examples/Virtumfile.mounts --destroy --purge
 Voir [`STEPS4.md`](./STEPS4.md) §7 et [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md).
 
 **Prérequis mounts** : paquet `virtiofsd` ; sans `uidmap` (`newuidmap`), Virtum lance virtiofsd avec `--sandbox=none` (isolation réduite — voir `virtum doctor`).
+
+### Banc de test v0.8
+
+Lab Kubernetes d'exemple (≈ 10 Go de RAM libres, Ansible et accès internet requis) :
+
+```bash
+virtum up -f examples/Virtumfile-kubernetes       # VM + playbook + instantané provisioned
+virtum inventory -f examples/Virtumfile-kubernetes -o /tmp/k8s.ini
+ansible control_plane -i /tmp/k8s.ini -b -a "kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes"
+virtum up -f examples/Virtumfile-kubernetes       # « déjà provisionné »
+virtum provision -f examples/Virtumfile-kubernetes -- --tags verify
+# casser un nœud (ex. systemctl disable --now kubelet sur node-1), puis :
+virtum snapshot restore provisioned -f examples/Virtumfile-kubernetes
+virtum down -f examples/Virtumfile-kubernetes --destroy
+```
+
+Voir [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md) §Scénarios d'acceptation.
 
 ### Banc de test v0.7
 
