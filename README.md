@@ -22,7 +22,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.8 terminée (Ansible intégré)** — `groups:` et `virtum inventory`, section `ansible:` jouée par `virtum up` puis instantané `provisioned`, `virtum provision` ; l'exemple [`examples/Virtumfile-kubernetes`](./examples/Virtumfile-kubernetes) monte un cluster Kubernetes `Ready` en un `virtum up` : [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md).
 
-**v0.9 en cours (création parallèle)** — `virtum up` crée et reprend les machines d'un lab en parallèle (`--parallel N`, défaut 4 ; `--parallel 1` = une après l'autre), sortie préfixée par machine et récapitulatif ; verrou sur `metadata.json` ; `subnet:` déclarable et chevauchements de sous-réseaux détectés ; création plus rapide sans modifier l'image (3 VM Ubuntu : 216 s en v0.8 → 25 s) : [`SPEC_TECH_V0.9.md`](./SPEC_TECH_V0.9.md).
+**v0.9 terminée (création parallèle, `subnet:`, temps de création)** — `virtum up` crée et reprend les machines d'un lab en parallèle (`--parallel N`, défaut 4 ; `--parallel 1` = une après l'autre), sortie préfixée par machine et récapitulatif ; verrou sur `metadata.json` ; `subnet:` déclarable et chevauchements de sous-réseaux détectés ; création plus rapide sans modifier l'image (3 VM Ubuntu : 216 s en v0.8 → 25 s) : [`SPEC_TECH_V0.9.md`](./SPEC_TECH_V0.9.md).
 
 ## Documentation
 
@@ -43,7 +43,7 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 | [`SPEC_TECH_V0.6.md`](./SPEC_TECH_V0.6.md) | Contrat technique **v0.6** (instantanés, `ssh_port`, `restart`) |
 | [`SPEC_TECH_V0.7.md`](./SPEC_TECH_V0.7.md) | Contrat technique **v0.7** (convergence : `ip:`, `apply --prune`, dérive) |
 | [`SPEC_TECH_V0.8.md`](./SPEC_TECH_V0.8.md) | Contrat technique **v0.8** (Ansible intégré : `groups:`, `virtum inventory`, `ansible:`, `virtum provision`) |
-| [`SPEC_TECH_V0.9.md`](./SPEC_TECH_V0.9.md) | Contrat technique **v0.9** (création parallèle : `virtum up --parallel`) |
+| [`SPEC_TECH_V0.9.md`](./SPEC_TECH_V0.9.md) | Contrat technique **v0.9** (création parallèle `virtum up --parallel`, `subnet:`, temps de création) |
 
 Le périmètre exécutable du MVP est défini par **SPEC + STEPS**, pas par l’intégralité du PRD.
 
@@ -336,6 +336,23 @@ virtum down -f examples/Virtumfile.mounts --destroy --purge
 Voir [`STEPS4.md`](./STEPS4.md) §7 et [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md).
 
 **Prérequis mounts** : paquet `virtiofsd` ; sans `uidmap` (`newuidmap`), Virtum lance virtiofsd avec `--sandbox=none` (isolation réduite — voir `virtum doctor`).
+
+### Banc de test v0.9
+
+Sur des labs jetables :
+
+```bash
+time virtum up -f Virtumfile               # 3 VM : en parallèle, récapitulatif par machine
+virtum up -f Virtumfile                    # second up : rien ne change
+virtum up -f Virtumfile --parallel 1       # (lab neuf) une machine après l'autre, sortie v0.8
+virtum destroy <machine sans ip:>          # puis :
+virtum up -f Virtumfile                    # recréée en ~15 s, même adresse
+virtum plan -f Virtumfile                  # « Réseau lab : … (NAT …, calculé|déclaré) »
+# subnet: sur un réseau déjà utilisé (ex. celui du Wi-Fi) → plan / up refusent et proposent un sous-réseau libre
+virtum down -f Virtumfile --destroy
+```
+
+Voir [`SPEC_TECH_V0.9.md`](./SPEC_TECH_V0.9.md) §Validation, § 7 et § 8.
 
 ### Banc de test v0.8
 
