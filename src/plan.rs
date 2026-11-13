@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use crate::config::{self, VirtumPaths};
 use crate::firewall;
 use crate::images::resolve_image;
-use crate::lab_network::{self, lab_subnet_third_octet};
+use crate::lab_network;
 use crate::libvirt::{domain_exists, domain_is_active, domain_state};
 use crate::metadata::{self, InstanceStatus};
 use crate::port_forward::{self, PortBind, PortForward};
@@ -215,7 +215,8 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
     print_header(&virtumfile_path, &lab, &paths);
 
     if virtumfile::lab_needs_isolated_network(&lab) {
-        print_lab_network(&lab.name)?;
+        let has_vms = !metadata::instances_for_lab(&metadata, &lab.name).is_empty();
+        print_lab_network(&lab, has_vms, &mut errors)?;
     } else {
         println!("Réseau lab : (non créé — lab entier en `network: bridge`)");
     }
@@ -443,23 +444,43 @@ fn print_header(path: &Path, lab: &Virtumfile, paths: &VirtumPaths) {
     }
 }
 
-fn print_lab_network(lab_name: &str) -> Result<()> {
-    let net_name = lab_network::lab_network_name(lab_name)?;
+/// Ligne « Réseau lab » ; erreurs : chevauchement avec un autre réseau, ou sous-réseau
+/// changé alors que des VM du lab existent.
+fn print_lab_network(lab: &Virtumfile, has_vms: bool, errors: &mut Vec<String>) -> Result<()> {
+    let net_name = lab_network::lab_network_name(&lab.name)?;
+    let subnet = lab_network::lab_subnet(lab);
     let defined = lab_network::lab_network_is_defined(&net_name)?;
     let active = if defined {
         lab_network::lab_network_is_active(&net_name)?
     } else {
         false
     };
-    let octet = lab_subnet_third_octet(lab_name);
-    let status = if active {
-        "actif"
+    let mut status = if active {
+        "actif".to_string()
     } else if defined {
-        "défini, inactif (sera démarré au up)"
+        "défini, inactif (sera démarré au up)".to_string()
     } else {
-        "à créer au up"
+        "à créer au up".to_string()
     };
-    println!("Réseau lab : {net_name} (NAT 192.168.{octet}.0/24) — {status}");
+    if let Some((addr, len)) = lab_network::defined_subnet(&net_name)? {
+        if !(len == 24 && subnet.contains(addr)) {
+            if has_vms {
+                errors.push(format!(
+                    "Le réseau {net_name} existe en {addr}/{len}, le Virtumfile demande {subnet} : \
+                     `virtum down -f … --destroy` puis `virtum up` pour changer de sous-réseau."
+                ));
+            } else {
+                status = format!("existe en {addr}/{len}, sera recréé au up (aucune VM)");
+            }
+        }
+    }
+    errors.extend(lab_network::subnet_conflicts(lab)?);
+    let origin = if lab.subnet.is_some() {
+        "déclaré"
+    } else {
+        "calculé"
+    };
+    println!("Réseau lab : {net_name} (NAT {subnet}, {origin}) — {status}");
     Ok(())
 }
 

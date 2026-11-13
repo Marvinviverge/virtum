@@ -7,6 +7,8 @@ bind: lan
 # v0.6 (optionnels) :
 # ssh_port: 2222          # si la configuration de la VM déplace sshd (repli 22)
 # restart: unless-stopped # démarrage au boot de l'hôte : no | always | unless-stopped
+# v0.9 (optionnel) : réseau du lab ; sans ce champ, 192.168.68.0/24 (calculé depuis le nom).
+# subnet: 10.42.0.0/24
 
 machines:
   web:

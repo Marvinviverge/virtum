@@ -1,5 +1,6 @@
 //! Réseau libvirt isolé par lab (`virtum-lab-<name>`, étape 30).
 
+use std::net::Ipv4Addr;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -29,24 +30,100 @@ pub fn lab_bridge_name(lab_name: &str) -> String {
     format!("vbr{}", hex::encode(&digest[..4]))
 }
 
-/// Sous-réseau NAT dédié : 192.168.<octet>.0/24 (évite 122 = réseau `default`).
+/// Sous-réseau NAT calculé : 192.168.<octet>.0/24 (évite 122 = réseau `default`).
 pub fn lab_subnet_third_octet(lab_name: &str) -> u8 {
     let digest = Sha256::digest(lab_name.as_bytes());
     64 + (digest[1] % 160)
 }
 
-pub fn lab_gateway_ipv4(lab_name: &str) -> String {
-    format!("192.168.{}.1", lab_subnet_third_octet(lab_name))
+/// Sous-réseau /24 d'un lab : `a.b.c.0/24` (`subnet:` déclaré ou calculé depuis le nom).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabSubnet {
+    pub prefix: [u8; 3],
 }
 
-pub fn generate_lab_network_xml(lab_name: &str) -> Result<String> {
+impl LabSubnet {
+    /// Calcul par défaut (hash du nom du lab, v0.2).
+    pub fn hashed(lab_name: &str) -> Self {
+        Self {
+            prefix: [192, 168, lab_subnet_third_octet(lab_name)],
+        }
+    }
+
+    /// `subnet:` du Virtumfile : `a.b.c.0/24`, dans une plage privée, hors `default`.
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        let (addr, len) = value
+            .split_once('/')
+            .with_context(|| format!("subnet: '{value}' attendu au format a.b.c.0/24"))?;
+        if len != "24" {
+            bail!("subnet: '{value}' : seul le préfixe /24 est accepté (ex. 192.168.50.0/24).");
+        }
+        let ip: Ipv4Addr = addr
+            .parse()
+            .map_err(|_| anyhow::anyhow!("subnet: '{value}' : adresse IPv4 invalide"))?;
+        let [a, b, c, d] = ip.octets();
+        if d != 0 {
+            bail!("subnet: '{value}' : l'adresse de réseau doit finir par .0 ({a}.{b}.{c}.0/24).");
+        }
+        if !ip.is_private() {
+            bail!(
+                "subnet: '{value}' : plage privée attendue (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)."
+            );
+        }
+        if [a, b, c] == [192, 168, 122] {
+            bail!("subnet: '{value}' est le réseau `default` de libvirt.");
+        }
+        Ok(Self { prefix: [a, b, c] })
+    }
+
+    pub fn network(&self) -> Ipv4Addr {
+        let [a, b, c] = self.prefix;
+        Ipv4Addr::new(a, b, c, 0)
+    }
+
+    pub fn host(&self, last: u8) -> Ipv4Addr {
+        let [a, b, c] = self.prefix;
+        Ipv4Addr::new(a, b, c, last)
+    }
+
+    pub fn contains(&self, ip: Ipv4Addr) -> bool {
+        ip.octets()[..3] == self.prefix
+    }
+
+    /// Recouvre `net/prefix_len` (n'importe quelle longueur de préfixe).
+    pub fn overlaps(&self, net: Ipv4Addr, prefix_len: u8) -> bool {
+        let common = prefix_len.min(24);
+        let mask = if common == 0 {
+            0
+        } else {
+            u32::MAX << (32 - u32::from(common))
+        };
+        (u32::from(self.network()) & mask) == (u32::from(net) & mask)
+    }
+}
+
+impl std::fmt::Display for LabSubnet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/24", self.network())
+    }
+}
+
+/// Sous-réseau effectif d'un lab : `subnet:` s'il est déclaré (déjà validé), sinon calculé.
+pub fn lab_subnet(lab: &crate::virtumfile::Virtumfile) -> LabSubnet {
+    lab.subnet
+        .as_deref()
+        .and_then(|s| LabSubnet::parse(s).ok())
+        .unwrap_or_else(|| LabSubnet::hashed(&lab.name))
+}
+
+pub fn generate_lab_network_xml(lab_name: &str, subnet: LabSubnet) -> Result<String> {
     let net_name = lab_network_name(lab_name)?;
     let bridge = lab_bridge_name(lab_name);
-    let octet = lab_subnet_third_octet(lab_name);
-    let gateway = format!("192.168.{octet}.1");
+    let gateway = subnet.host(1);
     let netmask = "255.255.255.0";
-    let range_start = format!("192.168.{octet}.2");
-    let range_end = format!("192.168.{octet}.254");
+    let range_start = subnet.host(2);
+    let range_end = subnet.host(254);
 
     Ok(format!(
         r#"<network>
@@ -107,16 +184,45 @@ fn net_is_active(net_name: &str) -> Result<bool> {
         }))
 }
 
+/// Sous-réseau d'un réseau libvirt déjà défini (`None` s'il n'existe pas).
+pub fn defined_subnet(net_name: &str) -> Result<Option<(Ipv4Addr, u8)>> {
+    if !net_is_defined(net_name)? {
+        return Ok(None);
+    }
+    let output = run_virsh(&["net-dumpxml", "--inactive", net_name])?;
+    Ok(parse_network_ip(&String::from_utf8_lossy(&output.stdout)))
+}
+
 /// Crée ou démarre le réseau isolé du lab ; retourne le nom libvirt (`virtum-lab-…`).
-pub fn ensure_lab_network(lab_name: &str) -> Result<String> {
+///
+/// Si le réseau existe avec un autre sous-réseau (`subnet:` ajouté ou modifié) : recréé
+/// quand le lab n'a aucune VM (`can_recreate`), refusé sinon.
+pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool) -> Result<String> {
     let net_name = lab_network_name(lab_name)?;
+
+    if let Some((addr, len)) = defined_subnet(&net_name)? {
+        if !(len == 24 && subnet.contains(addr)) {
+            if !can_recreate {
+                bail!(
+                    "Le réseau {net_name} existe en {addr}/{len}, le Virtumfile demande {subnet}. \
+                     Les VM du lab en dépendent : `virtum down -f … --destroy` puis `virtum up` pour changer de sous-réseau."
+                );
+            }
+            crate::verr!(
+                "Réseau {net_name} recréé en {subnet} (ancien : {addr}/{len}, aucune VM)."
+            );
+            let _ = run_virsh(&["net-destroy", &net_name]);
+            run_virsh(&["net-undefine", &net_name])
+                .with_context(|| format!("virsh net-undefine a échoué pour '{net_name}'"))?;
+        }
+    }
 
     if net_is_active(&net_name)? {
         return Ok(net_name);
     }
 
     if !net_is_defined(&net_name)? {
-        let xml = generate_lab_network_xml(lab_name)?;
+        let xml = generate_lab_network_xml(lab_name, subnet)?;
         let tmp = std::env::temp_dir().join(format!("{net_name}.xml"));
         std::fs::write(&tmp, &xml)
             .with_context(|| format!("Impossible d'écrire {}", tmp.display()))?;
@@ -142,11 +248,136 @@ pub fn ensure_lab_network(lab_name: &str) -> Result<String> {
     }
 
     crate::verr!(
-        "Réseau lab actif: {net_name} (NAT 192.168.{}.0/24, pont {})",
-        lab_subnet_third_octet(lab_name),
+        "Réseau lab actif: {net_name} (NAT {subnet}, pont {})",
         lab_bridge_name(lab_name)
     );
     Ok(net_name)
+}
+
+// --- Chevauchements de sous-réseaux (v0.9) --------------------------------------------
+
+/// Adresse + longueur de préfixe de la première `<ip>` IPv4 d'un XML de réseau libvirt
+/// (`netmask='255.255.255.0'` ou `prefix='24'`).
+pub fn parse_network_ip(xml: &str) -> Option<(Ipv4Addr, u8)> {
+    xml.lines().map(str::trim).find_map(|line| {
+        if !line.starts_with("<ip ") || line.contains("family='ipv6'") {
+            return None;
+        }
+        let addr: Ipv4Addr = xml_attr(line, "address")?.parse().ok()?;
+        let len = match (xml_attr(line, "prefix"), xml_attr(line, "netmask")) {
+            (Some(p), _) => p.parse().ok()?,
+            (None, Some(mask)) => u32::from(mask.parse::<Ipv4Addr>().ok()?).count_ones() as u8,
+            (None, None) => 24,
+        };
+        Some((addr, len))
+    })
+}
+
+/// Pont Linux d'un XML de réseau libvirt (`<bridge name='…'/>`).
+fn parse_network_bridge(xml: &str) -> Option<String> {
+    xml.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("<bridge "))
+        .and_then(|l| xml_attr(l, "name"))
+}
+
+/// Adresses IPv4 des interfaces de l'hôte (`ip -o -4 addr show`) : `(interface, adresse, préfixe)`.
+pub fn parse_ip_addr(output: &str) -> Vec<(String, Ipv4Addr, u8)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut tokens = line.split_whitespace();
+            let iface = tokens.nth(1)?.trim_end_matches(':').to_string();
+            let cidr = tokens.skip_while(|t| *t != "inet").nth(1)?;
+            let (addr, len) = cidr.split_once('/')?;
+            Some((iface, addr.parse().ok()?, len.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Réseaux déjà utilisés sur l'hôte : `(description, réseau, préfixe)`, hors réseau du lab.
+pub fn used_networks(own_net: &str, own_bridge: &str) -> Vec<(String, Ipv4Addr, u8)> {
+    let mut used = Vec::new();
+    let mut libvirt_bridges = vec![own_bridge.to_string()];
+    let names = run_virsh_output(&["net-list", "--all", "--name"])
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    for net in names.lines().map(str::trim).filter(|n| !n.is_empty()) {
+        let Ok(out) = run_virsh_output(&["net-dumpxml", "--inactive", net]) else {
+            continue;
+        };
+        let xml = String::from_utf8_lossy(&out.stdout);
+        if let Some(bridge) = parse_network_bridge(&xml) {
+            libvirt_bridges.push(bridge);
+        }
+        if net == own_net {
+            continue;
+        }
+        if let Some((addr, len)) = parse_network_ip(&xml) {
+            used.push((format!("réseau libvirt {net}"), addr, len));
+        }
+    }
+    let addrs = Command::new("ip")
+        .args(["-o", "-4", "addr", "show"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    for (iface, addr, len) in parse_ip_addr(&addrs) {
+        if addr.is_loopback() || libvirt_bridges.contains(&iface) {
+            continue;
+        }
+        used.push((format!("interface {iface}"), addr, len));
+    }
+    used
+}
+
+/// Premier 192.168.X.0/24 (X dans la plage du calcul par défaut) qui ne recouvre rien.
+pub fn suggest_free_subnet(used: &[(String, Ipv4Addr, u8)]) -> Option<LabSubnet> {
+    (64u8..=223)
+        .map(|x| LabSubnet {
+            prefix: [192, 168, x],
+        })
+        .find(|s| !used.iter().any(|(_, net, len)| s.overlaps(*net, *len)))
+}
+
+/// Chevauchements du sous-réseau du lab avec les autres réseaux de l'hôte (message prêt
+/// à afficher, avec un sous-réseau libre proposé), vide si aucun.
+pub fn subnet_conflicts(lab: &crate::virtumfile::Virtumfile) -> Result<Vec<String>> {
+    if !crate::virtumfile::lab_needs_isolated_network(lab) {
+        return Ok(Vec::new());
+    }
+    let subnet = lab_subnet(lab);
+    let net_name = lab_network_name(&lab.name)?;
+    let used = used_networks(&net_name, &lab_bridge_name(&lab.name));
+    Ok(conflict_messages(lab, subnet, &used))
+}
+
+fn conflict_messages(
+    lab: &crate::virtumfile::Virtumfile,
+    subnet: LabSubnet,
+    used: &[(String, Ipv4Addr, u8)],
+) -> Vec<String> {
+    let clashes: Vec<String> = used
+        .iter()
+        .filter(|(_, net, len)| subnet.overlaps(*net, *len))
+        .map(|(what, net, len)| format!("{what} ({net}/{len})"))
+        .collect();
+    if clashes.is_empty() {
+        return Vec::new();
+    }
+    let origin = if lab.subnet.is_some() {
+        "déclaré"
+    } else {
+        "calculé depuis le nom du lab"
+    };
+    let hint = suggest_free_subnet(used)
+        .map(|s| format!(" Déclarez un autre sous-réseau, ex. `subnet: {s}`."))
+        .unwrap_or_else(|| " Déclarez un autre sous-réseau avec `subnet:`.".to_string());
+    vec![format!(
+        "Le sous-réseau du lab '{}' ({subnet}, {origin}) est déjà utilisé : {}.{hint}",
+        lab.name,
+        clashes.join(", ")
+    )]
 }
 
 /// Détruit le réseau libvirt du lab (idempotent, après suppression des VM).
@@ -190,22 +421,12 @@ impl DhcpHost {
     }
 }
 
-/// Sous-réseau du lab au format `192.168.<octet>.0/24`.
-pub fn lab_subnet_label(lab_name: &str) -> String {
-    format!("192.168.{}.0/24", lab_subnet_third_octet(lab_name))
-}
-
 /// Vérifie qu'une adresse déclarée est utilisable sur le réseau du lab.
-pub fn validate_lab_ip(lab_name: &str, ip: std::net::Ipv4Addr) -> Result<()> {
-    let [a, b, c, d] = ip.octets();
-    let octet = lab_subnet_third_octet(lab_name);
-    if (a, b, c) != (192, 168, octet) {
-        bail!(
-            "{ip} est hors du réseau du lab ({}).",
-            lab_subnet_label(lab_name)
-        );
+pub fn validate_lab_ip(subnet: LabSubnet, ip: Ipv4Addr) -> Result<()> {
+    if !subnet.contains(ip) {
+        bail!("{ip} est hors du réseau du lab ({subnet}).");
     }
-    match d {
+    match ip.octets()[3] {
         0 => bail!("{ip} est l'adresse du réseau."),
         1 => bail!("{ip} est réservée (passerelle du lab)."),
         255 => bail!("{ip} est l'adresse de diffusion."),
@@ -496,27 +717,118 @@ mod tests {
 
     #[test]
     fn network_xml_contains_name_and_bridge() {
-        let xml = generate_lab_network_xml("demo-lab").unwrap();
+        let xml = generate_lab_network_xml("demo-lab", LabSubnet::hashed("demo-lab")).unwrap();
         assert!(xml.contains("<name>virtum-lab-demo-lab</name>"));
         assert!(xml.contains("bridge name='vbr"));
         assert!(xml.contains("192.168."));
+        let declared = LabSubnet::parse("10.20.30.0/24").unwrap();
+        let xml = generate_lab_network_xml("demo-lab", declared).unwrap();
+        assert!(xml.contains("<ip address='10.20.30.1' netmask='255.255.255.0'>"));
+        assert!(xml.contains("<range start='10.20.30.2' end='10.20.30.254'/>"));
+        assert_eq!(
+            parse_network_ip(&xml),
+            Some((Ipv4Addr::new(10, 20, 30, 1), 24))
+        );
+    }
+
+    #[test]
+    fn subnet_parsing_rules() {
+        assert_eq!(
+            LabSubnet::parse("192.168.50.0/24").unwrap().to_string(),
+            "192.168.50.0/24"
+        );
+        assert!(LabSubnet::parse("172.20.1.0/24").is_ok());
+        for (bad, needle) in [
+            ("192.168.50.0", "format"),
+            ("192.168.50.0/16", "/24"),
+            ("192.168.50.7/24", ".0"),
+            ("8.8.8.0/24", "privée"),
+            ("192.168.122.0/24", "default"),
+            ("192.168.300.0/24", "invalide"),
+        ] {
+            let err = LabSubnet::parse(bad).unwrap_err().to_string();
+            assert!(err.contains(needle), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn overlaps_and_free_subnet() {
+        let s = LabSubnet::parse("192.168.68.0/24").unwrap();
+        assert!(s.overlaps(Ipv4Addr::new(192, 168, 68, 1), 24));
+        assert!(s.overlaps(Ipv4Addr::new(192, 168, 0, 0), 16));
+        assert!(s.overlaps(Ipv4Addr::new(192, 168, 68, 128), 25));
+        assert!(!s.overlaps(Ipv4Addr::new(192, 168, 69, 1), 24));
+        assert!(!s.overlaps(Ipv4Addr::new(10, 0, 0, 1), 8));
+        let used = vec![
+            ("a".to_string(), Ipv4Addr::new(192, 168, 64, 1), 24),
+            ("b".to_string(), Ipv4Addr::new(192, 168, 65, 1), 24),
+        ];
+        assert_eq!(
+            suggest_free_subnet(&used).unwrap().to_string(),
+            "192.168.66.0/24"
+        );
+    }
+
+    #[test]
+    fn conflict_message_names_the_culprit_and_a_free_subnet() {
+        let lab = crate::virtumfile::load_from_str(
+            "name: benchfail\nsubnet: 192.168.68.0/24\nmachines:\n  a:\n    os: debian-12\n",
+        )
+        .unwrap();
+        let used = vec![(
+            "réseau libvirt virtum-lab-demo-lab".to_string(),
+            Ipv4Addr::new(192, 168, 68, 1),
+            24,
+        )];
+        let msgs = conflict_messages(&lab, lab_subnet(&lab), &used);
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            msgs[0].contains("virtum-lab-demo-lab (192.168.68.1/24)"),
+            "{}",
+            msgs[0]
+        );
+        assert!(msgs[0].contains("déclaré"), "{}", msgs[0]);
+        assert!(msgs[0].contains("`subnet: 192.168.64.0/24`"), "{}", msgs[0]);
+        assert!(conflict_messages(&lab, lab_subnet(&lab), &[]).is_empty());
+    }
+
+    #[test]
+    fn parses_host_addresses() {
+        let out = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n\
+                   3: wlp3s0    inet 192.168.1.23/24 brd 192.168.1.255 scope global dynamic wlp3s0\n";
+        assert_eq!(
+            parse_ip_addr(out),
+            vec![
+                ("lo".to_string(), Ipv4Addr::new(127, 0, 0, 1), 8),
+                ("wlp3s0".to_string(), Ipv4Addr::new(192, 168, 1, 23), 24),
+            ]
+        );
+        let xml = "<network>\n  <bridge name='virbr0' stp='on'/>\n  <ip address='192.168.122.1' prefix='24'>\n</network>";
+        assert_eq!(
+            parse_network_ip(xml),
+            Some((Ipv4Addr::new(192, 168, 122, 1), 24))
+        );
+        assert_eq!(parse_network_bridge(xml).as_deref(), Some("virbr0"));
     }
 
     #[test]
     fn validate_lab_ip_rules() {
         let octet = lab_subnet_third_octet("k8s");
+        let subnet = LabSubnet::hashed("k8s");
         let ip = |d: u8| std::net::Ipv4Addr::new(192, 168, octet, d);
-        assert!(validate_lab_ip("k8s", ip(10)).is_ok());
-        assert!(validate_lab_ip("k8s", ip(254)).is_ok());
+        assert!(validate_lab_ip(subnet, ip(10)).is_ok());
+        assert!(validate_lab_ip(subnet, ip(254)).is_ok());
         for bad in [0, 1, 255] {
-            assert!(validate_lab_ip("k8s", ip(bad)).is_err(), "{bad}");
+            assert!(validate_lab_ip(subnet, ip(bad)).is_err(), "{bad}");
         }
         let other = if octet == 200 { 201 } else { 200 };
-        let err = validate_lab_ip("k8s", std::net::Ipv4Addr::new(192, 168, other, 10))
+        let err = validate_lab_ip(subnet, std::net::Ipv4Addr::new(192, 168, other, 10))
             .unwrap_err()
             .to_string();
-        assert!(err.contains(&lab_subnet_label("k8s")), "{err}");
-        assert!(validate_lab_ip("k8s", std::net::Ipv4Addr::new(10, 0, 0, 5)).is_err());
+        assert!(err.contains(&subnet.to_string()), "{err}");
+        assert!(validate_lab_ip(subnet, std::net::Ipv4Addr::new(10, 0, 0, 5)).is_err());
+        let declared = LabSubnet::parse("10.5.5.0/24").unwrap();
+        assert!(validate_lab_ip(declared, std::net::Ipv4Addr::new(10, 5, 5, 7)).is_ok());
     }
 
     #[test]

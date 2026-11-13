@@ -67,7 +67,18 @@ async fn up_async(
     let metadata = metadata::load_metadata(&paths.metadata).await?;
 
     let lab_net = if virtumfile::lab_needs_isolated_network(&lab) {
-        Some(lab_network::ensure_lab_network(&lab.name)?)
+        // Chevauchement avec un autre réseau (lab, `default`, interface de l'hôte) :
+        // message clair et sous-réseau libre proposé, plutôt que l'erreur de libvirt.
+        let conflicts = lab_network::subnet_conflicts(&lab)?;
+        if let Some(msg) = conflicts.first() {
+            bail!("{msg}");
+        }
+        let no_vm = metadata::instances_for_lab(&metadata, &lab.name).is_empty();
+        Some(lab_network::ensure_lab_network(
+            &lab.name,
+            lab_network::lab_subnet(&lab),
+            no_vm,
+        )?)
     } else {
         None
     };

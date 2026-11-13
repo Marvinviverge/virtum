@@ -96,6 +96,9 @@ pub struct Virtumfile {
     /// Provisionnement Ansible du lab depuis l'hôte (v0.8).
     #[serde(default)]
     pub ansible: Option<AnsibleSpec>,
+    /// Sous-réseau du réseau isolé du lab (`a.b.c.0/24`, v0.9) ; absent = calculé depuis le nom.
+    #[serde(default)]
+    pub subnet: Option<String>,
     pub machines: BTreeMap<String, MachineSpec>,
 }
 
@@ -409,11 +412,25 @@ fn validate_static_ips(lab: &Virtumfile) -> Result<()> {
                  En `network: bridge`, l'adresse vient du DHCP du LAN, que Virtum ne contrôle pas."
             );
         }
-        crate::lab_network::validate_lab_ip(&lab.name, ip)
+        crate::lab_network::validate_lab_ip(crate::lab_network::lab_subnet(lab), ip)
             .with_context(|| format!("Machine '{machine_name}' : ip: {ip} invalide"))?;
         if let Some(other) = seen.insert(ip, machine_name) {
             bail!("ip: {ip} est déclarée pour '{other}' et '{machine_name}'.");
         }
+    }
+    Ok(())
+}
+
+/// `subnet:` : `a.b.c.0/24` privé, et seulement si le lab a un réseau isolé.
+fn validate_subnet(lab: &Virtumfile) -> Result<()> {
+    let Some(ref value) = lab.subnet else {
+        return Ok(());
+    };
+    crate::lab_network::LabSubnet::parse(value)?;
+    if !lab_needs_isolated_network(lab) {
+        bail!(
+            "`subnet:` est sans effet : le lab n'a pas de réseau isolé (toutes les machines en `network: bridge`)."
+        );
     }
     Ok(())
 }
@@ -593,6 +610,7 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
             .with_context(|| format!("Machine '{machine_name}' : mounts invalides"))?;
     }
     port_forward::validate_lab_port_uniqueness(&port_machines)?;
+    validate_subnet(lab)?;
     validate_static_ips(lab)?;
     validate_groups(lab)?;
     validate_ansible(lab, virtumfile_dir)?;
@@ -1192,5 +1210,44 @@ machines:
         )
         .is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn subnet_field_drives_ip_validation() {
+        let lab = load_from_str(
+            "name: k8s\nsubnet: 10.42.0.0/24\nmachines:\n  cp:\n    os: debian-12\n    ip: 10.42.0.10\n",
+        )
+        .unwrap();
+        validate(&lab, Path::new(".")).unwrap();
+        assert_eq!(
+            crate::lab_network::lab_subnet(&lab).to_string(),
+            "10.42.0.0/24"
+        );
+
+        let outside = load_from_str(
+            "name: k8s\nsubnet: 10.42.0.0/24\nmachines:\n  cp:\n    os: debian-12\n    ip: 10.43.0.10\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", validate(&outside, Path::new(".")).unwrap_err());
+        assert!(
+            err.contains("hors du réseau du lab (10.42.0.0/24)"),
+            "{err}"
+        );
+
+        let bad =
+            load_from_str("name: k8s\nsubnet: 10.42.0.0/16\nmachines:\n  cp:\n    os: debian-12\n")
+                .unwrap();
+        assert!(format!("{:#}", validate(&bad, Path::new(".")).unwrap_err()).contains("/24"));
+
+        let mut bridge_only = load_from_str(
+            "name: k8s\nnetwork: bridge\nsubnet: 10.42.0.0/24\nmachines:\n  cp:\n    os: debian-12\n",
+        )
+        .unwrap();
+        assert!(validate_subnet(&bridge_only)
+            .unwrap_err()
+            .to_string()
+            .contains("sans effet"));
+        bridge_only.subnet = None;
+        assert!(validate_subnet(&bridge_only).is_ok());
     }
 }
