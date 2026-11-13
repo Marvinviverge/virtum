@@ -73,7 +73,7 @@ impl<'a> DomainSpec<'a> {
 }
 
 fn render_filesystem_xml(fs: &VirtiofsSpec) -> Result<String> {
-    let socket = absolute_path(&fs.socket_path)?;
+    let socket = socket_absolute_path(&fs.socket_path)?;
     Ok(format!(
         r#"    <filesystem type='mount' accessmode='mapped'>
       <driver type='virtiofs' queue='1024'/>
@@ -1010,6 +1010,27 @@ fn extract_ipv4_token(line: &str) -> Option<String> {
     None
 }
 
+/// Chemin absolu résolu d'un socket virtiofsd. virtiofsd supprime son socket dès que QEMU
+/// s'y connecte (et il n'existe pas non plus quand virtiofsd est arrêté) : seul le dossier
+/// parent est résolu, le nom du fichier est ajouté tel quel.
+fn socket_absolute_path(path: &Path) -> Result<String> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        bail!("Chemin de socket virtiofs invalide : {}", path.display());
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let dir = std::fs::canonicalize(parent).with_context(|| {
+        format!(
+            "Impossible de résoudre le dossier du socket {}",
+            path.display()
+        )
+    })?;
+    Ok(dir.join(name).display().to_string())
+}
+
 fn absolute_path(path: &Path) -> Result<String> {
     let abs = std::fs::canonicalize(path).with_context(|| {
         format!(
@@ -1296,7 +1317,7 @@ mod tests {
         let sock = dir.join("virtiofs-app.sock");
         std::fs::write(&disk, b"").unwrap();
         std::fs::write(&iso, b"").unwrap();
-        std::fs::write(&sock, b"").unwrap();
+        // Pas de fichier socket : virtiofsd le supprime dès que QEMU s'y connecte.
         let spec = DomainSpec {
             vm_id: "vm-fs",
             ram_mb: 1024,
@@ -1314,6 +1335,8 @@ mod tests {
         };
         let xml = generate_domain_xml(&spec).unwrap();
         assert!(xml.contains("type='virtiofs'"));
+        let expected_sock = dir.canonicalize().unwrap().join("virtiofs-app.sock");
+        assert!(xml.contains(&format!("<source socket='{}'/>", expected_sock.display())));
         assert!(xml.contains("<access mode='shared'/>"));
         assert!(xml.contains("<source type='memfd'/>"));
         assert!(xml.contains("seclabel type='none'"));
