@@ -364,7 +364,8 @@ mod tests {
         assert_eq!(
             var("ansible_ssh_common_args"),
             "-F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-             -o UserKnownHostsFile=/var/lib/virtum/instances/vm-cp/known_hosts"
+             -o UserKnownHostsFile=/var/lib/virtum/instances/vm-cp/known_hosts \
+             -o HostKeyAlias=vm-cp"
         );
         assert_eq!(var("virtum_hostname"), "kubernetes-lab-control-plane");
 
@@ -388,7 +389,7 @@ mod tests {
             "\n[kubernetes_lab]\ncontrol-plane ansible_host=192.168.218.10 ansible_port=2222 "
         ));
         assert!(ini.contains(
-            "ansible_ssh_common_args='-F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/virtum/instances/vm-cp/known_hosts'"
+            "ansible_ssh_common_args='-F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/virtum/instances/vm-cp/known_hosts -o HostKeyAlias=vm-cp'"
         ));
         assert!(ini.contains("\n[kubernetes_lab:vars]\nvirtum_lab=kubernetes-lab\n"));
         assert!(ini.contains("\n[control_plane]\ncontrol-plane\n"));

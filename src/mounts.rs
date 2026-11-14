@@ -55,6 +55,10 @@ pub struct ResolvedMount {
     /// partage (relance de virtiofsd, `destroy --purge`). Absent dans un état antérieur.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtumfile_dir: Option<PathBuf>,
+    /// virtiofsd sert le partage en lecture seule (imposé côté hôte). Absent d'un état
+    /// antérieur à la v0.10 : le démon qui tourne a été lancé en écriture.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -65,6 +69,8 @@ enum MountYamlEntry {
         name: String,
         host: String,
         guest: String,
+        #[serde(default)]
+        rw: bool,
     },
 }
 
@@ -82,24 +88,41 @@ pub fn parse_mount_entries(raw: &[serde_yaml::Value]) -> Result<Vec<MountSpec>> 
 fn mount_entry_to_spec(entry: MountYamlEntry, index: usize) -> Result<MountSpec> {
     match entry {
         MountYamlEntry::Short(s) => {
-            let (host, guest) = parse_mount_shortcut(&s)?;
+            let (host, guest, rw) = parse_mount_shortcut(&s)?;
             let name = default_volume_name(&host, index);
-            Ok(MountSpec { name, host, guest })
+            Ok(MountSpec {
+                name,
+                host,
+                guest,
+                rw,
+            })
         }
-        MountYamlEntry::Detailed { name, host, guest } => Ok(MountSpec {
+        MountYamlEntry::Detailed {
+            name,
+            host,
+            guest,
+            rw,
+        } => Ok(MountSpec {
             name: validate_volume_name(&name)?,
             host: host.trim().to_string(),
             guest: guest.trim().to_string(),
+            rw,
         }),
     }
 }
 
-fn parse_mount_shortcut(s: &str) -> Result<(String, String)> {
+/// `host:guest[:ro|:rw]` ; lecture seule par défaut.
+fn parse_mount_shortcut(s: &str) -> Result<(String, String, bool)> {
     let s = s.trim();
-    let (host, guest) = s
-        .split_once(':')
-        .with_context(|| format!("Mount invalide '{s}' (attendu host:guest, ex. ./app:~/app)"))?;
-    Ok((host.trim().to_string(), guest.trim().to_string()))
+    let (host, rest) = s.split_once(':').with_context(|| {
+        format!("Mount invalide '{s}' (attendu host:guest[:rw], ex. ./app:~/app:rw)")
+    })?;
+    let (guest, rw) = match rest.rsplit_once(':') {
+        Some((guest, "rw")) => (guest, true),
+        Some((guest, "ro")) => (guest, false),
+        _ => (rest, false),
+    };
+    Ok((host.trim().to_string(), guest.trim().to_string(), rw))
 }
 
 fn default_volume_name(host: &str, index: usize) -> String {
@@ -225,6 +248,7 @@ pub fn resolve_mount_spec(spec: &MountSpec, virtumfile_base: &Path) -> Result<Re
         socket_path: PathBuf::new(), // rempli par ensure_virtiofs_servers
         virtiofsd_pid: None,
         virtumfile_dir: Some(virtumfile_base.to_path_buf()),
+        read_only: !spec.rw,
     })
 }
 
@@ -434,6 +458,7 @@ fn ensure_virtiofs_socket_running(instance_dir: &Path, mount: &mut ResolvedMount
         &mount.name,
         &mount.host_abs,
         &mount.socket_path,
+        mount.read_only,
     )?);
     Ok(())
 }
@@ -542,11 +567,47 @@ fn validate_stored_share(mount: &ResolvedMount) -> Result<()> {
     Ok(())
 }
 
+/// `virtiofsd --readonly` existe (virtiofsd ≥ 1.11).
+fn virtiofsd_supports_readonly(virtiofsd: &Path) -> bool {
+    Command::new(virtiofsd)
+        .arg("--help")
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).contains("--readonly")
+                || String::from_utf8_lossy(&o.stderr).contains("--readonly")
+        })
+        .unwrap_or(false)
+}
+
+/// bubblewrap, pour servir un partage en lecture seule avec un virtiofsd sans `--readonly`.
+pub fn resolve_bwrap_path() -> Option<PathBuf> {
+    ["/usr/bin/bwrap", "/bin/bwrap"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+}
+
+/// Comment imposer la lecture seule côté hôte : option native ou bubblewrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadOnlyBackend {
+    Native,
+    Bwrap(PathBuf),
+}
+
+/// Moyen d'imposer la lecture seule avec ce virtiofsd, `None` s'il n'y en a pas.
+pub fn read_only_backend(virtiofsd: &Path) -> Option<ReadOnlyBackend> {
+    if virtiofsd_supports_readonly(virtiofsd) {
+        return Some(ReadOnlyBackend::Native);
+    }
+    resolve_bwrap_path().map(ReadOnlyBackend::Bwrap)
+}
+
 fn start_virtiofsd(
     instance_dir: &Path,
     mount_name: &str,
     shared_dir: &Path,
     socket_path: &Path,
+    read_only: bool,
 ) -> Result<u32> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
@@ -572,13 +633,41 @@ fn start_virtiofsd(
     // --killpriv-v2 : toute écriture, chown ou troncature par l'invité efface les bits
     // setuid/setgid (et capacités) des fichiers hôte. --socket-group seulement en repli
     // sans setfacl (sinon socket 0600 + ACL libvirt-qemu).
-    let mut cmd = Command::new(&virtiofsd);
+    //
+    // Lecture seule : imposée côté hôte (l'invité est root chez lui, un `mount -o ro` dans
+    // la VM ne protège rien). virtiofsd ≥ 1.11 a `--readonly` ; sinon il tourne sous
+    // bubblewrap, dans un espace de noms où le dossier partagé est monté en lecture seule.
+    let backend = if read_only {
+        Some(read_only_backend(&virtiofsd).with_context(|| {
+            format!(
+                "Volume '{mount_name}' en lecture seule : ce virtiofsd n'a pas `--readonly` et \
+                 bubblewrap est absent. Installez-le (sudo apt install bubblewrap) ou déclarez \
+                 le partage `rw: true`."
+            )
+        })?)
+    } else {
+        None
+    };
+    let shared_str = shared.to_str().context("shared-dir non UTF-8")?;
+    let mut cmd = match &backend {
+        Some(ReadOnlyBackend::Bwrap(bwrap)) => {
+            let mut c = Command::new(bwrap);
+            c.args(["--dev-bind", "/", "/", "--ro-bind", shared_str, shared_str])
+                .arg("--")
+                .arg(&virtiofsd);
+            c
+        }
+        _ => Command::new(&virtiofsd),
+    };
+    if backend == Some(ReadOnlyBackend::Native) {
+        cmd.arg("--readonly");
+    }
     cmd.args([
         "--sandbox=none",
         "--socket-path",
         socket.to_str().context("socket path non UTF-8")?,
         "--shared-dir",
-        shared.to_str().context("shared-dir non UTF-8")?,
+        shared_str,
         "--killpriv-v2",
         "--cache=auto",
     ]);
@@ -617,6 +706,21 @@ fn start_virtiofsd(
         }
         if path_is_socket(&socket) && daemon_running(daemon_pid) {
             libvirt_access::prepare_virtiofs_socket(&socket)?;
+            // Sous bubblewrap, on suit le virtiofsd lui-même (son enfant) : c'est lui que
+            // l'état reconnaît et arrête ; bwrap se termine avec lui.
+            if matches!(backend, Some(ReadOnlyBackend::Bwrap(_))) {
+                let needle = socket.to_string_lossy();
+                if let Some(pid) = crate::procs::find_matching("virtiofsd", &needle)
+                    .into_iter()
+                    .find(|p| *p != daemon_pid)
+                {
+                    return Ok(pid);
+                }
+                bail!(
+                    "virtiofsd introuvable sous bubblewrap pour le volume '{mount_name}' ({}).",
+                    socket.display()
+                );
+            }
             return Ok(daemon_pid);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -779,6 +883,7 @@ pub fn mounts_to_instance_specs(mounts: &[ResolvedMount]) -> Vec<MountSpec> {
             name: m.name.clone(),
             host: m.host.clone(),
             guest: m.guest.clone(),
+            rw: !m.read_only,
         })
         .collect()
 }
@@ -815,18 +920,42 @@ pub fn mounts_changed_blocking(stored: &[MountSpec], desired: &[MountSpec]) -> V
                      Utilisez virtum destroy puis virtum up.",
                     d.name, s.host, s.guest, d.host, d.guest
                 ));
+            } else if s.rw != d.rw {
+                errors.push(format!(
+                    "volume '{}' : accès modifié ({} → {}). \
+                     Utilisez virtum destroy puis virtum up.",
+                    d.name,
+                    access_label(s.rw),
+                    access_label(d.rw)
+                ));
             }
         }
     }
     errors
 }
 
+fn access_label(rw: bool) -> &'static str {
+    if rw {
+        "lecture-écriture"
+    } else {
+        "lecture seule"
+    }
+}
+
 /// Étapes de montage virtiofs exécutées via SSH (chemins déjà validés).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MountSshStep {
-    Mkdir { path: String },
-    Mount { volume: String, path: String },
-    Chown { path: String },
+    Mkdir {
+        path: String,
+    },
+    Mount {
+        volume: String,
+        path: String,
+        read_only: bool,
+    },
+    Chown {
+        path: String,
+    },
 }
 
 /// Prépare les étapes SSH pour monter des volumes (sans concaténation shell).
@@ -839,10 +968,14 @@ pub fn ssh_mount_steps(mounts: &[ResolvedMount]) -> Vec<MountSshStep> {
         steps.push(MountSshStep::Mount {
             volume: m.name.clone(),
             path: m.guest_path.clone(),
+            read_only: m.read_only,
         });
-        steps.push(MountSshStep::Chown {
-            path: m.guest_path.clone(),
-        });
+        // Lecture seule : l'hôte refuse toute écriture, chown compris.
+        if !m.read_only {
+            steps.push(MountSshStep::Chown {
+                path: m.guest_path.clone(),
+            });
+        }
     }
     steps
 }
@@ -854,8 +987,13 @@ pub fn ssh_mount_commands(mounts: &[ResolvedMount]) -> Vec<String> {
         .into_iter()
         .map(|step| match step {
             MountSshStep::Mkdir { path } => format!("mkdir -p -- {path}"),
-            MountSshStep::Mount { volume, path } => {
-                format!("mount -t virtiofs {volume} {path} || true")
+            MountSshStep::Mount {
+                volume,
+                path,
+                read_only,
+            } => {
+                let ro = if read_only { "-o ro " } else { "" };
+                format!("mount -t virtiofs {ro}{volume} {path} || true")
             }
             MountSshStep::Chown { path } => format!("chown -R virtum:virtum {path}"),
         })
@@ -868,7 +1006,10 @@ pub fn format_mount_list(mounts: &[MountSpec]) -> String {
     }
     mounts
         .iter()
-        .map(|m| format!("{}:{}→{}", m.name, m.host, m.guest))
+        .map(|m| {
+            let rw = if m.rw { " (rw)" } else { "" };
+            format!("{}:{}→{}{rw}", m.name, m.host, m.guest)
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -909,6 +1050,77 @@ mod tests {
         }
     }
 
+    /// Lecture seule par défaut ; `rw` explicite (forme courte ou détaillée).
+    #[test]
+    fn mounts_are_read_only_unless_rw() {
+        let parse = |yaml: &str| {
+            let raw: Vec<serde_yaml::Value> = serde_yaml::from_str(yaml).unwrap();
+            parse_mount_entries(&raw).unwrap()
+        };
+        let m = parse(
+            "- ./src:~/src\n- ./out:~/out:rw\n- ./doc:~/doc:ro\n\
+             - {name: data, host: ./data, guest: ~/data}\n\
+             - {name: db, host: ./db, guest: ~/db, rw: true}\n",
+        );
+        let got: Vec<_> = m.iter().map(|m| (m.guest.as_str(), m.rw)).collect();
+        assert_eq!(
+            got,
+            [
+                ("~/src", false),
+                ("~/out", true),
+                ("~/doc", false),
+                ("~/data", false),
+                ("~/db", true)
+            ]
+        );
+        // Un changement d'accès demande de recréer la VM.
+        let mut rw = m[0].clone();
+        rw.rw = true;
+        let msg = mounts_changed_blocking(&m[..1], &[rw]);
+        assert!(
+            msg[0].contains("lecture seule → lecture-écriture"),
+            "{msg:?}"
+        );
+        // État antérieur sans le champ : le démon qui tourne a été lancé en écriture.
+        let legacy: ResolvedMount = serde_json::from_str(
+            r#"{"name":"a","host":"./a","guest":"~/a","host_abs":"/p/a",
+                "guest_path":"/home/virtum/a","socket_path":"/s"}"#,
+        )
+        .unwrap();
+        assert!(!legacy.read_only);
+    }
+
+    /// Le partage en lecture seule est imposé côté hôte : l'écriture échoue sous bubblewrap.
+    #[test]
+    fn bwrap_read_only_bind_blocks_writes() {
+        let Some(bwrap) = resolve_bwrap_path() else {
+            return;
+        };
+        let d = scratch("ro-bind");
+        let share = d.join("share");
+        fs::create_dir_all(&share).unwrap();
+        let s = share.to_str().unwrap();
+        if bwrap_unusable(&bwrap) {
+            let _ = fs::remove_dir_all(d);
+            return; // espaces de noms refusés sur cette machine
+        }
+        let wrote = Command::new(&bwrap)
+            .args(["--dev-bind", "/", "/", "--ro-bind", s, s, "--", "sh", "-c"])
+            .arg(format!("echo x > {s}/f"))
+            .status()
+            .unwrap();
+        assert!(!wrote.success());
+        assert!(!share.join("f").exists());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    fn bwrap_unusable(bwrap: &Path) -> bool {
+        !Command::new(bwrap)
+            .args(["--dev-bind", "/", "/", "true"])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
     #[test]
     fn ssh_mount_steps_use_validated_paths() {
         let mounts = vec![ResolvedMount {
@@ -920,12 +1132,27 @@ mod tests {
             socket_path: PathBuf::new(),
             virtiofsd_pid: None,
             virtumfile_dir: None,
+            read_only: false,
         }];
         let steps = ssh_mount_steps(&mounts);
         assert_eq!(steps.len(), 3);
         assert!(matches!(
             &steps[0],
             MountSshStep::Mkdir { path } if path == "/home/virtum/app"
+        ));
+        // Lecture seule : monté `-o ro`, sans chown (l'hôte refuserait l'écriture).
+        let ro = vec![ResolvedMount {
+            read_only: true,
+            ..mounts[0].clone()
+        }];
+        let steps = ssh_mount_steps(&ro);
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(
+            &steps[1],
+            MountSshStep::Mount {
+                read_only: true,
+                ..
+            }
         ));
     }
 
@@ -1026,6 +1253,7 @@ mod tests {
             socket_path: PathBuf::new(),
             virtiofsd_pid: None,
             virtumfile_dir: Some(proj.clone()),
+            read_only: true,
         };
         validate_stored_share(&mount).unwrap();
         fs::remove_dir(proj.join("data")).unwrap();
@@ -1125,6 +1353,7 @@ mod tests {
             socket_path: PathBuf::new(),
             virtiofsd_pid: None,
             virtumfile_dir: root,
+            read_only: true,
         };
         save_mounts_state(
             &inst,

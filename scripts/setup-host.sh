@@ -28,6 +28,8 @@ PACKAGES=(
   cloud-image-utils
   openssh-client
   socat
+  virtiofsd
+  bubblewrap
 )
 
 echo "==> Mise à jour des index apt…"

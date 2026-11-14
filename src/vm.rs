@@ -1202,6 +1202,24 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         None
     };
 
+    // cloud-init ne monte les partages qu'au premier démarrage : on les remonte ici.
+    if !mount_state.is_empty() {
+        crate::verr!(
+            "Montage virtiofs dans la VM ({} volume(s))…",
+            mount_state.len()
+        );
+        if let Err(err) = crate::ssh::run_ssh_mount_steps(
+            &keys.private_key,
+            &instance.user,
+            &ip,
+            crate::ssh::reachable_ssh_port(&ip, instance.ssh_port.unwrap_or(SSH_PORT)),
+            &mount_state,
+            &ssh_opts,
+        ) {
+            crate::verr!("Avertissement: montage des partages dans la VM : {err:#}");
+        }
+    }
+
     let shell_ref = instance.name.clone().unwrap_or_else(|| vm_id.clone());
     let forwards_snapshot = instance.port_forwards.clone();
     let port_bind = instance.port_bind.unwrap_or(port_forward::PortBind::Local);

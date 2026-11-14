@@ -134,16 +134,26 @@ fn check_virtiofsd() -> CheckResult {
     };
     match Command::new(&path).arg("--version").output() {
         Ok(output) if output.status.success() => {
-            let mut detail = String::new();
+            let mut notes = Vec::new();
             if !std::path::Path::new("/usr/bin/newuidmap").exists() {
-                detail = "Paquet uidmap absent : Virtum lance virtiofsd avec --sandbox=none \
-                          (isolation réduite — installez uidmap pour le sandbox virtiofsd)."
-                    .to_string();
+                notes.push(
+                    "Paquet uidmap absent : Virtum lance virtiofsd avec --sandbox=none \
+                     (isolation réduite — installez uidmap pour le sandbox virtiofsd).",
+                );
+            }
+            // Les partages sont en lecture seule par défaut : sans moyen de l'imposer côté
+            // hôte, seuls les partages `rw: true` fonctionnent.
+            let read_only = crate::mounts::read_only_backend(&path);
+            if read_only.is_none() {
+                notes.push(
+                    "Partages en lecture seule impossibles : ce virtiofsd n'a pas --readonly et \
+                     bubblewrap est absent (sudo apt install bubblewrap).",
+                );
             }
             CheckResult {
                 name: format!("{NAME} ({})", path.display()),
-                ok: true,
-                detail,
+                ok: read_only.is_some(),
+                detail: notes.join(" "),
             }
         }
         Ok(_) => CheckResult {

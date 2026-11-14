@@ -42,13 +42,27 @@ impl SshSecurityMode {
 pub struct SshSessionOpts {
     pub mode: SshSecurityMode,
     pub known_hosts: PathBuf,
+    /// Nom sous lequel la clé d'hôte est épinglée (`HostKeyAlias`) : l'id de la VM, pas
+    /// son IP. Une autre VM qui obtient cette IP (bail usurpé, ARP, agent invité menteur)
+    /// présente une autre clé et la connexion est refusée.
+    pub host_key_alias: Option<String>,
 }
 
 impl SshSessionOpts {
     pub fn new(instance_dir: &Path, insecure_ssh: bool) -> Self {
+        let host_key_alias = instance_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| {
+                !n.is_empty()
+                    && n.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+            .map(str::to_string);
         Self {
             mode: SshSecurityMode::from_flag(insecure_ssh),
             known_hosts: known_hosts_path(instance_dir),
+            host_key_alias,
         }
     }
 }
@@ -159,6 +173,9 @@ fn append_security_opts(cmd: &mut Command, opts: &SshSessionOpts, batch_mode: bo
             let kh = path_arg(&opts.known_hosts)?;
             cmd.arg("-o").arg(format!("UserKnownHostsFile={kh}"));
             cmd.arg("-o").arg("GlobalKnownHostsFile=/dev/null");
+            if let Some(alias) = &opts.host_key_alias {
+                cmd.arg("-o").arg(format!("HostKeyAlias={alias}"));
+            }
         }
     }
     Ok(())
@@ -322,17 +339,17 @@ pub fn run_ssh_mount_steps(
                     opts,
                 )?;
             }
-            MountSshStep::Mount { volume, path } => {
-                if ssh_run_sudo_argv(
-                    private_key,
-                    user,
-                    host,
-                    port,
-                    &["mount", "-t", "virtiofs", &volume, &path],
-                    opts,
-                )
-                .is_err()
-                {
+            MountSshStep::Mount {
+                volume,
+                path,
+                read_only,
+            } => {
+                let mut argv = vec!["mount", "-t", "virtiofs"];
+                if read_only {
+                    argv.extend(["-o", "ro"]);
+                }
+                argv.extend([volume.as_str(), path.as_str()]);
+                if ssh_run_sudo_argv(private_key, user, host, port, &argv, opts).is_err() {
                     // runcmd cloud-init peut avoir déjà monté le volume
                 }
             }
@@ -622,10 +639,13 @@ pub fn ssh_option_strings(opts: &SshSessionOpts) -> (String, String) {
             "StrictHostKeyChecking=no".into(),
             "UserKnownHostsFile=/dev/null".into(),
         ),
-        SshSecurityMode::Secure => (
-            "StrictHostKeyChecking=accept-new".into(),
-            format!("UserKnownHostsFile={}", opts.known_hosts.display()),
-        ),
+        SshSecurityMode::Secure => {
+            let mut known = format!("UserKnownHostsFile={}", opts.known_hosts.display());
+            if let Some(alias) = &opts.host_key_alias {
+                known.push_str(&format!(" -o HostKeyAlias={alias}"));
+            }
+            ("StrictHostKeyChecking=accept-new".into(), known)
+        }
     }
 }
 
@@ -722,6 +742,11 @@ mod tests {
         let (strict, kh) = ssh_option_strings(&opts);
         assert_eq!(strict, "StrictHostKeyChecking=accept-new");
         assert!(kh.contains("known_hosts"));
+        // La clé est épinglée par VM (nom du dossier d'instance), pas par IP.
+        let vm = SshSessionOpts::new(Path::new("/var/lib/virtum/instances/vm-0123abcd"), false);
+        assert!(ssh_option_strings(&vm)
+            .1
+            .ends_with(" -o HostKeyAlias=vm-0123abcd"));
 
         let opts_insec = SshSessionOpts::new(&dir, true);
         let (strict2, kh2) = ssh_option_strings(&opts_insec);

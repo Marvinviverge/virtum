@@ -24,6 +24,10 @@ CLI Linux pour lancer des VM locales reproductibles avec une expérience proche 
 
 **v0.9 terminée (création parallèle, `subnet:`, temps de création)** — `virtum up` crée et reprend les machines d'un lab en parallèle (`--parallel N`, défaut 4 ; `--parallel 1` = une après l'autre), sortie préfixée par machine et récapitulatif ; verrou sur `metadata.json` ; `subnet:` déclarable et chevauchements de sous-réseaux détectés ; création plus rapide sans modifier l'image (3 VM Ubuntu : 216 s en v0.8 → 25 s) : [`SPEC_TECH_V0.9.md`](./SPEC_TECH_V0.9.md).
 
+## Sécurité
+
+Modèle de menace, garanties et limites : [`SECURITY.md`](./SECURITY.md).
+
 ## Documentation
 
 | Document | Rôle |
@@ -67,7 +71,7 @@ sudo ./scripts/setup-host.sh    # apt, libvirt, socat, groupes libvirt/kvm
 ```bash
 sudo apt update && sudo apt install -y \
   qemu-kvm libvirt-daemon-system libvirt-clients \
-  qemu-utils cloud-image-utils openssh-client socat
+  qemu-utils cloud-image-utils openssh-client socat virtiofsd bubblewrap
 sudo usermod -aG libvirt,kvm $USER
 ```
 
@@ -161,7 +165,7 @@ Virtum utilise **libvirt système** (`qemu:///system`).
 - **`virtum up`** (lab) : réseau dédié **`virtum-lab-<name>`** par lab (NAT isolé). Les machines du même lab se joignent entre elles.
 - **`bind: lan`** (Virtumfile) : les `ports:` écoutent sur `0.0.0.0` (joignable depuis le même Wi‑Fi/Ethernet que le PC). Ouvrez le pare-feu hôte avec **`virtum open`** après `virtum up`. **`virtum plan`** compare les ports du Virtumfile à l’état enregistré dans `firewall-<lab>.json` (aligné, absent, ou désaligné après changement de port).
 - **Inventaire Ansible (v0.8)** : `virtum inventory -f Virtumfile [-o inventory.ini] [--format yaml]` liste les machines qui tournent (nom de machine, IP, port, clé et `known_hosts` de l'instance : pas besoin de `host_key_checking = False`). Groupes : `groups: [web, app]` par machine, plus un groupe implicite au nom du lab (`-` → `_`). Ex. `virtum inventory -o inventory.ini && ansible all -i inventory.ini -m ping`.
-- **Provisionnement Ansible (v0.8)** : section `ansible:` du Virtumfile (`playbook:`, `requirements:` optionnel, chemins relatifs au Virtumfile) et `virtum provision -f Virtumfile [-- <arguments ansible-playbook>]`. Toutes les machines doivent tourner ; le playbook est lancé depuis son dossier (l'`ansible.cfg` voisin est lu, `-i` pointe sur l'inventaire Virtum) ; requirements réinstallés seulement s'ils changent ; code de sortie d'Ansible repris. État : `ansible-<lab>.json`, inventaire : `ansible-<lab>.inventory.ini` (répertoire d'état Virtum). **`virtum up`** joue le playbook quand le lab n'a jamais été provisionné avec succès ou que des machines viennent d'être créées, puis prend l'instantané de lab `provisioned` (`ansible.snapshot: false` pour s'en passer) : `virtum snapshot restore provisioned` ramène au lab sain. En cas d'échec du playbook, les VM sont conservées et le `up` suivant le rejoue. `virtum plan` et `virtum doctor` affichent l'état Ansible.
+- **Provisionnement Ansible (v0.8)** : section `ansible:` du Virtumfile (`playbook:`, `requirements:` optionnel, chemins relatifs au Virtumfile) et `virtum provision -f Virtumfile [-- <arguments ansible-playbook>]`. Toutes les machines doivent tourner ; le playbook est lancé depuis une **copie privée de son dossier** (l'`ansible.cfg` voisin est lu, `-i` pointe sur l'inventaire Virtum), d'où sont exclus les partages `rw` : rien de ce qu'une VM peut écrire n'est exécuté sur l'hôte. Ce qui est chargé hors du dossier du playbook (`../commun`) n'est pas copié : placez rôles et fichiers à côté du playbook ; requirements réinstallés seulement s'ils changent ; code de sortie d'Ansible repris. État : `ansible-<lab>.json`, inventaire : `ansible-<lab>.inventory.ini` (répertoire d'état Virtum). **`virtum up`** joue le playbook quand le lab n'a jamais été provisionné avec succès ou que des machines viennent d'être créées, puis prend l'instantané de lab `provisioned` (`ansible.snapshot: false` pour s'en passer) : `virtum snapshot restore provisioned` ramène au lab sain. En cas d'échec du playbook, les VM sont conservées et le `up` suivant le rejoue. `virtum plan` et `virtum doctor` affichent l'état Ansible.
 - **Machines retirées du Virtumfile (v0.7)** : elles restent déployées. `virtum plan` les liste (`- remove`, avec le nombre d'instantanés perdus) et `virtum up` le rappelle. `virtum apply --prune` les supprime comme `virtum destroy` (VM, disque, instantanés, réservation `ip:`) après confirmation ; `--yes` pour les scripts, refus sans terminal sinon. Les dossiers `mounts:` de l'hôte sont conservés.
 - **Temps de création (v0.9)** : `qemu-guest-agent` n'est plus installé que pour une carte en `network: bridge` (sur un réseau de lab, l'IP vient des baux DHCP) ; le réseau de lab utilise `no-ping` et `dhcp-ignore-clid` (dnsmasq) : bail immédiat, et une machine recréée retrouve son adresse. Un réseau de lab créé avant la v0.9 reçoit ces réglages quand il est recréé (automatiquement s'il n'a plus de VM).
 - **`subnet:` du lab (v0.9, optionnel)** : `subnet: 10.42.0.0/24` fixe le réseau du lab (/24 privé) ; sans ce champ, il est calculé depuis le nom du lab (`192.168.X.0/24`, affiché par `virtum plan`). `plan` et `up` refusent un sous-réseau qui chevauche un autre réseau libvirt ou une interface de l'hôte, et proposent un sous-réseau libre. Changer `subnet:` : `down --destroy` puis `up` si le lab a des VM.
@@ -335,7 +339,9 @@ virtum down -f examples/Virtumfile.mounts --destroy --purge
 
 Voir [`STEPS4.md`](./STEPS4.md) §7 et [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md).
 
-**Prérequis mounts** : paquet `virtiofsd` ; sans `uidmap` (`newuidmap`), Virtum lance virtiofsd avec `--sandbox=none` (isolation réduite — voir `virtum doctor`).
+**Lecture seule par défaut** : un partage est en lecture seule pour la VM, imposé côté hôte (`virtiofsd --readonly` à partir de virtiofsd 1.11, sinon virtiofsd lancé sous bubblewrap avec le dossier monté en lecture seule). Pour que la VM puisse écrire : `rw: true` (forme détaillée) ou suffixe `:rw` (forme courte `./out:~/out:rw`). Changer l'accès d'un partage existant : `virtum destroy` puis `virtum up`. Un partage `rw` ne peut pas contenir le Virtumfile, le playbook ni le fichier `requirements`.
+
+**Prérequis mounts** : paquet `virtiofsd`, et `bubblewrap` si virtiofsd est antérieur à 1.11 (Ubuntu 24.04 : 1.10) ; sans `uidmap` (`newuidmap`), Virtum lance virtiofsd avec `--sandbox=none` (isolation réduite — voir `virtum doctor`).
 
 ### Banc de test v0.9
 

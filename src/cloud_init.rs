@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde_yaml::Value;
 
 use crate::command::{path_arg, run_command};
@@ -66,19 +66,21 @@ fn mount_runcmd_entries(mounts: &[ResolvedMount]) -> Vec<Vec<String>> {
     let mut entries = Vec::new();
     for m in mounts {
         entries.push(vec!["mkdir".into(), "-p".into(), m.guest_path.clone()]);
-        entries.push(vec![
-            "mount".into(),
-            "-t".into(),
-            "virtiofs".into(),
-            m.name.clone(),
-            m.guest_path.clone(),
-        ]);
-        entries.push(vec![
-            "chown".into(),
-            "-R".into(),
-            "virtum:virtum".into(),
-            m.guest_path.clone(),
-        ]);
+        let mut mount: Vec<String> = vec!["mount".into(), "-t".into(), "virtiofs".into()];
+        if m.read_only {
+            mount.extend(["-o".into(), "ro".into()]);
+        }
+        mount.extend([m.name.clone(), m.guest_path.clone()]);
+        entries.push(mount);
+        // Lecture seule : l'hôte refuse toute écriture, chown compris.
+        if !m.read_only {
+            entries.push(vec![
+                "chown".into(),
+                "-R".into(),
+                "virtum:virtum".into(),
+                m.guest_path.clone(),
+            ]);
+        }
     }
     entries
 }
@@ -175,8 +177,7 @@ ssh_pwauth: false
 {path_profile}{package_block}{grow_block}{runcmd_block}"#,
         path_profile = PATH_PROFILE_SNIPPET,
     );
-    std::fs::write(&path, content)
-        .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
+    crate::fsutil::write_atomic(&path, content.as_bytes(), 0o600)?;
     Ok(path)
 }
 
@@ -186,8 +187,7 @@ pub fn write_meta_data(instance_dir: &Path, vm_id: &str, hostname: &str) -> Resu
     validate_cloud_init_hostname(hostname)?;
     let path = instance_dir.join("meta-data");
     let content = format!("instance-id: {vm_id}\nlocal-hostname: {hostname}\n");
-    std::fs::write(&path, content)
-        .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
+    crate::fsutil::write_atomic(&path, content.as_bytes(), 0o600)?;
     Ok(path)
 }
 
@@ -309,6 +309,7 @@ mod tests {
             socket_path: dir.join("virtiofs-app.sock"),
             virtiofsd_pid: None,
             virtumfile_dir: None,
+            read_only: false,
         }];
         write_user_data(
             &dir,

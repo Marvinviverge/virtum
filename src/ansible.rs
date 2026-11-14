@@ -48,11 +48,9 @@ pub fn inventory_path(paths: &VirtumPaths, lab_name: &str) -> PathBuf {
 
 pub fn load_state(paths: &VirtumPaths, lab_name: &str) -> Result<Option<AnsibleState>> {
     let path = state_path(paths, lab_name);
-    if !path.is_file() {
+    let Some(text) = crate::fsutil::read_owned(&path)? else {
         return Ok(None);
-    }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("Impossible de lire {}", path.display()))?;
+    };
     Ok(Some(serde_json::from_str(&text).with_context(|| {
         format!("État Ansible illisible : {}", path.display())
     })?))
@@ -67,6 +65,7 @@ pub fn save_state(paths: &VirtumPaths, lab_name: &str, state: &AnsibleState) -> 
 pub fn remove_state(paths: &VirtumPaths, lab_name: &str) {
     let _ = std::fs::remove_file(state_path(paths, lab_name));
     let _ = std::fs::remove_file(inventory_path(paths, lab_name));
+    remove_workspace(paths, lab_name);
 }
 
 /// Raison de jouer le playbook à la fin de `up`, `None` s'il ne faut pas le rejouer.
@@ -236,24 +235,189 @@ async fn install_requirements(requirements: &Path, state: &mut AnsibleState) -> 
     Ok(())
 }
 
-/// Dossiers hôte partagés par les VM déployées du lab, d'après leur `mounts-state.json`.
-async fn lab_active_shares(
+/// Partages inscriptibles par un invité : ceux déclarés `rw` dans le Virtumfile et tous
+/// ceux que servent les instances Virtum de cet état (tout lab confondu, y compris ceux
+/// retirés du Virtumfile mais encore actifs). Chemins canoniques.
+async fn writable_shares(
     lab: &Virtumfile,
+    vf_dir: &Path,
     paths: &VirtumPaths,
 ) -> Result<Vec<(String, PathBuf)>> {
-    let metadata = crate::metadata::load_metadata(&paths.metadata).await?;
     let mut shares = Vec::new();
-    for inst in crate::metadata::instances_for_lab(&metadata, &lab.name) {
+    for machine in lab.machines.keys() {
+        for m in crate::mounts::resolve_machine_mounts(lab, machine, vf_dir)? {
+            if !m.read_only {
+                shares.push((format!("{machine}/{}", m.name), m.host_abs));
+            }
+        }
+    }
+    let metadata = crate::metadata::load_metadata(&paths.metadata).await?;
+    for inst in &metadata.instances {
         let dir = crate::vm::instance_dir_for(paths, &inst.id)?;
         if !dir.is_dir() {
             continue;
         }
         for m in crate::mounts::load_mounts_state(&dir)? {
-            let machine = inst.machine_name.as_deref().unwrap_or(&inst.id);
-            shares.push((format!("{machine}/{}", m.name), m.host_abs));
+            if !m.read_only {
+                let machine = inst.machine_name.as_deref().unwrap_or(&inst.id);
+                shares.push((format!("{machine}/{}", m.name), m.host_abs));
+            }
+        }
+    }
+    for (_, path) in shares.iter_mut() {
+        if let Ok(canonical) = path.canonicalize() {
+            *path = canonical;
         }
     }
     Ok(shares)
+}
+
+/// Taille maximale de la copie privée du dossier du playbook.
+const SNAPSHOT_MAX_BYTES: u64 = 1 << 30;
+
+/// Dossier de travail Ansible du lab : copie privée du dossier du playbook, recréée à
+/// chaque exécution.
+pub fn workspace_path(paths: &VirtumPaths, lab_name: &str) -> PathBuf {
+    paths.root.join("ansible-work").join(lab_name)
+}
+
+/// Résultat de [`snapshot_project`].
+#[derive(Debug, Default)]
+pub struct SnapshotReport {
+    /// Chemins (relatifs au dossier copié) non copiés car dans un partage inscriptible.
+    pub skipped: Vec<PathBuf>,
+    pub bytes: u64,
+}
+
+/// Copie le dossier `root` (canonique) dans `dest` (à créer) pour qu'`ansible-playbook`
+/// n'exécute rien qu'un invité puisse modifier :
+/// - tout ce qui se trouve dans un partage inscriptible (`excluded`, canoniques) est omis,
+///   y compris à travers un lien symbolique ;
+/// - un lien qui pointe dans `root` est suivi (son contenu est copié) ; un lien qui en
+///   sort devient un lien absolu vers sa cible réelle (hors de tout partage) ;
+/// - `.git`, les sockets, FIFO et périphériques sont ignorés.
+///
+/// La copie est figée : l'invité ne peut plus rien y changer pendant l'exécution.
+pub fn snapshot_project(root: &Path, dest: &Path, excluded: &[PathBuf]) -> Result<SnapshotReport> {
+    if excluded.iter().any(|e| root.starts_with(e)) {
+        bail!(
+            "Le répertoire du Virtumfile ({}) est dans un partage inscriptible.",
+            root.display()
+        );
+    }
+    create_private_dir(dest)?;
+    let mut report = SnapshotReport::default();
+    let mut ancestors = vec![root.to_path_buf()];
+    copy_tree(
+        root,
+        dest,
+        Path::new(""),
+        root,
+        excluded,
+        &mut ancestors,
+        &mut report,
+    )?;
+    Ok(report)
+}
+
+fn create_private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(path)
+        .with_context(|| format!("Impossible de créer {}", path.display()))
+}
+
+fn copy_tree(
+    src: &Path,
+    dest: &Path,
+    rel: &Path,
+    root: &Path,
+    excluded: &[PathBuf],
+    ancestors: &mut Vec<PathBuf>,
+    report: &mut SnapshotReport,
+) -> Result<()> {
+    let entries =
+        std::fs::read_dir(src).with_context(|| format!("Impossible de lire {}", src.display()))?;
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let path = src.join(&name);
+        let rel_entry = rel.join(&name);
+        let target = dest.join(&name);
+        // Cible réelle : un lien ou un dossier qui mène dans un partage est écarté.
+        let Ok(canonical) = path.canonicalize() else {
+            continue; // lien cassé
+        };
+        if excluded.iter().any(|e| canonical.starts_with(e)) {
+            report.skipped.push(rel_entry);
+            continue;
+        }
+        let link = std::fs::symlink_metadata(&path)?.file_type().is_symlink();
+        if link && !canonical.starts_with(root) {
+            std::os::unix::fs::symlink(&canonical, &target)
+                .with_context(|| format!("Impossible de créer {}", target.display()))?;
+            continue;
+        }
+        let meta = std::fs::metadata(&canonical)?;
+        if meta.is_dir() {
+            if ancestors.contains(&canonical) {
+                continue; // boucle de liens
+            }
+            create_private_dir(&target)?;
+            ancestors.push(canonical.clone());
+            let result = copy_tree(
+                &canonical, &target, &rel_entry, root, excluded, ancestors, report,
+            );
+            ancestors.pop();
+            result?;
+        } else if meta.is_file() {
+            report.bytes += meta.len();
+            if report.bytes > SNAPSHOT_MAX_BYTES {
+                bail!(
+                    "Dossier du playbook trop volumineux pour la copie Ansible (> {} Mio). \
+                     Placez le playbook dans un sous-dossier dédié (ex. ansible/).",
+                    SNAPSHOT_MAX_BYTES >> 20
+                );
+            }
+            std::fs::copy(&canonical, &target).with_context(|| {
+                format!(
+                    "Impossible de copier {} vers {}",
+                    canonical.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Recrée le dossier de travail du lab (jamais à travers un lien symbolique).
+fn reset_workspace(ws: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(ws) {
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => std::fs::remove_file(ws)?,
+        Ok(_) => std::fs::remove_dir_all(ws)
+            .with_context(|| format!("Impossible de vider {}", ws.display()))?,
+        Err(_) => {}
+    }
+    if let Some(parent) = ws.parent() {
+        if !parent.is_dir() {
+            create_private_dir(parent)?;
+        }
+    }
+    Ok(())
+}
+
+/// Supprime le dossier de travail du lab. Idempotent.
+fn remove_workspace(paths: &VirtumPaths, lab_name: &str) {
+    let ws = workspace_path(paths, lab_name);
+    if std::fs::symlink_metadata(&ws).is_ok_and(|m| m.is_dir()) {
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
 
 /// Joue le playbook du lab (inventaire, requirements, `ansible-playbook`) et met à jour
@@ -272,10 +436,8 @@ pub async fn run_playbook(
     require_tools(spec)?;
     let vf_dir = virtumfile::virtumfile_dir(virtumfile_path);
     let playbook = virtumfile::resolve_ansible_path(&vf_dir, "playbook", &spec.playbook)?;
-    // Partages réellement servis aux VM du lab (y compris ceux retirés du Virtumfile mais
-    // encore actifs) : aucun ne doit recouvrir ce qu'ansible-playbook va exécuter.
-    let active_shares = lab_active_shares(lab, paths).await?;
-    virtumfile::ensure_host_code_outside_shares(lab, &vf_dir, &active_shares)
+    let shares = writable_shares(lab, &vf_dir, paths).await?;
+    virtumfile::ensure_host_code_outside_shares(lab, &vf_dir, &shares)
         .context("Provisionnement refusé")?;
 
     let inventory = prepare_inventory(lab, paths, insecure_ssh).await?;
@@ -291,6 +453,33 @@ pub async fn run_playbook(
         }
     }
 
+    // ansible-playbook tourne sur une copie privée du dossier du playbook, sans les
+    // partages inscriptibles : rien de ce qu'il charge à côté du playbook (rôles, tâches,
+    // modèles, variables, plugins) ne peut avoir été écrit par un invité. Un chemin qui
+    // sort de ce dossier (`../commun`) n'existe pas dans la copie : échec, pas d'exécution.
+    let ws = workspace_path(paths, &lab.name);
+    reset_workspace(&ws)?;
+    create_private_dir(&ws)?;
+    let copy = ws.join("playbook");
+    let playbook_dir = playbook
+        .parent()
+        .context("Playbook sans dossier parent")?
+        .to_path_buf();
+    let excluded: Vec<PathBuf> = shares.iter().map(|(_, p)| p.clone()).collect();
+    let report = snapshot_project(&playbook_dir, &copy, &excluded)?;
+    if !report.skipped.is_empty() {
+        let list: Vec<String> = report
+            .skipped
+            .iter()
+            .map(|p| format!("./{}", p.display()))
+            .collect();
+        eprintln!(
+            "  Ansible : partages inscriptibles exclus de la copie du playbook : {}",
+            list.join(", ")
+        );
+    }
+    let copied_playbook = copy.join(playbook.file_name().context("Playbook sans nom")?);
+
     eprintln!(
         "Ansible : {} sur le lab '{}' (inventaire {})",
         spec.playbook,
@@ -300,11 +489,13 @@ pub async fn run_playbook(
     let mut cmd = tokio::process::Command::new("ansible-playbook");
     cmd.arg("-i")
         .arg(&inventory)
-        .arg(&playbook)
+        .arg(&copied_playbook)
         .args(extra_args)
         // ansible.cfg placé à côté du playbook est lu ; `-i` remplace son `inventory =`.
-        .current_dir(playbook.parent().unwrap_or(&vf_dir));
-    let code = run_inherited(cmd).await?;
+        .current_dir(copied_playbook.parent().unwrap_or(&copy));
+    let code = run_inherited(cmd).await;
+    remove_workspace(paths, &lab.name);
+    let code = code?;
 
     let outcome = if code == 0 {
         state.last_run = Some("success".into());
@@ -413,6 +604,72 @@ mod tests {
         );
         assert_eq!(provision_reason(Some(&ok), true), Some("machines ajoutées"));
         assert_eq!(provision_reason(Some(&ok), false), None);
+    }
+
+    /// La copie privée du playbook omet tout ce qui est dans un partage inscriptible, même
+    /// atteint par un lien, et fige le reste.
+    #[test]
+    fn snapshot_excludes_writable_shares() {
+        use std::os::unix::fs::symlink;
+        let d = std::env::temp_dir().join(format!("virtum-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let pb = d.join("pb");
+        for sub in ["roles/web/tasks", "roles/shared", ".git"] {
+            std::fs::create_dir_all(pb.join(sub)).unwrap();
+        }
+        std::fs::create_dir_all(d.join("data")).unwrap();
+        std::fs::create_dir_all(d.join("outside")).unwrap();
+        std::fs::write(pb.join("site.yml"), "---\n").unwrap();
+        std::fs::write(pb.join("roles/web/tasks/main.yml"), "- debug: msg=ok\n").unwrap();
+        std::fs::write(pb.join("roles/shared/evil.yml"), "- shell: id\n").unwrap();
+        std::fs::write(pb.join(".git/config"), "").unwrap();
+        std::fs::write(d.join("data/all.yml"), "x: 1\n").unwrap();
+        symlink(d.join("data"), pb.join("group_vars")).unwrap();
+        symlink(pb.join("roles/web"), pb.join("web_alias")).unwrap();
+        symlink(d.join("outside"), pb.join("ext")).unwrap();
+        symlink(&pb, pb.join("loop")).unwrap();
+
+        let root = pb.canonicalize().unwrap();
+        let excluded = vec![
+            pb.join("roles/shared").canonicalize().unwrap(),
+            d.join("data").canonicalize().unwrap(),
+        ];
+        let dest = d.join("copy");
+        let report = snapshot_project(&root, &dest, &excluded).unwrap();
+        let mut skipped: Vec<_> = report
+            .skipped
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        skipped.sort();
+        assert!(skipped.contains(&"group_vars".to_string()), "{skipped:?}");
+        assert!(skipped.contains(&"roles/shared".to_string()), "{skipped:?}");
+        assert!(dest.join("site.yml").is_file());
+        assert!(dest.join("roles/web/tasks/main.yml").is_file());
+        assert!(!dest.join("roles/shared").exists());
+        assert!(!dest.join("group_vars").exists());
+        assert!(!dest.join(".git").exists());
+        // Lien interne : contenu copié ; lien externe : lien absolu vers la cible réelle.
+        assert!(!std::fs::symlink_metadata(dest.join("web_alias"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(dest.join("web_alias/tasks/main.yml").is_file());
+        assert_eq!(
+            std::fs::read_link(dest.join("ext")).unwrap(),
+            d.join("outside").canonicalize().unwrap()
+        );
+        // Une modification après la copie ne l'atteint pas.
+        std::fs::write(pb.join("roles/web/tasks/main.yml"), "- shell: id\n").unwrap();
+        assert!(
+            std::fs::read_to_string(dest.join("roles/web/tasks/main.yml"))
+                .unwrap()
+                .contains("debug")
+        );
+        // Le dossier lui-même dans un partage inscriptible : refusé.
+        let err = snapshot_project(&root, &d.join("copy2"), std::slice::from_ref(&root));
+        assert!(err.is_err());
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
