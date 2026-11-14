@@ -207,10 +207,80 @@ async fn run_inherited(mut cmd: tokio::process::Command) -> Result<i32> {
     Ok(status.code().unwrap_or(130))
 }
 
+/// Chemins locaux candidats cités par un fichier requirements (sources `type: dir|file`,
+/// rôles `src: ./…`, `file://…`) : toute chaîne qui ressemble à un chemin.
+fn requirements_local_paths(content: &str) -> Vec<String> {
+    fn walk(v: &serde_yaml::Value, out: &mut Vec<String>) {
+        match v {
+            serde_yaml::Value::String(s) => {
+                let s = s.trim();
+                let s = s.strip_prefix("file://").unwrap_or(s);
+                if s.starts_with('/') || s.starts_with('.') || s.starts_with('~') || s.contains('/')
+                {
+                    out.push(s.to_string());
+                }
+            }
+            serde_yaml::Value::Sequence(seq) => seq.iter().for_each(|x| walk(x, out)),
+            serde_yaml::Value::Mapping(map) => map.values().for_each(|x| walk(x, out)),
+            serde_yaml::Value::Tagged(t) => walk(&t.value, out),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(content) {
+        walk(&v, &mut out);
+    }
+    out
+}
+
+/// Refuse une source locale de `requirements` située dans un partage inscriptible :
+/// ansible-galaxy l'installerait dans `~/.ansible`, d'où ansible-playbook la chargerait.
+/// Les chemins relatifs sont résolus depuis le dossier courant, celui du Virtumfile et
+/// celui du fichier requirements (les trois bases possibles pour ansible-galaxy).
+fn ensure_requirements_sources_outside_shares(
+    content: &str,
+    bases: &[PathBuf],
+    shares: &[(String, PathBuf)],
+) -> Result<()> {
+    for raw in requirements_local_paths(content) {
+        let candidates: Vec<PathBuf> = if Path::new(&raw).is_absolute() {
+            vec![PathBuf::from(&raw)]
+        } else {
+            bases.iter().map(|b| b.join(&raw)).collect()
+        };
+        for c in candidates {
+            let resolved = c.canonicalize().unwrap_or(c);
+            if let Some((label, share)) = shares.iter().find(|(_, s)| resolved.starts_with(s)) {
+                bail!(
+                    "ansible.requirements : la source locale '{raw}' ({}) est dans le partage \
+                     inscriptible '{label}' ({}) : ansible-galaxy installerait du code écrit \
+                     par l'invité. Retirez `rw` de ce partage ou déplacez la source.",
+                    resolved.display(),
+                    share.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Installe les requirements si le fichier a changé depuis la dernière installation réussie.
-async fn install_requirements(requirements: &Path, state: &mut AnsibleState) -> Result<()> {
+async fn install_requirements(
+    requirements: &Path,
+    vf_dir: &Path,
+    shares: &[(String, PathBuf)],
+    state: &mut AnsibleState,
+) -> Result<()> {
     let content = std::fs::read(requirements)
         .with_context(|| format!("Impossible de lire {}", requirements.display()))?;
+    let mut bases = vec![vf_dir.to_path_buf()];
+    if let Some(dir) = requirements.parent() {
+        bases.push(dir.to_path_buf());
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        bases.push(cwd);
+    }
+    ensure_requirements_sources_outside_shares(&String::from_utf8_lossy(&content), &bases, shares)?;
     let sha = sha256_hex(&content);
     if state.requirements_sha256.as_deref() == Some(sha.as_str()) {
         return Ok(());
@@ -359,6 +429,17 @@ fn copy_tree(
         }
         let link = std::fs::symlink_metadata(&path)?.file_type().is_symlink();
         if link && !canonical.starts_with(root) {
+            // Le lien resterait actif dans la copie : sa cible ne doit contenir aucun
+            // partage inscriptible, sinon ce que l'invité y écrit serait chargé.
+            if let Some(share) = excluded.iter().find(|e| e.starts_with(&canonical)) {
+                bail!(
+                    "{} pointe vers {}, qui contient le partage inscriptible {} : copie Ansible \
+                     refusée. Retirez `rw` de ce partage ou remplacez le lien par un dossier.",
+                    rel_entry.display(),
+                    canonical.display(),
+                    share.display()
+                );
+            }
             std::os::unix::fs::symlink(&canonical, &target)
                 .with_context(|| format!("Impossible de créer {}", target.display()))?;
             continue;
@@ -446,7 +527,7 @@ pub async fn run_playbook(
     state.playbook = spec.playbook.clone();
     if let Some(ref req) = spec.requirements {
         let req = virtumfile::resolve_ansible_path(&vf_dir, "requirements", req)?;
-        if let Err(err) = install_requirements(&req, &mut state).await {
+        if let Err(err) = install_requirements(&req, &vf_dir, &shares, &mut state).await {
             state.last_run = Some("failed".into());
             save_state(paths, &lab.name, &state)?;
             return Err(err);
@@ -669,6 +750,48 @@ mod tests {
         // Le dossier lui-même dans un partage inscriptible : refusé.
         let err = snapshot_project(&root, &d.join("copy2"), std::slice::from_ref(&root));
         assert!(err.is_err());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Audit run-4 : un lien qui sort du dossier du playbook vers un dossier contenant un
+    /// partage inscriptible est refusé (il resterait actif dans la copie).
+    #[test]
+    fn snapshot_refuses_link_to_dir_containing_share() {
+        let d = crate::test_env::private_temp_dir("snapshot-link")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(d.join("ansible")).unwrap();
+        std::fs::create_dir_all(d.join("roles/devrole/tasks")).unwrap();
+        std::fs::write(d.join("ansible/site.yml"), "---\n").unwrap();
+        std::os::unix::fs::symlink("../roles", d.join("ansible/roles")).unwrap();
+        let root = d.join("ansible");
+        let share = d.join("roles/devrole");
+        let err = snapshot_project(&root, &d.join("copy"), std::slice::from_ref(&share));
+        assert!(format!("{:#}", err.unwrap_err()).contains("contient le partage"));
+        // Sans partage sous la cible, le lien est gardé.
+        snapshot_project(&root, &d.join("copy2"), &[]).unwrap();
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Audit run-4 : une source locale de requirements dans un partage inscriptible est
+    /// refusée, quelle que soit la base de résolution.
+    #[test]
+    fn requirements_local_source_in_share_is_refused() {
+        let d = crate::test_env::private_temp_dir("req-src")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(d.join("out/coll")).unwrap();
+        let shares = vec![("web/out".to_string(), d.join("out"))];
+        let req = "collections:\n  - name: ./out/coll\n    type: dir\nroles:\n  - src: file://./out/r.tar.gz\n";
+        assert_eq!(
+            requirements_local_paths(req),
+            ["./out/coll", "./out/r.tar.gz"]
+        );
+        let err = ensure_requirements_sources_outside_shares(req, &[d.clone()], &shares);
+        assert!(format!("{:#}", err.unwrap_err()).contains("partage"));
+        // Collection Galaxy distante : aucun chemin local, accepté.
+        let ok = "collections:\n  - name: community.general\n    version: '>=8'\n";
+        ensure_requirements_sources_outside_shares(ok, &[d.clone()], &shares).unwrap();
         std::fs::remove_dir_all(&d).ok();
     }
 

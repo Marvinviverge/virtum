@@ -48,7 +48,8 @@ fi
 
 STATE_ROOT="${VIRTUM_STATE_DIR:-/var/lib/virtum}"
 KEY="$STATE_ROOT/keys/virtum_id_ed25519"
-SSH_BASE=(-i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+# -F /dev/null : ignorer ~/.ssh/config (pas d'agent ni de redirection vers un invité).
+SSH_BASE=(-F /dev/null -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ForwardAgent=no -o ClearAllForwardings=yes -o PermitLocalCommand=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null)
 
 echo "== ping web → db (réseau lab, IP $DB_IP) =="
 ssh "${SSH_BASE[@]}" "virtum@${WEB_IP}" ping -c1 -W3 "$DB_IP"

@@ -743,6 +743,7 @@ pub fn destroy_domain(vm_id: &str) -> Result<()> {
 
 /// Démarrage du domaine au boot de l'hôte (`virsh autostart [--disable]`).
 pub fn set_domain_autostart(vm_id: &str, enabled: bool) -> Result<()> {
+    refuse_foreign_domain(vm_id)?;
     let args: &[&str] = if enabled {
         &["autostart", vm_id]
     } else {

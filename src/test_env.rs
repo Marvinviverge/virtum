@@ -24,11 +24,28 @@ impl IsolatedVirtumState {
     }
 }
 
+/// Dossier temporaire créé exclusivement (mode 0700, nom imprévisible) : jamais un dossier
+/// qu'un autre compte aurait créé d'avance dans un /tmp partagé.
+pub fn private_temp_dir(tag: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    loop {
+        let name = format!(
+            "virtum-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let path = env::temp_dir().join(name);
+        match fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("dossier temporaire de test impossible : {e}"),
+        }
+    }
+}
+
 pub fn isolated_virtum_state() -> IsolatedVirtumState {
     let guard = lock_home();
-    let root = env::temp_dir().join(format!("virtum-state-test-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
+    let root = private_temp_dir("state-test");
     // SAFETY: ENV_LOCK held; no concurrent test reads VIRTUM_STATE_DIR.
     unsafe { env::set_var("VIRTUM_STATE_DIR", &root) };
     IsolatedVirtumState {

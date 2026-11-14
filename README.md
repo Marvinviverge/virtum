@@ -341,7 +341,7 @@ Voir [`STEPS4.md`](./STEPS4.md) §7 et [`SPEC_TECH_V0.4.md`](./SPEC_TECH_V0.4.md
 
 **Lecture seule par défaut** : un partage est en lecture seule pour la VM, imposé côté hôte (`virtiofsd --readonly` à partir de virtiofsd 1.11, sinon virtiofsd lancé sous bubblewrap avec le dossier monté en lecture seule). Pour que la VM puisse écrire : `rw: true` (forme détaillée) ou suffixe `:rw` (forme courte `./out:~/out:rw`). Changer l'accès d'un partage existant : `virtum destroy` puis `virtum up`. Un partage `rw` ne peut pas contenir le Virtumfile, le playbook ni le fichier `requirements`.
 
-**Prérequis mounts** : paquet `virtiofsd`, et `bubblewrap` si virtiofsd est antérieur à 1.11 (Ubuntu 24.04 : 1.10) ; sans `uidmap` (`newuidmap`), Virtum lance virtiofsd avec `--sandbox=none` (isolation réduite — voir `virtum doctor`).
+**Prérequis mounts** : paquet `virtiofsd`, et `bubblewrap` si virtiofsd est antérieur à 1.11 (Ubuntu 24.04 : 1.10) ; Virtum lance toujours virtiofsd avec `--sandbox=none` (isolation réduite, voir [`SECURITY.md`](./SECURITY.md)).
 
 ### Banc de test v0.9
 

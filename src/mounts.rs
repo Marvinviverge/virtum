@@ -804,6 +804,70 @@ pub fn purge_targets_from_instance(instance_dir: &Path) -> Result<(Vec<PathBuf>,
     Ok((dirs, root))
 }
 
+/// Refuse qu'un partage déclaré (`new`) soit imbriqué avec un partage servi par une autre
+/// instance de cet état, ou par cette instance (partage retiré du Virtumfile mais actif),
+/// et qu'un partage inscriptible contienne le Virtumfile d'une autre instance (ou
+/// l'inverse). `ensure_mounts_not_nested` ne voit qu'un Virtumfile à la fois ; un invité
+/// qui écrit le partage englobant pourrait remplacer le dossier inclus par un lien.
+pub async fn ensure_not_nested_across_instances(
+    paths: &crate::config::VirtumPaths,
+    new: &[(String, PathBuf, bool)],
+    virtumfile_dir: &Path,
+) -> Result<()> {
+    let metadata = crate::metadata::load_metadata(&paths.metadata).await?;
+    let vf = virtumfile_dir
+        .canonicalize()
+        .unwrap_or_else(|_| virtumfile_dir.to_path_buf());
+    for inst in &metadata.instances {
+        let dir = crate::vm::instance_dir_for(paths, &inst.id)?;
+        if !dir.is_dir() {
+            continue;
+        }
+        for m in load_mounts_state(&dir)? {
+            let label = format!(
+                "{}/{}",
+                inst.machine_name.as_deref().unwrap_or(&inst.id),
+                m.name
+            );
+            for (new_label, path, rw) in new {
+                if *path != m.host_abs
+                    && (path.starts_with(&m.host_abs) || m.host_abs.starts_with(path))
+                {
+                    bail!(
+                        "Mounts imbriqués interdits : '{new_label}' ({}) et le partage actif \
+                         '{label}' ({}) se recouvrent. Un invité pourrait remplacer le dossier \
+                         inclus par un lien symbolique ; utilisez des dossiers disjoints (ou \
+                         détruisez l'instance qui sert l'autre partage).",
+                        path.display(),
+                        m.host_abs.display()
+                    );
+                }
+                if *rw {
+                    if let Some(other_vf) = &m.virtumfile_dir {
+                        if other_vf.starts_with(path) {
+                            bail!(
+                                "Mount '{new_label}' ({}) est inscriptible et contient le projet \
+                                 d'une autre instance ({}) : refus.",
+                                path.display(),
+                                other_vf.display()
+                            );
+                        }
+                    }
+                }
+            }
+            if !m.read_only && vf.starts_with(&m.host_abs) {
+                bail!(
+                    "Le Virtumfile ({}) est dans le partage inscriptible actif '{label}' ({}) : \
+                     un invité pourrait le modifier. Déplacez le projet hors de ce partage.",
+                    vf.display(),
+                    m.host_abs.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Union des répertoires hôte `mounts:` pour toutes les machines du lab.
 pub fn collect_host_dirs_for_lab(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut seen = BTreeMap::<PathBuf, ()>::new();
@@ -821,6 +885,17 @@ pub fn purge_host_mount_dirs(dirs: &[PathBuf], allowed_root: &Path) -> Result<us
     let base = allowed_root
         .canonicalize()
         .with_context(|| format!("Répertoire Virtumfile invalide: {}", allowed_root.display()))?;
+    // La racine et les dossiers enregistrés doivent encore se résoudre vers eux-mêmes :
+    // un lien posé par un invité (via un partage englobant) déplacerait sinon la racine
+    // et les cibles ensemble, et la suppression sortirait de tout partage.
+    if base != allowed_root {
+        bail!(
+            "--purge : le répertoire du Virtumfile {} résout maintenant vers {} (lien \
+             symbolique ?) : suppression refusée.",
+            allowed_root.display(),
+            base.display()
+        );
+    }
     let mut purged = 0usize;
     for dir in dirs {
         if !dir.exists() {
@@ -829,6 +904,13 @@ pub fn purge_host_mount_dirs(dirs: &[PathBuf], allowed_root: &Path) -> Result<us
         let canonical = dir
             .canonicalize()
             .with_context(|| format!("Impossible de résoudre {}", dir.display()))?;
+        if canonical != *dir {
+            bail!(
+                "--purge : {} résout maintenant vers {} (lien symbolique ?) : suppression refusée.",
+                dir.display(),
+                canonical.display()
+            );
+        }
         if canonical == base {
             bail!(
                 "Refus de supprimer le répertoire du Virtumfile lui-même ({})",
@@ -1189,10 +1271,34 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("virtum-mount-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d.canonicalize().unwrap()
+        crate::test_env::private_temp_dir(&format!("mount-{tag}"))
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// Audit run-4 : une racine de purge remplacée par un lien (invité d'un lab englobant)
+    /// ne doit pas déplacer la suppression hors des partages.
+    #[test]
+    fn purge_refuses_redirected_root() {
+        let d = scratch("purge-redirect");
+        let victim = d.join("data");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("keep.txt"), "x").unwrap();
+        let ws = d.join("ws");
+        fs::create_dir_all(ws.join("projb.orig/data")).unwrap();
+        // L'invité a remplacé ws/projb par un lien vers l'ancêtre `d`.
+        std::os::unix::fs::symlink("..", ws.join("projb")).unwrap();
+        let root = ws.join("projb");
+        let err = purge_host_mount_dirs(&[root.join("data")], &root).unwrap_err();
+        assert!(format!("{err:#}").contains("lien symbolique"), "{err:#}");
+        assert!(victim.join("keep.txt").exists());
+        // Cas normal : racine et cible canoniques, suppression faite.
+        let real = ws.join("projb.orig");
+        assert_eq!(
+            purge_host_mount_dirs(&[real.join("data")], &real).unwrap(),
+            1
+        );
+        let _ = fs::remove_dir_all(d);
     }
 
     /// Audit : un lien symbolique dans le chemin ne doit rien créer hors du Virtumfile.

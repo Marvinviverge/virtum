@@ -124,16 +124,24 @@ pub fn network_has_attached_domains(net_name: &str) -> bool {
     network_attached_domains(net_name).is_none_or(|d| !d.is_empty())
 }
 
-/// Virtum peut modifier ce réseau (réservations DHCP) : marqué par ce Virtum, ou non
-/// marqué (créé avant le marqueur) sans domaine d'un autre Virtum attaché.
+/// Virtum peut réutiliser ou modifier ce réseau (réservations DHCP) : marqué par ce
+/// Virtum, ou non marqué (créé avant le marqueur) et dont chaque domaine attaché est à
+/// cet état (marqué par lui, ou non marqué et utilisant le disque d'une de ses instances).
+/// Un domaine non marqué d'un autre compte suffit à refuser.
 pub fn network_may_modify(net_name: &str) -> bool {
     match network_owner(net_name) {
         Owner::Us => true,
         Owner::Other(_) => false,
-        Owner::Unknown => network_attached_domains(net_name).is_some_and(|doms| {
-            doms.iter()
-                .all(|d| !matches!(domain_owner(d), Owner::Other(_)))
-        }),
+        Owner::Unknown => {
+            let Ok(home) = crate::config::virtum_home() else {
+                return false;
+            };
+            let instances = home.join("instances");
+            network_attached_domains(net_name).is_some_and(|doms| {
+                doms.iter()
+                    .all(|d| domain_is_ours_for_instance(d, &instances.join(d)))
+            })
+        }
     }
 }
 

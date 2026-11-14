@@ -991,13 +991,37 @@ async fn apply_mounts_add(
     let instance_dir = paths.instances.join(&md.vm_id);
     let vm_id = &md.vm_id;
 
+    let vf_dir = vf_dir
+        .canonicalize()
+        .with_context(|| format!("Répertoire Virtumfile invalide: {}", vf_dir.display()))?;
     let mut state = mounts::load_mounts_state(&instance_dir)?;
     let mut newly_added = Vec::new();
     for add in additions {
-        if state.iter().any(|m| m.name == add.name) {
+        let mut resolved = mounts::resolve_mount_spec(add, &vf_dir)?;
+        if let Some(existing) = state.iter().find(|m| m.name == add.name) {
+            // Volume retiré puis rajouté : l'entrée encore active ne doit pas garder un
+            // autre accès ou un autre dossier que ce que le Virtumfile déclare.
+            if existing.read_only != resolved.read_only || existing.host_abs != resolved.host_abs {
+                bail!(
+                    "volume '{}' : encore actif sur {} ({}), alors que le Virtumfile déclare {} \
+                     ({}). Utilisez virtum destroy puis virtum up.",
+                    add.name,
+                    existing.host_abs.display(),
+                    if existing.read_only {
+                        "lecture seule"
+                    } else {
+                        "lecture-écriture"
+                    },
+                    resolved.host_abs.display(),
+                    if resolved.read_only {
+                        "lecture seule"
+                    } else {
+                        "lecture-écriture"
+                    }
+                );
+            }
             continue;
         }
-        let mut resolved = mounts::resolve_mount_spec(add, &vf_dir)?;
         resolved.socket_path = mounts::socket_path_for(&instance_dir, &resolved.name);
         newly_added.push(resolved.clone());
         state.push(resolved);
@@ -1005,6 +1029,17 @@ async fn apply_mounts_add(
     if newly_added.is_empty() {
         return Ok(Vec::new());
     }
+    let new: Vec<(String, std::path::PathBuf, bool)> = newly_added
+        .iter()
+        .map(|m| {
+            (
+                format!("{}/{}", md.machine_name, m.name),
+                m.host_abs.clone(),
+                !m.read_only,
+            )
+        })
+        .collect();
+    mounts::ensure_not_nested_across_instances(paths, &new, &vf_dir).await?;
     mounts::ensure_virtiofs_servers(&instance_dir, &mut state)?;
 
     let net_cfg = virtumfile::resolve_machine_network(lab, &md.machine_name, lab_net)?;

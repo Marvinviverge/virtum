@@ -228,6 +228,19 @@ pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool)
                  Renommez le lab (`name:`)."
             );
         }
+        // Réseau non marqué : réutilisable seulement si aucun domaine d'un autre compte
+        // n'y est attaché (sinon nos VM rejoindraient son réseau isolé).
+        if matches!(
+            crate::ownership::network_owner(&net_name),
+            crate::ownership::Owner::Unknown
+        ) && crate::ownership::network_has_attached_domains(&net_name)
+            && !crate::ownership::network_may_modify(&net_name)
+        {
+            bail!(
+                "Le réseau {net_name} existe sans marqueur Virtum et sert des VM qui ne sont pas \
+                 à cet état Virtum : refus de le réutiliser. Renommez le lab (`name:`)."
+            );
+        }
         let current = parse_network_ip(&xml);
         let subnet_differs = !current.is_some_and(|(addr, len)| len == 24 && subnet.contains(addr));
         if subnet_differs && !can_recreate {

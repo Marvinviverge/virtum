@@ -135,12 +135,8 @@ fn check_virtiofsd() -> CheckResult {
     match Command::new(&path).arg("--version").output() {
         Ok(output) if output.status.success() => {
             let mut notes = Vec::new();
-            if !std::path::Path::new("/usr/bin/newuidmap").exists() {
-                notes.push(
-                    "Paquet uidmap absent : Virtum lance virtiofsd avec --sandbox=none \
-                     (isolation réduite — installez uidmap pour le sandbox virtiofsd).",
-                );
-            }
+            // Pas de note uidmap : Virtum lance toujours virtiofsd avec --sandbox=none
+            // (SECURITY.md, Limites) ; installer uidmap n'y change rien.
             // Les partages sont en lecture seule par défaut : sans moyen de l'imposer côté
             // hôte, seuls les partages `rw: true` fonctionnent.
             let read_only = crate::mounts::read_only_backend(&path);

@@ -33,7 +33,8 @@ if [[ -z "$WEB_IP" || -z "$DB_IP" || "$WEB_IP" == "-" ]]; then
 fi
 STATE_ROOT="${VIRTUM_STATE_DIR:-/var/lib/virtum}"
 KEY="$STATE_ROOT/keys/virtum_id_ed25519"
-SSH_BASE=(-i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+# -F /dev/null : ignorer ~/.ssh/config (pas d'agent ni de redirection vers un invité).
+SSH_BASE=(-F /dev/null -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ForwardAgent=no -o ClearAllForwardings=yes -o PermitLocalCommand=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null)
 ssh "${SSH_BASE[@]}" "virtum@${WEB_IP}" ping -c1 -W2 "$DB_IP"
 ssh "${SSH_BASE[@]}" "virtum@${DB_IP}" ping -c1 -W2 "$WEB_IP"
 

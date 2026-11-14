@@ -235,9 +235,7 @@ pub async fn launch_vm_inner(
     public_key: &str,
     retain_vm_on_error: &mut bool,
 ) -> Result<()> {
-    fs::create_dir_all(instance_dir)
-        .await
-        .with_context(|| format!("Impossible de créer {}", instance_dir.display()))?;
+    prepare_new_instance_dir(instance_dir)?;
 
     let image = resolve_image(&config.os, &paths.images)?;
     let base_image = ensure_image(&image).await?;
@@ -1010,6 +1008,42 @@ pub async fn wait_for_ssh_login(
     );
 }
 
+/// Dossier d'une nouvelle instance : créé ici, ou déjà présent mais réel, à l'utilisateur
+/// et sans aucun des fichiers que la création va écrire. Un dossier planté d'avance par
+/// un autre compte (nom déterministe) redirigerait sinon qemu-img et cloud-localds, qui
+/// suivent les liens symboliques, avant le contrôle de propriétaire du stockage.
+fn prepare_new_instance_dir(instance_dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    if let Some(parent) = instance_dir.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Impossible de créer {}", parent.display()))?;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(instance_dir) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Impossible de créer {}", instance_dir.display()))
+        }
+    }
+    let meta = std::fs::symlink_metadata(instance_dir)?;
+    if !meta.is_dir() || meta.uid() != crate::fsutil::current_uid() {
+        bail!(
+            "{} existe déjà et n'est pas un dossier de l'utilisateur courant : refus de l'utiliser.",
+            instance_dir.display()
+        );
+    }
+    for leaf in ["disk.qcow2", "cloud-init.iso", "user-data", "meta-data"] {
+        if std::fs::symlink_metadata(instance_dir.join(leaf)).is_ok() {
+            bail!(
+                "{} contient déjà {leaf} : refus de créer l'instance par-dessus.",
+                instance_dir.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn start_vm(reference: &str) -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -1588,6 +1622,25 @@ fn generate_vm_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Audit run-4 : un dossier d'instance déjà peuplé (planté d'avance) est refusé avant
+    /// toute écriture ; un dossier neuf est créé en 0700.
+    #[test]
+    fn new_instance_dir_refuses_preplanted_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = crate::test_env::private_temp_dir("instdir");
+        let inst = d.join("vm-0123456789ab");
+        prepare_new_instance_dir(&inst).unwrap();
+        assert_eq!(
+            std::fs::metadata(&inst).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::os::unix::fs::symlink(d.join("victim"), inst.join("cloud-init.iso")).unwrap();
+        let err = prepare_new_instance_dir(&inst).unwrap_err();
+        assert!(format!("{err:#}").contains("cloud-init.iso"), "{err:#}");
+        assert!(!d.join("victim").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     use super::*;
 
     #[test]

@@ -28,7 +28,9 @@ install: release
 	@command -v virtum >/dev/null 2>&1 && virtum --version 2>/dev/null || true
 
 test:
-	$(CARGO) test
+	@# TMPDIR privé (mktemp -d : 0700, nom aléatoire) : les tests n'écrivent jamais dans
+	@# un /tmp partagé où un autre compte aurait pu planter des liens symboliques.
+	TMPDIR=$$(mktemp -d) $(CARGO) test
 
 fmt:
 	$(CARGO) fmt

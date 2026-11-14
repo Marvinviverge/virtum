@@ -64,6 +64,17 @@ async fn up_async(
     }
 
     let paths = config::ensure_layout().await?;
+    // Partages de ce lab face à ceux des autres instances de l'état (et du lab lui-même,
+    // partages retirés du Virtumfile mais encore actifs) : pas d'imbrication possible.
+    {
+        let mut declared = Vec::new();
+        for machine in lab.machines.keys() {
+            for m in crate::mounts::resolve_machine_mounts(&lab, machine, &vf_dir)? {
+                declared.push((format!("{machine}/{}", m.name), m.host_abs, !m.read_only));
+            }
+        }
+        crate::mounts::ensure_not_nested_across_instances(&paths, &declared, &vf_dir).await?;
+    }
     let metadata = metadata::load_metadata(&paths.metadata).await?;
 
     let lab_net = if virtumfile::lab_needs_isolated_network(&lab) {
@@ -736,6 +747,9 @@ async fn resume_lab_machine(
             existing.id
         );
     }
+    // Avant toute écriture libvirt (autostart, statut) : le domaine de ce nom peut être
+    // celui d'un autre Virtum si le nôtre a disparu.
+    crate::ownership::ensure_domain_ours(vm_id, instance_dir)?;
 
     let reference = existing.name.clone().unwrap_or_else(|| existing.id.clone());
 
@@ -826,7 +840,10 @@ async fn down_async(file: Option<PathBuf>, destroy: bool, purge: bool) -> Result
             vm::destroy_vm_async(reference, false).await?;
         }
         if purge {
-            let n = mounts::purge_host_mount_dirs(&purge_dirs, &vf_dir)?;
+            let root = vf_dir
+                .canonicalize()
+                .with_context(|| format!("Répertoire Virtumfile invalide: {}", vf_dir.display()))?;
+            let n = mounts::purge_host_mount_dirs(&purge_dirs, &root)?;
             if n > 0 {
                 crate::verr!(
                     "Dossiers mounts hôte supprimés ({n}) sous {}.",
