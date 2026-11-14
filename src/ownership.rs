@@ -176,6 +176,24 @@ pub fn domain_is_ours_for_instance(vm_id: &str, instance_dir: &Path) -> bool {
     }
 }
 
+/// Refuse d'arrêter, supprimer ou remplacer le domaine `vm_id` de l'instance `instance_dir`
+/// s'il existe et n'appartient pas à cet état Virtum (marqueur d'un autre Virtum, ou sans
+/// marqueur et sans le disque de cette instance). L'entrée `metadata.json` est conservée.
+pub fn ensure_domain_ours(vm_id: &str, instance_dir: &Path) -> anyhow::Result<()> {
+    if !crate::libvirt::domain_exists(vm_id) || domain_is_ours_for_instance(vm_id, instance_dir) {
+        return Ok(());
+    }
+    let owner = match domain_owner(vm_id) {
+        Owner::Other(id) => format!(" (propriétaire : {id})"),
+        _ => " (sans marqueur Virtum, disque d'une autre instance)".to_string(),
+    };
+    anyhow::bail!(
+        "Le domaine libvirt {vm_id} n'appartient pas à cet état Virtum{owner} : refus d'y toucher. \
+         Le nom est pris par une autre VM du même libvirt ; renommez le lab (`name:`) ou retirez \
+         l'instance de cet état."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

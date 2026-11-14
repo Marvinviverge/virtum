@@ -647,8 +647,31 @@ pub fn list_domain_names() -> Result<Vec<String>> {
         .collect())
 }
 
+/// Refuse d'agir sur un domaine qui porte le marqueur d'un autre Virtum (même nom de lab
+/// chez un autre utilisateur du même libvirt). Un domaine sans marqueur reste accepté ici :
+/// les appelants qui connaissent le dossier d'instance vérifient aussi ce cas
+/// ([`crate::ownership::ensure_domain_ours`]).
+fn refuse_foreign_domain(vm_id: &str) -> Result<()> {
+    if let crate::ownership::Owner::Other(id) = crate::ownership::domain_owner(vm_id) {
+        bail!("Le domaine {vm_id} appartient à un autre Virtum ({id}) : refus d'y toucher.");
+    }
+    Ok(())
+}
+
 pub fn define_domain(xml_path: &Path) -> Result<()> {
+    if let Some(vm_id) = parse_domain_name_from_xml(&std::fs::read_to_string(xml_path)?) {
+        if domain_exists(&vm_id) {
+            refuse_foreign_domain(&vm_id)?;
+        }
+    }
     run_virsh(&["define", path_arg(xml_path)?]).map(|_| ())
+}
+
+/// Nom du domaine (`<name>…</name>`) dans un XML libvirt.
+fn parse_domain_name_from_xml(xml: &str) -> Option<String> {
+    let start = xml.find("<name>")? + "<name>".len();
+    let end = start + xml[start..].find("</name>")?;
+    Some(xml[start..end].trim().to_string())
 }
 
 /// `virsh define` en remplaçant une définition existante (après `down`, `apply`, etc.).
@@ -663,6 +686,7 @@ pub fn define_or_replace_domain(vm_id: &str, xml_path: &Path) -> Result<()> {
 
 pub fn start_domain(vm_id: &str) -> Result<()> {
     if domain_exists(vm_id) {
+        refuse_foreign_domain(vm_id)?;
         let state = domain_state(vm_id).unwrap_or_default();
         if state == "running" {
             bail!("Le domaine libvirt '{vm_id}' est déjà actif.");
@@ -698,6 +722,7 @@ pub fn shutdown_domain(vm_id: &str) -> Result<()> {
     if !domain_exists(vm_id) {
         return Ok(());
     }
+    refuse_foreign_domain(vm_id)?;
     let state = domain_state(vm_id)?;
     // Déjà en cours d'arrêt : inutile de renvoyer l'ACPI.
     if state == "in shutdown" || !domain_is_active(&state) {
@@ -711,6 +736,7 @@ pub fn destroy_domain(vm_id: &str) -> Result<()> {
     if !domain_exists(vm_id) {
         return Ok(());
     }
+    refuse_foreign_domain(vm_id)?;
     let _ = run_virsh(&["destroy", vm_id]);
     Ok(())
 }
@@ -732,6 +758,7 @@ pub fn undefine_domain(vm_id: &str) -> Result<()> {
     if !domain_exists(vm_id) {
         return Ok(());
     }
+    refuse_foreign_domain(vm_id)?;
     run_virsh(&["undefine", vm_id]).map(|_| ())
 }
 
@@ -1355,6 +1382,17 @@ mod tests {
             vec!["192.168.1.51"]
         );
         assert!(!is_usable_guest_ipv4("10.0.0.1 x"));
+    }
+
+    #[test]
+    fn domain_name_is_read_from_xml() {
+        let xml =
+            "<domain type='kvm'>\n  <name>vm-0123456789ab</name>\n  <memory>1</memory>\n</domain>";
+        assert_eq!(
+            parse_domain_name_from_xml(xml).as_deref(),
+            Some("vm-0123456789ab")
+        );
+        assert_eq!(parse_domain_name_from_xml("<domain/>"), None);
     }
 
     #[test]

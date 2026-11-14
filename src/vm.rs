@@ -1023,6 +1023,9 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     let paths = config::ensure_layout().await?;
     let mut instance = require_instance(&paths, reference).await?;
     let vm_id = instance.id.clone();
+    // Avant toute écriture (config.xml, virtiofsd) : le domaine de ce nom peut être celui
+    // d'un autre Virtum, que define_or_replace_domain détruirait.
+    crate::ownership::ensure_domain_ours(&vm_id, &instance_dir_for(&paths, &vm_id)?)?;
 
     match instance.status {
         InstanceStatus::Destroyed => {
@@ -1292,6 +1295,7 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
     let paths = config::ensure_layout().await?;
     let mut instance = require_instance(&paths, reference).await?;
     let vm_id = instance.id.clone();
+    crate::ownership::ensure_domain_ours(&vm_id, &instance_dir_for(&paths, &vm_id)?)?;
 
     if domain_exists(&vm_id) {
         shutdown_domain(&vm_id).with_context(|| format!("virsh shutdown a échoué pour {vm_id}"))?;
@@ -1328,6 +1332,7 @@ pub async fn kill_vm_async(reference: &str) -> Result<()> {
     let paths = config::ensure_layout().await?;
     let mut instance = require_instance(&paths, reference).await?;
     let vm_id = instance.id.clone();
+    crate::ownership::ensure_domain_ours(&vm_id, &instance_dir_for(&paths, &vm_id)?)?;
 
     destroy_domain(&vm_id).with_context(|| format!("virsh destroy a échoué pour {vm_id}"))?;
     port_forward::stop_instance_proxies(&paths.instances.join(&vm_id));
@@ -1427,7 +1432,10 @@ async fn resolve_destroy_target(paths: &VirtumPaths, reference: &str) -> Result<
     let metadata = metadata::load_metadata(&paths.metadata).await?;
 
     if let Ok(instance) = metadata::resolve_instance_ref(&metadata, reference) {
-        return Ok((instance.id.clone(), false));
+        // Instance connue, mais le domaine de ce nom peut être celui d'un autre Virtum.
+        let id = instance.id.clone();
+        crate::ownership::ensure_domain_ours(&id, &instance_dir_for(paths, &id)?)?;
+        return Ok((id, false));
     }
 
     if is_virtum_vm_id(reference) && domain_exists(reference) {

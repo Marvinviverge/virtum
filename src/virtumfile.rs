@@ -203,10 +203,33 @@ const ANSIBLE_ADJACENT: &[&str] = &[
     "vars_plugins",
 ];
 
-/// Un partage est inscriptible par l'invité : il ne doit contenir ni le Virtumfile ni ce
-/// qu'Ansible exécute sur l'hôte (playbook, son dossier, `requirements`, fichiers et
-/// dossiers chargés à côté du playbook). Sinon l'invité réécrit ce que l'hôte exécutera.
-fn ensure_host_code_outside_shares(
+/// Dossiers qu'un playbook ou ses rôles chargent par chemin relatif (`import_tasks`,
+/// `template`, `copy`…), à côté du playbook.
+const ANSIBLE_RELATIVE_DIRS: &[&str] = &[
+    "tasks",
+    "handlers",
+    "templates",
+    "files",
+    "vars",
+    "defaults",
+    "meta",
+    "playbooks",
+];
+
+/// Chemin canonique s'il existe (un lien `roles -> partage` est ainsi vu), sinon tel quel.
+fn canonical_or_self(path: std::path::PathBuf) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or(path)
+}
+
+/// Un partage est inscriptible par l'invité : il ne doit ni contenir ni se trouver dans ce
+/// qu'Ansible exécute sur l'hôte. Refusés :
+/// - un partage qui contient le Virtumfile ou le fichier `requirements` ;
+/// - un partage qui contient un dossier Ansible ou se trouve dedans : le dossier du
+///   playbook quand c'est un sous-dossier dédié, sinon chaque dossier chargé à côté du
+///   playbook (`roles`, `tasks`, `templates`, `group_vars`, `*_plugins`…).
+///
+/// Sinon l'invité réécrit ce que l'hôte exécutera au prochain provisionnement.
+pub(crate) fn ensure_host_code_outside_shares(
     lab: &Virtumfile,
     virtumfile_dir: &Path,
     shares: &[(String, std::path::PathBuf)],
@@ -220,26 +243,47 @@ fn ensure_host_code_outside_shares(
             virtumfile_dir.display()
         )
     })?;
-    let mut protected = vec![(base.clone(), "le Virtumfile".to_string())];
+    // Chemins qu'un partage ne doit pas contenir.
+    let mut contained = vec![(base.clone(), "le Virtumfile".to_string())];
+    // Dossiers qu'un partage ne doit ni contenir ni rejoindre.
+    let mut overlapping: Vec<(std::path::PathBuf, String)> = Vec::new();
     if let Some(ref spec) = lab.ansible {
         let playbook = resolve_ansible_path(virtumfile_dir, "playbook", &spec.playbook)?;
         let playbook_dir = playbook.parent().unwrap_or(&base).to_path_buf();
-        protected.push((playbook_dir.clone(), "le dossier du playbook".to_string()));
-        for name in ANSIBLE_ADJACENT {
-            protected.push((playbook_dir.join(name), format!("ansible ({name})")));
+        if playbook_dir != base {
+            overlapping.push((playbook_dir.clone(), "le dossier du playbook".to_string()));
+        }
+        contained.push((playbook.clone(), "le playbook".to_string()));
+        for name in ANSIBLE_ADJACENT.iter().chain(ANSIBLE_RELATIVE_DIRS) {
+            overlapping.push((
+                canonical_or_self(playbook_dir.join(name)),
+                format!("ansible ({name})"),
+            ));
         }
         if let Some(ref req) = spec.requirements {
             let req = resolve_ansible_path(virtumfile_dir, "requirements", req)?;
-            protected.push((req, "ansible.requirements".to_string()));
+            contained.push((req, "ansible.requirements".to_string()));
         }
     }
     for (label, host) in shares {
-        for (path, what) in &protected {
-            if path.starts_with(host) {
+        let host = canonical_or_self(host.clone());
+        for (path, what) in &contained {
+            if path.starts_with(&host) {
                 bail!(
                     "Mount '{label}' ({}) contient {what} ({}) : l'invité pourrait modifier ce que \
                      l'hôte exécute. Partagez un sous-dossier qui ne contient ni le Virtumfile \
                      ni les fichiers Ansible.",
+                    host.display(),
+                    path.display()
+                );
+            }
+        }
+        for (path, what) in &overlapping {
+            if path.starts_with(&host) || host.starts_with(path) {
+                bail!(
+                    "Mount '{label}' ({}) recouvre {what} ({}) : l'invité pourrait modifier ce que \
+                     l'hôte exécute. Partagez un dossier distinct des fichiers Ansible (playbook, \
+                     rôles, tâches, modèles).",
                     host.display(),
                     path.display()
                 );
@@ -1260,10 +1304,44 @@ machines:
         for (host, ansible, needle) in [
             (".", false, "le Virtumfile"),
             (".", true, "le Virtumfile"),
-            ("./ansible", true, "le dossier du playbook"),
-            ("./ansible/roles", true, "ansible (roles)"),
+            ("./ansible", true, "le playbook"),
+            ("./ansible/roles", true, "le dossier du playbook"),
+            // Audit run-3 : un partage *dans* le dossier du playbook est refusé aussi.
+            ("./ansible/roles/web", true, "le dossier du playbook"),
+            ("./ansible/tasks", true, "le dossier du playbook"),
         ] {
             let err = format!("{:#}", validate(&lab(host, ansible), &dir).unwrap_err());
+            assert!(err.contains(needle), "{host}: {err}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn shares_must_not_overlap_ansible_dirs_next_to_root_playbook() {
+        let dir = std::env::temp_dir().join(format!("virtum-share-rootpb-{}", std::process::id()));
+        for d in ["roles/web", "tasks", "src", "data"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("site.yml"), "---\n").unwrap();
+        // `group_vars` est un lien vers un dossier partagé : le lien est suivi.
+        std::os::unix::fs::symlink(dir.join("data"), dir.join("group_vars")).unwrap();
+        let lab = |host: &str| {
+            load_from_str(&format!(
+                "name: s\nansible:\n  playbook: site.yml\nmachines:\n  web:\n    os: debian-12\n    \
+                 restart: no\n    mounts:\n      - name: code\n        host: {host}\n        \
+                 guest: ~/code\n"
+            ))
+            .unwrap()
+        };
+        // Playbook à la racine : un partage sans rapport avec Ansible reste possible.
+        validate(&lab("./src"), &dir).unwrap();
+        for (host, needle) in [
+            ("./roles", "ansible (roles)"),
+            ("./roles/web", "ansible (roles)"),
+            ("./tasks", "ansible (tasks)"),
+            ("./data", "ansible (group_vars)"),
+        ] {
+            let err = format!("{:#}", validate(&lab(host), &dir).unwrap_err());
             assert!(err.contains(needle), "{host}: {err}");
         }
         std::fs::remove_dir_all(&dir).ok();

@@ -236,6 +236,26 @@ async fn install_requirements(requirements: &Path, state: &mut AnsibleState) -> 
     Ok(())
 }
 
+/// Dossiers hôte partagés par les VM déployées du lab, d'après leur `mounts-state.json`.
+async fn lab_active_shares(
+    lab: &Virtumfile,
+    paths: &VirtumPaths,
+) -> Result<Vec<(String, PathBuf)>> {
+    let metadata = crate::metadata::load_metadata(&paths.metadata).await?;
+    let mut shares = Vec::new();
+    for inst in crate::metadata::instances_for_lab(&metadata, &lab.name) {
+        let dir = crate::vm::instance_dir_for(paths, &inst.id)?;
+        if !dir.is_dir() {
+            continue;
+        }
+        for m in crate::mounts::load_mounts_state(&dir)? {
+            let machine = inst.machine_name.as_deref().unwrap_or(&inst.id);
+            shares.push((format!("{machine}/{}", m.name), m.host_abs));
+        }
+    }
+    Ok(shares)
+}
+
 /// Joue le playbook du lab (inventaire, requirements, `ansible-playbook`) et met à jour
 /// l'état. `extra_args` est transmis tel quel à `ansible-playbook`.
 pub async fn run_playbook(
@@ -252,6 +272,11 @@ pub async fn run_playbook(
     require_tools(spec)?;
     let vf_dir = virtumfile::virtumfile_dir(virtumfile_path);
     let playbook = virtumfile::resolve_ansible_path(&vf_dir, "playbook", &spec.playbook)?;
+    // Partages réellement servis aux VM du lab (y compris ceux retirés du Virtumfile mais
+    // encore actifs) : aucun ne doit recouvrir ce qu'ansible-playbook va exécuter.
+    let active_shares = lab_active_shares(lab, paths).await?;
+    virtumfile::ensure_host_code_outside_shares(lab, &vf_dir, &active_shares)
+        .context("Provisionnement refusé")?;
 
     let inventory = prepare_inventory(lab, paths, insecure_ssh).await?;
 

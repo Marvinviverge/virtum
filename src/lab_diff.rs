@@ -744,6 +744,8 @@ async fn apply_machine(
             .map(|s| domain_is_active(&s))
             .unwrap_or(false);
 
+    // Même nom de domaine qu'une VM d'un autre Virtum : ne rien arrêter ni redéfinir.
+    crate::ownership::ensure_domain_ours(vm_id, &instance_dir)?;
     port_forward::stop_instance_proxies(&instance_dir);
 
     if (needs_stop || ip_renew) && was_running {
