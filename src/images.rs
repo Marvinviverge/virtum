@@ -43,6 +43,16 @@ const OS_REGISTRY: &[OsImageSpec] = &[
         algo: DigestAlgo::Sha256,
         source_label: "Ubuntu Cloud Images",
     },
+    // Version datée (et non `release/`, qui change à chaque nouvelle image) : l'empreinte reste valable.
+    // SHA256SUMS vérifié avec la clé de signature des images Ubuntu (ubuntu-cloudimage-keyring).
+    OsImageSpec {
+        id: "ubuntu-26.04",
+        filename: "ubuntu-26.04.qcow2",
+        url: "https://cloud-images.ubuntu.com/releases/26.04/release-20261108/ubuntu-26.04-server-cloudimg-amd64.img",
+        digest: "7b90593f5532b49b7e3fe3d2743f0d1f0d822e5b07cebcd8e00c0df8069ecab9",
+        algo: DigestAlgo::Sha256,
+        source_label: "Ubuntu Cloud Images",
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,6 +433,19 @@ mod tests {
 
     #[test]
     fn supported_os_ids_lists_registry() {
-        assert_eq!(supported_os_ids(), vec!["debian-12", "ubuntu-24.04"]);
+        assert_eq!(
+            supported_os_ids(),
+            vec!["debian-12", "ubuntu-24.04", "ubuntu-26.04"]
+        );
+    }
+
+    #[test]
+    fn resolve_ubuntu_26_04() {
+        let dir = Path::new("/tmp/virtum-images");
+        let image = resolve_image("ubuntu-26.04", dir).unwrap();
+        assert_eq!(image.local_path, dir.join("ubuntu-26.04.qcow2"));
+        assert_eq!(image.algo, DigestAlgo::Sha256);
+        // version datée : l'empreinte ne périme pas quand Canonical publie une nouvelle image
+        assert!(image.url.contains("/release-20261108/"));
     }
 }

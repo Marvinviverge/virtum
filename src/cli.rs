@@ -26,7 +26,7 @@ pub enum Commands {
     },
     /// Download and cache a cloud OS image (without starting a VM)
     Pull {
-        /// OS image id (e.g. debian-12, ubuntu-24.04)
+        /// OS image id (e.g. debian-12, ubuntu-24.04, ubuntu-26.04)
         os: String,
     },
     /// Launch a headless VM
@@ -215,7 +215,7 @@ pub enum SnapshotAction {
 
 #[derive(clap::Args)]
 pub struct RunArgs {
-    /// OS image (debian-12, ubuntu-24.04, …)
+    /// OS image (debian-12, ubuntu-24.04, ubuntu-26.04)
     #[arg(long, default_value = "debian-12")]
     pub os: String,
 
