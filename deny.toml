@@ -1,0 +1,20 @@
+# cargo deny : configuration lue par `cargo deny check` (CI et local).
+
+[licenses]
+# Licences des dépendances compatibles avec une distribution sous Apache-2.0.
+# Une nouvelle licence doit être relue avant d'être ajoutée ici.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    # Copyleft faible, au niveau du fichier : compatible tant que ce code n'est pas modifié.
+    "MPL-2.0",
+]
+confidence-threshold = 0.9

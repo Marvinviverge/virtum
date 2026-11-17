@@ -432,4 +432,4 @@ Validation manuelle : [`specs/001-security-hardening/quickstart.md`](./specs/001
 
 ## Licence
 
-À définir.
+Virtum est distribué sous licence [Apache 2.0](./LICENSE) : usage, modification et redistribution libres, y compris commerciaux, en conservant la licence et les mentions de copyright.
