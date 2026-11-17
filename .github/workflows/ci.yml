@@ -35,9 +35,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      # Le test de lecture seule sous bubblewrap s'exécute si l'hôte l'autorise, sinon il est sauté.
-      - name: bubblewrap
-        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+      # qemu-img : tests des disques et instantanés. bubblewrap : le test de lecture seule
+      # s'exécute si l'hôte l'autorise, sinon il est sauté.
+      - name: Outils hôte
+        run: sudo apt-get update -q && sudo apt-get install -y -q qemu-utils bubblewrap
 
       - name: Format
         run: cargo fmt --check
