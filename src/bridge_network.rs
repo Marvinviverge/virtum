@@ -1,4 +1,4 @@
-//! Détection d'interface physique pour le réseau bridge (Virtum v0.3, STEPS3 §37).
+//! Détection d'interface physique pour le réseau bridge.
 
 use std::fs;
 use std::path::Path;

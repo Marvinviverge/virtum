@@ -1,6 +1,4 @@
-//! Global instance state in `~/.virtum/metadata.json`.
-//!
-//! Public API is wired into VM lifecycle commands in later STEPS (6–19).
+//! Global instance state in `metadata.json` (state root: `/var/lib/virtum` or `~/.virtum`).
 
 use std::path::{Path, PathBuf};
 

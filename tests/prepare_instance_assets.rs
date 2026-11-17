@@ -1,4 +1,4 @@
-//! Integration: SSH key, cloud-init files, COW disk and ISO (steps 7–12).
+//! Integration: SSH key, cloud-init files, COW disk and ISO for a new instance.
 
 use std::fs;
 

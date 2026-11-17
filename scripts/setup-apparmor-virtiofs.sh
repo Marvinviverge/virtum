@@ -24,4 +24,4 @@ if command -v apparmor_parser >/dev/null 2>&1; then
 fi
 
 echo "OK — règle AppArmor Virtum virtiofs : $SNIPPET"
-echo "Relancez : virtum up -f examples/Virtumfile.mounts"
+echo "Relancez : virtum up -f <Virtumfile avec mounts:>"

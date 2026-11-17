@@ -1,10 +1,10 @@
-# Contrôles à chaque PR et à chaque push sur master : format, clippy, tests, dépendances.
+# Contrôles à chaque PR et à chaque push sur main et develop : format, clippy, tests, dépendances.
 # Les tests avec de vraies VM (libvirt, KVM) restent manuels : scripts/smoke-test-lab*.sh.
 name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main, develop]
   pull_request:
 
 # Jeton en lecture seule : le workflow ne publie rien.

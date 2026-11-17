@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Smoke lab hybride v0.3 (STEPS3 §7, étape 43) — web bridge+lab, db lab seul.
+# Smoke lab hybride : une machine web en bridge + réseau de lab, une machine db sur le lab seul.
 # Nécessite un hôte où macvtap bridge fonctionne (Ethernet recommandé ; Wi‑Fi / partage souvent KO).
 #
 # Usage :
-#   VIRTUM_BRIDGE_SMOKE=1 ./scripts/smoke-test-lab-bridge.sh
-#   VIRTUM_BRIDGE_SMOKE=1 VIRTUM_BIN=./target/release/virtum ./scripts/smoke-test-lab-bridge.sh
+#   VIRTUM_BRIDGE_SMOKE=1 VIRTUMFILE=chemin/Virtumfile ./scripts/smoke-test-lab-bridge.sh
+#   (VIRTUM_BIN=./target/release/virtum par défaut)
 set -euo pipefail
 
 if [[ "${VIRTUM_BRIDGE_SMOKE:-}" != "1" ]]; then
@@ -14,7 +14,11 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VIRTUM="${VIRTUM_BIN:-$ROOT/target/release/virtum}"
-VIRTUMFILE="${VIRTUMFILE:-$ROOT/examples/Virtumfile.bridge-mixed}"
+VIRTUMFILE="${VIRTUMFILE:-}"
+if [[ -z "$VIRTUMFILE" ]]; then
+  echo "Définissez VIRTUMFILE : un lab avec une machine 'web' en network: bridge et une machine 'db'." >&2
+  exit 1
+fi
 
 if [[ ! -x "$VIRTUM" ]]; then
   echo "Binaire introuvable: $VIRTUM (lancez: make release)" >&2

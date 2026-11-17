@@ -49,4 +49,4 @@ Ce que Virtum ne protège pas, et ce qu'il faut faire à la place :
 
 ## Signaler une faille
 
-Ouvrez une issue privée (security advisory) sur le dépôt GitHub, avec les étapes pour reproduire. Ne publiez pas de détails d'exploitation avant le correctif.
+Écrivez à **security@virtum.dev**, ou ouvrez un signalement privé (security advisory) sur le [dépôt GitHub](https://github.com/Marvinviverge/virtum/security/advisories/new), avec les étapes pour reproduire et la version concernée (`virtum --version`). Ne publiez pas de détails d'exploitation avant le correctif.

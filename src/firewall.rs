@@ -1,4 +1,4 @@
-//! Ouverture / fermeture pare-feu hôte (ufw) pour `bind: lan` (STEPS3).
+//! Ouverture / fermeture pare-feu hôte (ufw) pour `bind: lan`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

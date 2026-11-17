@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Parcours lab NAT v0.2/v0.3 (STEPS2 §35, STEPS3 §43) — KVM, libvirt, socat.
+# Parcours lab NAT de bout en bout (examples/Virtumfile) — KVM, libvirt, socat.
 # Port HTTP : aligné sur examples/Virtumfile (18098 par défaut).
 set -euo pipefail
 

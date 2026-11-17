@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prérequis hôte Debian/Ubuntu pour Virtum (étape 24 STEPS2).
+# Prérequis hôte Debian/Ubuntu pour Virtum.
 # Paquets KVM/libvirt, socat (ports lab), groupes libvirt/kvm.
 set -euo pipefail
 

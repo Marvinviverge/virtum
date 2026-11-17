@@ -1,4 +1,4 @@
-//! Port mapping hôte → invité (STEPS2 étape 31, v0.3 `bind: lan`) via `socat`.
+//! Port mapping hôte → invité (`ports:`, `bind: lan`) via `socat`.
 //!
 //! Les proxies tournent en processus séparé (survit à la fin de `virtum up`).
 

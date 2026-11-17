@@ -54,7 +54,7 @@ smoke-lab: release
 	@test -f scripts/smoke-test-lab.sh || { echo "scripts/smoke-test-lab.sh introuvable"; exit 1; }
 	bash scripts/smoke-test-lab.sh
 
-## Smoke lab hybride bridge — VIRTUM_BRIDGE_SMOKE=1 + Ethernet recommandé
+## Smoke lab hybride bridge — VIRTUMFILE=… (web en bridge + db), Ethernet recommandé
 smoke-lab-bridge: release
 	@test -f scripts/smoke-test-lab-bridge.sh || { echo "scripts/smoke-test-lab-bridge.sh introuvable"; exit 1; }
 	VIRTUM_BRIDGE_SMOKE=1 bash scripts/smoke-test-lab-bridge.sh

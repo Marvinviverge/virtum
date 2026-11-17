@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validation manuelle MVP v0.1 (STEPS.md étape 21).
+# Validation manuelle du cycle de vie d'une VM : run, shell, stop, start, destroy.
 # Prérequis : KVM, libvirt système (réseau default), image debian-12 en cache recommandée.
 set -euo pipefail
 

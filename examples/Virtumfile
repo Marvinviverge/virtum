@@ -1,23 +1,22 @@
-# Exemple lab Virtum (v0.2/v0.3)
-#   virtum plan -f examples/Virtumfile   # prévisualise + vérifie firewall-demo-lab.json
-#   virtum up → virtum open              # ufw + état pare-feu si bind: lan
+# Lab d'exemple : un serveur web et une base, sur un réseau isolé.
+#   virtum plan -f examples/Virtumfile    # ce qui va être créé, sans rien toucher
+#   virtum up -f examples/Virtumfile      # puis http://127.0.0.1:18098
+#   virtum down -f examples/Virtumfile --destroy
 name: demo-lab
-# Expose les ports sur le LAN (téléphone / collègue même Wi‑Fi) — v0.3
-bind: lan
-# v0.6 (optionnels) :
-# ssh_port: 2222          # si la configuration de la VM déplace sshd (repli 22)
-# restart: unless-stopped # démarrage au boot de l'hôte : no | always | unless-stopped
-# v0.9 (optionnel) : réseau du lab ; sans ce champ, 192.168.68.0/24 (calculé depuis le nom).
-# subnet: 10.42.0.0/24
+
+# Champs optionnels du lab :
+# subnet: 10.42.0.0/24     # réseau du lab (sinon calculé depuis le nom ; voir virtum plan)
+# bind: lan                # exposer les ports: sur le réseau local (confirmation demandée)
+# restart: unless-stopped  # démarrage au boot de l'hôte : no | always | unless-stopped
 
 machines:
   web:
     os: debian-12
-    ram: 4096
+    ram: 2048
     cpu: 2
     disk_size: 20G
     ports:
-      - "18098:80"
+      - "18098:80"         # 127.0.0.1:18098 de l'hôte → port 80 de la VM
     provision:
       - apt-get update
       - apt-get install -y nginx
@@ -26,6 +25,4 @@ machines:
     os: ubuntu-24.04
     ram: 1024
     cpu: 1
-    # v0.7 (optionnel) : adresse déclarée sur le réseau du lab (192.168.68.0/24 pour demo-lab,
-    # affiché par `virtum plan`) ; sans ip:, DHCP libre.
-    # ip: 192.168.68.20
+    # ip: 10.42.0.20       # adresse fixe (avec subnet: ci-dessus)
