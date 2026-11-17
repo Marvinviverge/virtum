@@ -161,8 +161,9 @@ pub fn render_ini(inv: &Inventory) -> String {
 }
 
 pub fn render_yaml(inv: &Inventory) -> Result<String> {
-    use serde_yaml::{Mapping, Value};
-    let s = |v: &str| Value::String(v.to_string());
+    // Map conserve l'ordre d'insertion (feature `preserve_order` de serde_json).
+    use serde_json::{Map as Mapping, Value};
+    let s = |v: &str| v.to_string();
 
     let mut lab_hosts = Mapping::new();
     for host in &inv.hosts {
@@ -172,22 +173,22 @@ pub fn render_yaml(inv: &Inventory) -> Result<String> {
                 value
                     .parse::<u64>()
                     .map(Value::from)
-                    .unwrap_or_else(|_| s(value))
+                    .unwrap_or_else(|_| Value::String(s(value)))
             } else {
-                s(value)
+                Value::String(s(value))
             };
             vars.insert(s(key), v);
         }
-        lab_hosts.insert(s(&host.name), Value::Mapping(vars));
+        lab_hosts.insert(s(&host.name), Value::Object(vars));
     }
     let mut lab_vars = Mapping::new();
-    lab_vars.insert(s("virtum_lab"), s(&inv.lab_name));
+    lab_vars.insert(s("virtum_lab"), Value::String(s(&inv.lab_name)));
     let mut lab_group = Mapping::new();
-    lab_group.insert(s("hosts"), Value::Mapping(lab_hosts));
-    lab_group.insert(s("vars"), Value::Mapping(lab_vars));
+    lab_group.insert(s("hosts"), Value::Object(lab_hosts));
+    lab_group.insert(s("vars"), Value::Object(lab_vars));
 
     let mut children = Mapping::new();
-    children.insert(s(&inv.lab_group), Value::Mapping(lab_group));
+    children.insert(s(&inv.lab_group), Value::Object(lab_group));
     for (group, members) in &inv.groups {
         if *group == inv.lab_group {
             continue;
@@ -197,16 +198,16 @@ pub fn render_yaml(inv: &Inventory) -> Result<String> {
             hosts.insert(s(m), Value::Null);
         }
         let mut g = Mapping::new();
-        g.insert(s("hosts"), Value::Mapping(hosts));
-        children.insert(s(group), Value::Mapping(g));
+        g.insert(s("hosts"), Value::Object(hosts));
+        children.insert(s(group), Value::Object(g));
     }
     let mut all = Mapping::new();
-    all.insert(s("children"), Value::Mapping(children));
+    all.insert(s("children"), Value::Object(children));
     let mut root = Mapping::new();
-    root.insert(s("all"), Value::Mapping(all));
+    root.insert(s("all"), Value::Object(all));
 
     let body =
-        serde_yaml::to_string(&Value::Mapping(root)).context("Rendu YAML de l'inventaire")?;
+        serde_saphyr::to_string(&Value::Object(root)).context("Rendu YAML de l'inventaire")?;
     Ok(format!(
         "# Généré par virtum inventory — lab {} (ne pas éditer)\n{body}",
         inv.lab_name
@@ -325,7 +326,6 @@ mod tests {
                 inst("vm-n1", "node-1", "192.168.218.11", "running"),
                 inst("vm-n2", "node-2", "192.168.218.12", "stopped"),
             ],
-            ..Default::default()
         };
         let root = PathBuf::from("/var/lib/virtum");
         let paths = VirtumPaths {
@@ -404,20 +404,20 @@ mod tests {
             i.status == metadata::InstanceStatus::Running
         });
         let yaml = render_yaml(&inv).unwrap();
-        let body: serde_yaml::Value =
-            serde_yaml::from_str(yaml.lines().skip(1).collect::<Vec<_>>().join("\n").as_str())
+        let body: serde_json::Value =
+            serde_saphyr::from_str(yaml.lines().skip(1).collect::<Vec<_>>().join("\n").as_str())
                 .unwrap();
         let children = &body["all"]["children"];
         assert_eq!(
             children["kubernetes_lab"]["hosts"]["control-plane"]["ansible_port"],
-            serde_yaml::Value::from(2222u64)
+            serde_json::Value::from(2222u64)
         );
         assert_eq!(
             children["kubernetes_lab"]["vars"]["virtum_lab"],
-            serde_yaml::Value::from("kubernetes-lab")
+            serde_json::Value::from("kubernetes-lab")
         );
         assert!(children["workers"]["hosts"]
-            .as_mapping()
+            .as_object()
             .unwrap()
             .contains_key("node-1"));
     }

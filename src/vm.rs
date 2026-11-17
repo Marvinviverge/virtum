@@ -498,7 +498,7 @@ pub async fn launch_vm_inner(
         },
         restart: config.restart,
         static_ip: config.static_ip.clone(),
-        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        created_at: crate::fsutil::now_rfc3339(),
     };
     sync_autostart(&instance, true)?;
     metadata::upsert_instance(&paths.metadata, instance).await?;

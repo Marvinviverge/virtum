@@ -1173,7 +1173,6 @@ mod tests {
                 inst("vm-other", "other-lab", "db", "running"),
                 inst("vm-old", "lab", "old", "destroyed"),
             ],
-            ..Default::default()
         };
         let names: Vec<_> = removed_instances(&lab, &metadata)
             .iter()

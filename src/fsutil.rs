@@ -118,6 +118,13 @@ fn unique_in(dir: &Path, prefix: &str) -> Result<PathBuf> {
     )))
 }
 
+/// Horodatage UTC des fichiers d'état, à la seconde (`2026-11-17T10:00:00Z`).
+pub fn now_rfc3339() -> String {
+    jiff::Timestamp::now()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

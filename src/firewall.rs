@@ -176,7 +176,7 @@ fn save_firewall_state(
         lab_name: lab_name.to_string(),
         virtumfile: virtumfile_path.display().to_string(),
         rules: rules.to_vec(),
-        opened_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        opened_at: crate::fsutil::now_rfc3339(),
     };
     let path = firewall_state_path(paths, lab_name);
     let content = serde_json::to_string_pretty(&state).context("sérialisation pare-feu")?;

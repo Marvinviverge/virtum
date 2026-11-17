@@ -63,7 +63,7 @@ pub struct ResolvedMount {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-enum MountYamlEntry {
+pub enum MountYamlEntry {
     Short(String),
     Detailed {
         name: String,
@@ -75,14 +75,11 @@ enum MountYamlEntry {
 }
 
 /// Parse une entrée YAML `mounts:` (liste hétérogène).
-pub fn parse_mount_entries(raw: &[serde_yaml::Value]) -> Result<Vec<MountSpec>> {
-    let mut out = Vec::new();
-    for (i, value) in raw.iter().enumerate() {
-        let entry: MountYamlEntry = serde_yaml::from_value(value.clone())
-            .with_context(|| format!("mounts[{i}] : format invalide"))?;
-        out.push(mount_entry_to_spec(entry, i)?);
-    }
-    Ok(out)
+pub fn parse_mount_entries(raw: Vec<MountYamlEntry>) -> Result<Vec<MountSpec>> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, entry)| mount_entry_to_spec(entry, i))
+        .collect()
 }
 
 fn mount_entry_to_spec(entry: MountYamlEntry, index: usize) -> Result<MountSpec> {
@@ -1136,8 +1133,8 @@ mod tests {
     #[test]
     fn mounts_are_read_only_unless_rw() {
         let parse = |yaml: &str| {
-            let raw: Vec<serde_yaml::Value> = serde_yaml::from_str(yaml).unwrap();
-            parse_mount_entries(&raw).unwrap()
+            let raw: Vec<MountYamlEntry> = serde_saphyr::from_str(yaml).unwrap();
+            parse_mount_entries(raw).unwrap()
         };
         let m = parse(
             "- ./src:~/src\n- ./out:~/out:rw\n- ./doc:~/doc:ro\n\

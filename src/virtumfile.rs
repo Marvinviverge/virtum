@@ -246,10 +246,10 @@ fn deserialize_mounts_field<'de, D>(deserializer: D) -> Result<Option<Vec<MountS
 where
     D: Deserializer<'de>,
 {
-    let raw: Option<Vec<serde_yaml::Value>> = Option::deserialize(deserializer)?;
+    let raw: Option<Vec<mounts::MountYamlEntry>> = Option::deserialize(deserializer)?;
     match raw {
         None => Ok(None),
-        Some(entries) => parse_mount_entries(&entries)
+        Some(entries) => parse_mount_entries(entries)
             .map(Some)
             .map_err(serde::de::Error::custom),
     }
@@ -599,7 +599,7 @@ pub fn virtumfile_dir(path: &Path) -> std::path::PathBuf {
 }
 
 pub fn load_from_str(content: &str) -> Result<Virtumfile> {
-    let lab: Virtumfile = serde_yaml::from_str(content)
+    let lab: Virtumfile = serde_saphyr::from_str(content)
         .context("YAML invalide (vérifiez `network:` — valeurs acceptées : lab, bridge)")?;
     Ok(lab)
 }
@@ -751,7 +751,7 @@ machines:
 "#;
 
     fn parse_lab(content: &str) -> Virtumfile {
-        serde_yaml::from_str(content).expect("YAML parse")
+        serde_saphyr::from_str(content).expect("YAML parse")
     }
 
     #[test]

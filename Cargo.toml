@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+jiff = "1"
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
@@ -13,8 +13,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
+serde_json = { version = "1", features = ["preserve_order"] }
+serde-saphyr = { version = "2.1", default-features = false, features = ["serialize", "deserialize"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "signal"] }
 uuid = { version = "1", features = ["v4"] }

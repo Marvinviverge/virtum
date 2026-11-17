@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Local};
 use serde_json::Value;
 
 use crate::command::{path_arg, run_command};
@@ -573,9 +572,13 @@ fn format_listing(per_disk: &[(String, DiskInfo)]) -> String {
 }
 
 fn format_date(date_sec: i64) -> String {
-    DateTime::from_timestamp(date_sec, 0)
-        .map(|d| d.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "-".to_string())
+    jiff::Timestamp::from_second(date_sec)
+        .map(|t| {
+            t.to_zoned_datetime(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| "-".to_string())
 }
 
 #[cfg(test)]

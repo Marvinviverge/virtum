@@ -36,7 +36,7 @@ fmt:
 	$(CARGO) fmt
 
 clippy:
-	$(CARGO) clippy -- -D warnings
+	$(CARGO) clippy --all-targets -- -D warnings
 
 ## cargo audit (ignores via .cargo/audit.toml, lu automatiquement) — warn si binaire absent
 audit:

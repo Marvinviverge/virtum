@@ -10,9 +10,14 @@ Virtum est une CLI lancée par un utilisateur de l'hôte. Elle pilote `qemu:///s
 | :--- | :--- | :--- |
 | **L'invité d'une VM** (adversaire principal) | Tout ce qui tourne dans la VM, en root : ses réponses DHCP (nom d'hôte, client-id), l'agent invité, l'ARP, sa clé SSH, le contenu des partages qu'on lui donne en écriture | Aucune |
 | **Une autre VM du réseau de lab** | Le trafic du réseau de lab, ses propres baux DHCP | Aucune |
-| **Un autre compte Unix de l'hôte**, ou un autre Virtum sur le même libvirt | Ses propres domaines, réseaux et fichiers ; ce que libvirt lui laisse voir | Aucune |
+| **Une machine du réseau local** (VM en `bridge`, ou `ports:` en `bind: lan`) | Le trafic du LAN : elle joint directement une VM en bridge, et peut répondre à sa place sur le LAN | Aucune |
+| **Un autre compte Unix de l'hôte**, hors des groupes `libvirt` et `kvm` | Ses propres fichiers | Aucune |
 | **Le Virtumfile et le playbook** | Ce que Virtum crée, et le code Ansible exécuté sur l'hôte | Totale : c'est du code de l'utilisateur |
-| **L'utilisateur, root, libvirt, QEMU, le noyau** | Tout | Totale |
+| **L'utilisateur, root, les membres des groupes `libvirt` et `kvm`, libvirt, QEMU, le noyau** | Tout | Totale |
+
+**Usage visé : un poste de développement à un seul utilisateur.** Les comptes des groupes `libvirt` et `kvm` sont de confiance, car l'accès à `qemu:///system` vaut presque root (voir Limites). Le réseau, lui, ne l'est pas : les invités, les autres VM et, dès qu'une VM est en bridge ou qu'un port est ouvert sur le LAN, les machines du réseau local sont des adversaires.
+
+Virtum distingue quand même ses objets de ceux d'un autre Virtum sur le même libvirt (G3), pour ne jamais en arrêter ou en supprimer un par erreur.
 
 ## Garanties
 
@@ -35,6 +40,8 @@ Ce que Virtum ne protège pas, et ce qu'il faut faire à la place :
 - **Partage `rw`** : la VM peut y écrire n'importe quoi. N'exécutez pas sur l'hôte ce qu'elle y dépose, et ne placez pas dans un partage `rw` un dossier que l'hôte lit (dépôt Git avec hooks, configuration d'un outil…).
 - **Ansible** : seul le dossier du playbook est copié. Un fichier chargé par chemin absolu, ou par `../` hors de ce dossier, n'est pas protégé par la copie (un `../` échoue, un chemin absolu vers un partage `rw` serait lu tel quel).
 - **Partages créés avant la lecture seule par défaut** : le virtiofsd déjà lancé reste en écriture jusqu'à `virtum destroy` puis `virtum up`.
+- **VM en bridge** : elle est sur le LAN comme une machine physique et toutes les machines du réseau peuvent la joindre. Virtum n'y filtre rien : le pare-feu et les services de la VM sont à la charge de l'invité. Préférez un réseau de lab avec des `ports:` locaux quand la VM n'a pas à être vue du LAN.
+- **Premier contact SSH** : la clé d'hôte d'une nouvelle VM est enregistrée à la première connexion (confiance au premier usage). Une autre VM du lab, ou une machine du LAN pour une VM en bridge, qui répondrait à sa place à ce moment précis serait épinglée à sa place.
 - **Clés SSH épinglées avant `HostKeyAlias`** : la première connexion à une VM existante après la mise à jour enregistre sa clé (confiance au premier usage).
 - **`--insecure-ssh`** désactive la vérification de la clé d'hôte. Réservé aux scripts de confiance.
 - **virtiofsd tourne toujours avec `--sandbox=none`**, avec ou sans `uidmap` : il n'est pas confiné au dossier partagé, et une faille de virtiofsd donnerait les droits de l'utilisateur. La lecture seule reste imposée (`--readonly` ou bubblewrap).

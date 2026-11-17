@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
-use serde_yaml::Value;
 
 use crate::command::{path_arg, run_command};
 use crate::mounts::ResolvedMount;
@@ -86,18 +85,16 @@ fn mount_runcmd_entries(mounts: &[ResolvedMount]) -> Vec<Vec<String>> {
 }
 
 fn yaml_runcmd_block(entries: &[Vec<String>]) -> String {
+    #[derive(serde::Serialize)]
+    struct Runcmd<'a> {
+        runcmd: &'a [Vec<String>],
+    }
     if entries.is_empty() {
         return String::new();
     }
-    let seq: Vec<Value> = entries
-        .iter()
-        .map(|row| Value::Sequence(row.iter().map(|s| Value::String(s.clone())).collect()))
-        .collect();
-    let mut map = serde_yaml::Mapping::new();
-    map.insert(Value::String("runcmd".into()), Value::Sequence(seq));
     format!(
         "{}\n",
-        serde_yaml::to_string(&Value::Mapping(map)).expect("runcmd yaml")
+        serde_saphyr::to_string(&Runcmd { runcmd: entries }).expect("runcmd yaml")
     )
 }
 
@@ -326,6 +323,22 @@ mod tests {
         assert!(content.contains("app"));
         assert!(!content.contains("mkdir -p /home"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// cloud-init lit le YAML en 1.1 (PyYAML) : `yes`, `on`, `0755`, `~`… doivent rester
+    /// des chaînes, donc être entre guillemets.
+    #[test]
+    fn runcmd_quotes_yaml11_scalars() {
+        let row: Vec<String> = ["yes", "on", "no", "0755", "~", "null", "1e3", "true"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out = yaml_runcmd_block(std::slice::from_ref(&row));
+        for v in &row {
+            assert!(out.contains(&format!("\"{v}\"")), "{v} non quoté :\n{out}");
+        }
+        let back: serde_json::Value = serde_saphyr::from_str(&out).unwrap();
+        assert_eq!(back["runcmd"][0], serde_json::json!(row));
     }
 
     #[test]

@@ -117,17 +117,17 @@ pub fn require_tools(spec: &virtumfile::AnsibleSpec) -> Result<()> {
 
 /// Ce que contient un fichier requirements : `(collections, rôles)`.
 pub fn requirements_kinds(content: &str) -> (bool, bool) {
-    match serde_yaml::from_str::<serde_yaml::Value>(content) {
-        Ok(serde_yaml::Value::Mapping(map)) => {
+    match serde_saphyr::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Object(map)) => {
             let has = |key: &str| {
                 map.get(key)
-                    .and_then(|v| v.as_sequence())
+                    .and_then(|v| v.as_array())
                     .is_some_and(|s| !s.is_empty())
             };
             (has("collections"), has("roles"))
         }
         // Ancien format : liste de rôles à la racine.
-        Ok(serde_yaml::Value::Sequence(seq)) => (false, !seq.is_empty()),
+        Ok(serde_json::Value::Array(seq)) => (false, !seq.is_empty()),
         _ => (false, false),
     }
 }
@@ -209,10 +209,13 @@ async fn run_inherited(mut cmd: tokio::process::Command) -> Result<i32> {
 
 /// Chemins locaux candidats cités par un fichier requirements (sources `type: dir|file`,
 /// rôles `src: ./…`, `file://…`) : toute chaîne qui ressemble à un chemin.
-fn requirements_local_paths(content: &str) -> Vec<String> {
-    fn walk(v: &serde_yaml::Value, out: &mut Vec<String>) {
+///
+/// Un fichier illisible est refusé plutôt qu'ignoré : sinon le contrôle des partages
+/// serait sauté alors qu'ansible-galaxy, plus tolérant, pourrait encore le lire.
+fn requirements_local_paths(content: &str) -> Result<Vec<String>> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
-            serde_yaml::Value::String(s) => {
+            serde_json::Value::String(s) => {
                 let s = s.trim();
                 let s = s.strip_prefix("file://").unwrap_or(s);
                 if s.starts_with('/') || s.starts_with('.') || s.starts_with('~') || s.contains('/')
@@ -220,17 +223,16 @@ fn requirements_local_paths(content: &str) -> Vec<String> {
                     out.push(s.to_string());
                 }
             }
-            serde_yaml::Value::Sequence(seq) => seq.iter().for_each(|x| walk(x, out)),
-            serde_yaml::Value::Mapping(map) => map.values().for_each(|x| walk(x, out)),
-            serde_yaml::Value::Tagged(t) => walk(&t.value, out),
+            serde_json::Value::Array(seq) => seq.iter().for_each(|x| walk(x, out)),
+            serde_json::Value::Object(map) => map.values().for_each(|x| walk(x, out)),
             _ => {}
         }
     }
+    let v: serde_json::Value = serde_saphyr::from_str(content)
+        .context("ansible.requirements : YAML illisible, sources locales non vérifiables")?;
     let mut out = Vec::new();
-    if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(content) {
-        walk(&v, &mut out);
-    }
-    out
+    walk(&v, &mut out);
+    Ok(out)
 }
 
 /// Refuse une source locale de `requirements` située dans un partage inscriptible :
@@ -242,7 +244,7 @@ fn ensure_requirements_sources_outside_shares(
     bases: &[PathBuf],
     shares: &[(String, PathBuf)],
 ) -> Result<()> {
-    for raw in requirements_local_paths(content) {
+    for raw in requirements_local_paths(content)? {
         let candidates: Vec<PathBuf> = if Path::new(&raw).is_absolute() {
             vec![PathBuf::from(&raw)]
         } else {
@@ -580,8 +582,7 @@ pub async fn run_playbook(
 
     let outcome = if code == 0 {
         state.last_run = Some("success".into());
-        state.provisioned_at =
-            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        state.provisioned_at = Some(crate::fsutil::now_rfc3339());
         RunOutcome::Success
     } else {
         state.last_run = Some("failed".into());
@@ -784,14 +785,24 @@ mod tests {
         let shares = vec![("web/out".to_string(), d.join("out"))];
         let req = "collections:\n  - name: ./out/coll\n    type: dir\nroles:\n  - src: file://./out/r.tar.gz\n";
         assert_eq!(
-            requirements_local_paths(req),
+            requirements_local_paths(req).unwrap(),
             ["./out/coll", "./out/r.tar.gz"]
         );
-        let err = ensure_requirements_sources_outside_shares(req, &[d.clone()], &shares);
+        // Une étiquette YAML ne cache pas le chemin.
+        assert_eq!(
+            requirements_local_paths("roles:\n  - src: !local ./out/r\n").unwrap(),
+            ["./out/r"]
+        );
+        // Fichier vide : rien à vérifier. Fichier illisible : refusé.
+        assert!(requirements_local_paths("---\n").unwrap().is_empty());
+        assert!(requirements_local_paths("").unwrap().is_empty());
+        assert!(requirements_local_paths("roles: [\n").is_err());
+        let err =
+            ensure_requirements_sources_outside_shares(req, std::slice::from_ref(&d), &shares);
         assert!(format!("{:#}", err.unwrap_err()).contains("partage"));
         // Collection Galaxy distante : aucun chemin local, accepté.
         let ok = "collections:\n  - name: community.general\n    version: '>=8'\n";
-        ensure_requirements_sources_outside_shares(ok, &[d.clone()], &shares).unwrap();
+        ensure_requirements_sources_outside_shares(ok, std::slice::from_ref(&d), &shares).unwrap();
         std::fs::remove_dir_all(&d).ok();
     }
 
