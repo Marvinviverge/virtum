@@ -1,5 +1,7 @@
 # Virtum
 
+**Français** | [English](./README.en.md)
+
 **La VM, tout simplement.**
 
 Virtum lance des machines virtuelles locales et des labs multi-VM avec une expérience proche de Docker : `virtum run`, `virtum ps`, `virtum shell`, et un fichier `Virtumfile` pour décrire un lab entier. Les VM tournent sur KVM et libvirt, sur votre propre machine Linux.
@@ -36,7 +38,7 @@ sudo ./scripts/setup-var-lib.sh             # prépare /var/lib/virtum
 virtum doctor
 ```
 
-`~/.local/bin` doit être dans votre `PATH`. Après `setup-host.sh`, reconnectez votre session pour entrer dans les groupes `libvirt` et `kvm`. Tous les contrôles de `virtum doctor` doivent être `[ok]`.
+`~/.local/bin` doit être dans votre `PATH`. Après `setup-host.sh`, reconnectez votre session pour entrer dans les groupes `libvirt` et `kvm`. Tous les contrôles de `virtum doctor` doivent être `[ok]`. `gh attestation verify` demande GitHub CLI 2.49 ou plus récent.
 
 ### Depuis les sources
 

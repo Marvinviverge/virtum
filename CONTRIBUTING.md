@@ -1,5 +1,7 @@
 # Contribuer à Virtum
 
+**Français** | [English](./CONTRIBUTING.en.md)
+
 Merci de votre intérêt. Les rapports de bug, les idées et les correctifs sont bienvenus.
 
 ## Signaler un problème
