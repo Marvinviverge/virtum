@@ -436,11 +436,8 @@ fn print_header(path: &Path, lab: &Virtumfile, paths: &VirtumPaths) {
     if let Some(b) = bind_lab {
         println!("  bind (lab) : {b}");
     }
-    if lab.network.is_some() {
-        println!(
-            "  network (lab) : {}",
-            network_mode_label(lab.network.unwrap())
-        );
+    if let Some(network) = lab.network {
+        println!("  network (lab) : {}", network_mode_label(network));
     }
 }
 

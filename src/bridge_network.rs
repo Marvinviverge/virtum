@@ -163,10 +163,7 @@ pub fn is_plausible_bridge_candidate(name: &str) -> bool {
     const PREFIX_SKIP: &[&str] = &[
         "docker", "br-", "virbr", "veth", "vnet", "vmnet", "tun", "tap", "wg", "vb-",
     ];
-    if PREFIX_SKIP.iter().any(|p| lower.starts_with(p)) {
-        return false;
-    }
-    true
+    !PREFIX_SKIP.iter().any(|p| lower.starts_with(p))
 }
 
 fn is_ethernet_type(name: &str) -> bool {

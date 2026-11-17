@@ -1,0 +1,5 @@
+[toolchain]
+# Même version en local et en CI : un nouveau clippy ne casse pas la CI sans prévenir.
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
