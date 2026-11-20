@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Construit l'archive de release : virtum-<version>-x86_64-linux.tar.gz + SHA256SUMS.
+# Construit les fichiers de release : virtum-<version>-x86_64-linux.tar.gz, le paquet
+# virtum_<version>_amd64.deb (scripts/package-deb.sh) et SHA256SUMS.
 #
 # Usage : scripts/package-release.sh <binaire virtum> <dossier de sortie>
 # Contenu : binaire, LICENSE, README, SECURITY, CHANGELOG, scripts d'installation de l'hôte,
@@ -38,6 +39,9 @@ EPOCH="$(git log -1 --format=%ct)"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$EPOCH" \
   -C "$STAGE" -cf - "$NAME" | gzip -n -9 > "$OUT/$NAME.tar.gz"
 
-(cd "$OUT" && sha256sum "$NAME.tar.gz" > SHA256SUMS)
 echo "OK — $OUT/$NAME.tar.gz"
+
+"$ROOT/scripts/package-deb.sh" "$BIN" "$OUT"
+
+(cd "$OUT" && sha256sum "$NAME.tar.gz" "virtum_${VERSION}_amd64.deb" > SHA256SUMS)
 cat "$OUT/SHA256SUMS"

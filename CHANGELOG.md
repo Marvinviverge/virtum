@@ -2,6 +2,21 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [1.1.0] - 2026-11-20
+
+### Ajouts
+
+- **Paquet Debian** `virtum_<version>_amd64.deb` dans chaque release, avec sa propre empreinte dans `SHA256SUMS` et son attestation de provenance. `apt` installe libvirt, QEMU, qemu-utils, cloud-image-utils, openssh-client et socat ; `virtiofsd` et `bubblewrap` (dossiers partagés) sont recommandés. Les scripts de préparation de l'hôte sont installés dans `/usr/share/virtum/`.
+- README et guide de contribution en anglais.
+
+### Changements
+
+- Binaire de release sans symboles de débogage : environ 8 Mo.
+
+### Plateformes
+
+Paquet installé et vérifié sur Ubuntu 24.04. Sur Ubuntu 22.04 et Debian 12, ses dépendances se résolvent, mais `virtiofsd` n'y existe pas en paquet séparé : les dossiers partagés n'y sont pas pris en charge.
+
 ## [1.0.0] - 2026-11-17
 
 Première version publiée. Virtum lance des VM KVM locales et des labs multi-VM décrits dans un `Virtumfile`, sur libvirt (`qemu:///system`).

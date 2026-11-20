@@ -1,6 +1,6 @@
 [package]
 name = "virtum"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -19,3 +19,7 @@ serde-saphyr = { version = "2.1", default-features = false, features = ["seriali
 sha2 = "0.10"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "signal"] }
 uuid = { version = "1", features = ["v4"] }
+
+# Binaire de release sans symboles : plus petit, et attendu dans un paquet Debian.
+[profile.release]
+strip = true

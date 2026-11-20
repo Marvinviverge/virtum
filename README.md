@@ -26,11 +26,22 @@ Prérequis : Linux x86_64 avec KVM (virtualisation activée dans le BIOS/UEFI). 
 
 ### Depuis une release (recommandé)
 
-Téléchargez `virtum-<version>-x86_64-linux.tar.gz` et `SHA256SUMS` depuis la [page des releases](https://github.com/Marvinviverge/virtum/releases), puis :
+Sur la [page des releases](https://github.com/Marvinviverge/virtum/releases), téléchargez `SHA256SUMS` et le paquet `.deb` (Debian, Ubuntu) ou l'archive `.tar.gz` (autres distributions).
+
+**Paquet Debian/Ubuntu**
 
 ```bash
-sha256sum -c SHA256SUMS                     # l'archive n'a pas été altérée
-gh attestation verify virtum-*-x86_64-linux.tar.gz -R Marvinviverge/virtum   # optionnel : construite par la CI du dépôt
+sha256sum -c --ignore-missing SHA256SUMS    # le fichier n'a pas été altéré
+sudo apt install ./virtum_*_amd64.deb       # installe aussi libvirt, QEMU, socat…
+sudo usermod -aG libvirt,kvm $USER          # puis reconnectez votre session
+sudo /usr/share/virtum/setup-var-lib.sh     # prépare /var/lib/virtum
+virtum doctor
+```
+
+**Archive**
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
 tar xzf virtum-*-x86_64-linux.tar.gz && cd virtum-*-x86_64-linux
 sudo ./scripts/setup-host.sh                # une fois par machine : paquets, libvirt, groupes
 install -D -m 755 virtum ~/.local/bin/virtum
@@ -38,7 +49,9 @@ sudo ./scripts/setup-var-lib.sh             # prépare /var/lib/virtum
 virtum doctor
 ```
 
-`~/.local/bin` doit être dans votre `PATH`. Après `setup-host.sh`, reconnectez votre session pour entrer dans les groupes `libvirt` et `kvm`. Tous les contrôles de `virtum doctor` doivent être `[ok]`. `gh attestation verify` demande GitHub CLI 2.49 ou plus récent.
+`~/.local/bin` doit être dans votre `PATH`. Après l'ajout aux groupes `libvirt` et `kvm`, reconnectez votre session. Tous les contrôles de `virtum doctor` doivent être `[ok]`.
+
+Pour vérifier que le fichier a été construit par la CI du dépôt (GitHub CLI 2.49 ou plus récent) : `gh attestation verify <fichier> -R Marvinviverge/virtum`.
 
 ### Depuis les sources
 
