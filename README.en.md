@@ -26,11 +26,22 @@ Requirements: Linux x86_64 with KVM (virtualization enabled in the BIOS/UEFI). T
 
 ### From a release (recommended)
 
-Download `virtum-<version>-x86_64-linux.tar.gz` and `SHA256SUMS` from the [releases page](https://github.com/Marvinviverge/virtum/releases), then:
+From the [releases page](https://github.com/Marvinviverge/virtum/releases), download `SHA256SUMS` and either the `.deb` package (Debian, Ubuntu) or the `.tar.gz` archive (other distributions).
+
+**Debian/Ubuntu package**
 
 ```bash
-sha256sum -c SHA256SUMS                     # the archive has not been altered
-gh attestation verify virtum-*-x86_64-linux.tar.gz -R Marvinviverge/virtum   # optional: built by the repository's CI
+sha256sum -c --ignore-missing SHA256SUMS    # the file has not been altered
+sudo apt install ./virtum_*_amd64.deb       # also installs libvirt, QEMU, socat…
+sudo usermod -aG libvirt,kvm $USER          # then log in again
+sudo /usr/share/virtum/setup-var-lib.sh     # prepares /var/lib/virtum
+virtum doctor
+```
+
+**Archive**
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
 tar xzf virtum-*-x86_64-linux.tar.gz && cd virtum-*-x86_64-linux
 sudo ./scripts/setup-host.sh                # once per machine: packages, libvirt, groups
 install -D -m 755 virtum ~/.local/bin/virtum
@@ -38,7 +49,9 @@ sudo ./scripts/setup-var-lib.sh             # prepares /var/lib/virtum
 virtum doctor
 ```
 
-`~/.local/bin` must be in your `PATH`. After `setup-host.sh`, log in again to join the `libvirt` and `kvm` groups. Every `virtum doctor` check must be `[ok]`. `gh attestation verify` needs GitHub CLI 2.49 or newer.
+`~/.local/bin` must be in your `PATH`. After joining the `libvirt` and `kvm` groups, log in again. Every `virtum doctor` check must be `[ok]`.
+
+To check that a file was built by the repository's CI (GitHub CLI 2.49 or newer): `gh attestation verify <file> -R Marvinviverge/virtum`.
 
 ### From source
 
