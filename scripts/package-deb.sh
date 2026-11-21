@@ -74,7 +74,7 @@ Recommends: virtiofsd, bubblewrap
 Suggests: ansible-core | ansible, ufw
 Section: admin
 Priority: optional
-Homepage: https://github.com/Marvinviverge/virtum
+Homepage: https://virtum.dev
 Description: local KVM VMs and labs described in a Virtumfile
  Virtum runs local virtual machines and multi-VM labs with a Docker-like
  experience (run, ps, shell, up, down), on KVM and libvirt.

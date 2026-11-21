@@ -2,6 +2,12 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Changements
+
+- Le site du projet est https://virtum.dev : lien dans `Cargo.toml` et champ `Homepage` du paquet Debian.
+
 ## [1.1.0] - 2026-11-20
 
 ### Ajouts

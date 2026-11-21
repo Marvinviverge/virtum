@@ -3,6 +3,8 @@ name = "virtum"
 version = "1.1.0"
 edition = "2021"
 license = "Apache-2.0"
+homepage = "https://virtum.dev"
+repository = "https://github.com/Marvinviverge/virtum"
 
 [dependencies]
 anyhow = "1"
