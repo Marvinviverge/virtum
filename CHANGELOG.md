@@ -2,6 +2,23 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [1.2.0] - 2026-11-22
+
+### Sécurité
+
+- **Clé d'hôte SSH épinglée dès la création** : Virtum génère la clé d'hôte de chaque nouvelle VM, la lui remet par cloud-init et l'inscrit dans son `known_hosts` avant le premier démarrage. La première connexion n'accepte plus une clé inconnue : une machine qui répondrait à la place de la VM (autre VM du lab, machine du LAN en bridge) est refusée. Les VM créées par une version antérieure gardent leur clé enregistrée au premier contact.
+- **Sortie des VM filtrée** : les messages d'erreur venus d'une VM ou d'un outil externe sont affichés sans caractères de contrôle. Une VM ne peut plus changer le titre du terminal, effacer l'écran ou écrire dans le presse-papiers via une séquence d'échappement.
+- Dépendance `url` 2.5.9 (RUSTSEC-2026-0592).
+
+### Changements
+
+- Le site du projet est https://virtum.dev : lien dans `Cargo.toml` et champ `Homepage` du paquet Debian.
+- Modèles d'issues (bug, idée) en français et en anglais ; les failles sont renvoyées vers le signalement privé.
+
+### Mise à jour
+
+Rien à faire pour les labs existants : ils continuent de fonctionner. Pour qu'une VM existante profite de la clé d'hôte épinglée dès la création, recréez-la (`virtum destroy` puis `virtum run`, ou `virtum down --destroy` puis `virtum up`).
+
 ## [1.1.0] - 2026-11-20
 
 ### Ajouts

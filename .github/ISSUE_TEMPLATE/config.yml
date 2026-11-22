@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Faille de sécurité / Security vulnerability
+    url: https://github.com/Marvinviverge/virtum/security/advisories/new
+    about: Ne pas ouvrir d'issue publique. Signalement privé ici ou à security@virtum.dev. / Do not open a public issue. Report privately here or to security@virtum.dev.
+  - name: Documentation
+    url: https://virtum.dev
+    about: Guide d'installation et d'utilisation. / Installation and usage guide.
