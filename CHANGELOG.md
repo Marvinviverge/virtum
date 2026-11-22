@@ -2,7 +2,7 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [Non publié]
+## [1.2.0] - 2026-11-22
 
 ### Sécurité
 
@@ -13,6 +13,11 @@ Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 ### Changements
 
 - Le site du projet est https://virtum.dev : lien dans `Cargo.toml` et champ `Homepage` du paquet Debian.
+- Modèles d'issues (bug, idée) en français et en anglais ; les failles sont renvoyées vers le signalement privé.
+
+### Mise à jour
+
+Rien à faire pour les labs existants : ils continuent de fonctionner. Pour qu'une VM existante profite de la clé d'hôte épinglée dès la création, recréez-la (`virtum destroy` puis `virtum run`, ou `virtum down --destroy` puis `virtum up`).
 
 ## [1.1.0] - 2026-11-20
 
