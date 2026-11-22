@@ -1,0 +1,21 @@
+name: Idée / Feature request
+description: Proposer une fonction ou une amélioration. / Suggest a feature or an improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: besoin
+    attributes:
+      label: Besoin / Need
+      description: Ce que vous cherchez à faire, et pourquoi c'est difficile aujourd'hui. / What you are trying to do, and why it is hard today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposition
+    attributes:
+      label: Proposition / Proposal
+      description: À quoi pourrait ressembler la solution (commande, champ du Virtumfile…). / What the solution could look like (command, Virtumfile field…).
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Ce que vous faites en attendant, ou d'autres pistes. / What you do in the meantime, or other options.

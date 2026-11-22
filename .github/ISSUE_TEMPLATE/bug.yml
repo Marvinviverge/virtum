@@ -1,0 +1,44 @@
+name: Bug
+description: Virtum ne fait pas ce qu'il devrait. / Virtum does not do what it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci de prendre le temps de signaler le problème. Une faille de sécurité ne se signale pas ici : voir [SECURITY.md](https://github.com/Marvinviverge/virtum/blob/develop/SECURITY.md).
+        Thanks for reporting. Security vulnerabilities do not belong here: see SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Sortie de `virtum --version`. / Output of `virtum --version`.
+      placeholder: virtum 1.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: virtum doctor
+      description: Sortie de `virtum doctor` et distribution de l'hôte. / Output of `virtum doctor` and host distribution.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: virtumfile
+    attributes:
+      label: Virtumfile
+      description: Le plus petit Virtumfile qui reproduit le problème, ou la commande lancée. / The smallest Virtumfile that reproduces the problem, or the command you ran.
+      render: yaml
+  - type: textarea
+    id: actual
+    attributes:
+      label: Ce qui se passe / What happens
+      description: Message d'erreur complet compris. / Including the full error message.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ce qui était attendu / What you expected
+    validations:
+      required: true
