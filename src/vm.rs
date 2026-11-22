@@ -258,6 +258,8 @@ pub async fn launch_vm_inner(
 
     // qemu-guest-agent seulement avec une carte bridge (IP introuvable par les baux DHCP).
     let install_agent = config.bridge_host_interface.is_some();
+    // Clé d'hôte de la VM choisie ici et épinglée avant le premier démarrage.
+    let host_key = crate::ssh::generate_guest_host_key(instance_dir)?;
     write_user_data(
         instance_dir,
         &config.user,
@@ -265,7 +267,9 @@ pub async fn launch_vm_inner(
         grow_root,
         install_agent,
         &resolved_mounts,
+        Some(&host_key),
     )?;
+    crate::ssh::pin_guest_host_key(instance_dir, &host_key)?;
 
     let disk_size_label = if let Some(ref size_str) = config.disk_size {
         size_str.clone()
@@ -1033,7 +1037,13 @@ fn prepare_new_instance_dir(instance_dir: &Path) -> Result<()> {
             instance_dir.display()
         );
     }
-    for leaf in ["disk.qcow2", "cloud-init.iso", "user-data", "meta-data"] {
+    for leaf in [
+        "disk.qcow2",
+        "cloud-init.iso",
+        "user-data",
+        "meta-data",
+        "known_hosts",
+    ] {
         if std::fs::symlink_metadata(instance_dir.join(leaf)).is_ok() {
             bail!(
                 "{} contient déjà {leaf} : refus de créer l'instance par-dessus.",

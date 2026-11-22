@@ -71,6 +71,116 @@ pub fn known_hosts_path(instance_dir: &Path) -> PathBuf {
     instance_dir.join("known_hosts")
 }
 
+/// Fichier temporaire de la clé d'hôte, supprimé dès qu'elle est lue (elle ne reste que
+/// dans `user-data` et l'ISO cloud-init, lisibles par l'utilisateur et libvirt).
+const GUEST_HOST_KEY_TMP: &str = "guest_host_key";
+
+/// Clé d'hôte SSH d'une VM, générée par Virtum avant son premier démarrage.
+#[derive(Debug, Clone)]
+pub struct GuestHostKey {
+    /// Clé privée OpenSSH (plusieurs lignes), remise à la VM par cloud-init.
+    pub private_key: String,
+    /// Clé publique `ssh-ed25519 <base64>`, sans commentaire.
+    pub public_key: String,
+}
+
+/// Génère la clé d'hôte ed25519 d'une nouvelle VM.
+///
+/// La VM reçoit cette clé par cloud-init et Virtum l'épingle dans `known_hosts` avant la
+/// première connexion : il n'y a plus de premier contact « accept-new » qu'une autre
+/// machine du réseau pourrait intercepter en répondant à la place de la VM.
+pub fn generate_guest_host_key(instance_dir: &Path) -> Result<GuestHostKey> {
+    let private_path = instance_dir.join(GUEST_HOST_KEY_TMP);
+    let public_path = instance_dir.join(format!("{GUEST_HOST_KEY_TMP}.pub"));
+    for p in [&private_path, &public_path] {
+        if fs::symlink_metadata(p).is_ok() {
+            bail!(
+                "{} existe déjà : refus de générer la clé d'hôte par-dessus.",
+                p.display()
+            );
+        }
+    }
+    let result = (|| -> Result<GuestHostKey> {
+        run_command(
+            "ssh-keygen",
+            &[
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "",
+                "-f",
+                path_arg(&private_path)?,
+            ],
+        )
+        .context("Impossible de générer la clé d'hôte SSH de la VM")?;
+        let private_key = fs::read_to_string(&private_path)
+            .with_context(|| format!("Impossible de lire {}", private_path.display()))?;
+        let public_key = parse_ed25519_public_key(
+            &fs::read_to_string(&public_path)
+                .with_context(|| format!("Impossible de lire {}", public_path.display()))?,
+        )?;
+        if !private_key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
+            || private_key
+                .lines()
+                .any(|l| l.trim().is_empty() || l != l.trim())
+        {
+            bail!("Clé d'hôte SSH générée illisible.");
+        }
+        Ok(GuestHostKey {
+            private_key,
+            public_key,
+        })
+    })();
+    let _ = fs::remove_file(&private_path);
+    let _ = fs::remove_file(&public_path);
+    result
+}
+
+/// `ssh-ed25519 <base64>` sans commentaire ; refuse toute autre forme.
+fn parse_ed25519_public_key(content: &str) -> Result<String> {
+    let mut parts = content.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some("ssh-ed25519"), Some(b64))
+            if b64
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')) =>
+        {
+            Ok(format!("ssh-ed25519 {b64}"))
+        }
+        _ => bail!("Clé publique d'hôte SSH invalide."),
+    }
+}
+
+/// Épingle la clé d'hôte de la VM dans le `known_hosts` de l'instance, sous son alias
+/// (l'id de la VM), avant le premier démarrage.
+pub fn pin_guest_host_key(instance_dir: &Path, key: &GuestHostKey) -> Result<()> {
+    let opts = SshSessionOpts::new(instance_dir, false);
+    let Some(alias) = opts.host_key_alias else {
+        bail!(
+            "Nom d'instance inutilisable comme alias SSH : {}",
+            instance_dir.display()
+        );
+    };
+    let line = format!("{alias} {}\n", key.public_key);
+    crate::fsutil::write_atomic(&opts.known_hosts, line.as_bytes(), 0o600)
+}
+
+/// `yes` quand la clé d'hôte est déjà épinglée (VM créée par Virtum ≥ 1.2, ou première
+/// connexion déjà faite) ; `accept-new` seulement pour une VM plus ancienne jamais jointe.
+fn strict_host_key_checking(opts: &SshSessionOpts) -> &'static str {
+    let pinned = fs::metadata(&opts.known_hosts)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false);
+    if pinned {
+        "StrictHostKeyChecking=yes"
+    } else {
+        "StrictHostKeyChecking=accept-new"
+    }
+}
+
 /// Chemin de la clé privée Virtum (sans la créer).
 pub fn private_key_path(keys_dir: &Path) -> PathBuf {
     keys_dir.join(PRIVATE_KEY_NAME)
@@ -169,7 +279,7 @@ fn append_security_opts(cmd: &mut Command, opts: &SshSessionOpts, batch_mode: bo
             cmd.arg("-o").arg("GlobalKnownHostsFile=/dev/null");
         }
         SshSecurityMode::Secure => {
-            cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
+            cmd.arg("-o").arg(strict_host_key_checking(opts));
             let kh = path_arg(&opts.known_hosts)?;
             cmd.arg("-o").arg(format!("UserKnownHostsFile={kh}"));
             cmd.arg("-o").arg("GlobalKnownHostsFile=/dev/null");
@@ -190,7 +300,9 @@ fn map_ssh_host_key_error(stderr: &str, opts: &SshSessionOpts) -> Option<String>
         || upper.contains("HOST KEY VERIFICATION FAILED")
     {
         Some(format!(
-            "La clé SSH de la VM a changé. Supprimez {} ou virtum destroy <ref> puis recréez le lab.",
+            "Connexion refusée : la machine qui répond ne présente pas la clé d'hôte SSH \
+             épinglée pour cette VM ({}). Une autre machine répond peut-être à sa place. \
+             Si la VM a été réinstallée volontairement : virtum destroy <ref> puis recréez-la.",
             opts.known_hosts.display()
         ))
     } else {
@@ -438,7 +550,7 @@ fn ssh_run_remote_command(
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = crate::output::sanitize_terminal(&String::from_utf8_lossy(&output.stderr));
     if let Some(msg) = map_ssh_host_key_error(&stderr, opts) {
         bail!("{msg}");
     }
@@ -476,7 +588,7 @@ pub fn ssh_run_command(
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = crate::output::sanitize_terminal(&String::from_utf8_lossy(&output.stderr));
     if let Some(msg) = map_ssh_host_key_error(&stderr, opts) {
         bail!("{msg}");
     }
@@ -644,7 +756,7 @@ pub fn ssh_option_strings(opts: &SshSessionOpts) -> (String, String) {
             if let Some(alias) = &opts.host_key_alias {
                 known.push_str(&format!(" -o HostKeyAlias={alias}"));
             }
-            ("StrictHostKeyChecking=accept-new".into(), known)
+            (strict_host_key_checking(opts).into(), known)
         }
     }
 }
@@ -752,5 +864,49 @@ mod tests {
         let (strict2, kh2) = ssh_option_strings(&opts_insec);
         assert_eq!(strict2, "StrictHostKeyChecking=no");
         assert_eq!(kh2, "UserKnownHostsFile=/dev/null");
+    }
+
+    #[test]
+    fn guest_host_key_is_generated_pinned_and_enforced() {
+        if Command::new("ssh-keygen").arg("-?").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("virtum-hostkey-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("vm-0123abcd");
+        fs::create_dir_all(&dir).unwrap();
+
+        let key = generate_guest_host_key(&dir).unwrap();
+        assert!(key.public_key.starts_with("ssh-ed25519 "));
+        assert_eq!(key.public_key.split(' ').count(), 2);
+        assert!(key.private_key.contains("OPENSSH PRIVATE KEY"));
+        // Aucune copie de la clé privée ne reste dans le dossier de l'instance.
+        assert!(!dir.join(GUEST_HOST_KEY_TMP).exists());
+        assert!(!dir.join(format!("{GUEST_HOST_KEY_TMP}.pub")).exists());
+
+        let opts = SshSessionOpts::new(&dir, false);
+        // Avant épinglage (VM d'une ancienne version) : premier contact accept-new.
+        assert_eq!(
+            ssh_option_strings(&opts).0,
+            "StrictHostKeyChecking=accept-new"
+        );
+        pin_guest_host_key(&dir, &key).unwrap();
+        let pinned = fs::read_to_string(dir.join("known_hosts")).unwrap();
+        assert_eq!(pinned, format!("vm-0123abcd {}\n", key.public_key));
+        // Clé épinglée : plus aucune clé inconnue n'est acceptée.
+        assert_eq!(ssh_option_strings(&opts).0, "StrictHostKeyChecking=yes");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn guest_host_key_public_key_is_validated() {
+        assert_eq!(
+            parse_ed25519_public_key("ssh-ed25519 AAAAC3Nz+/= comment\n").unwrap(),
+            "ssh-ed25519 AAAAC3Nz+/="
+        );
+        assert!(parse_ed25519_public_key("ssh-rsa AAAA").is_err());
+        assert!(parse_ed25519_public_key("ssh-ed25519 AA\"AA").is_err());
+        assert!(parse_ed25519_public_key("").is_err());
     }
 }

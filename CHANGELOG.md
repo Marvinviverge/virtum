@@ -4,6 +4,12 @@ Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+### Sécurité
+
+- **Clé d'hôte SSH épinglée dès la création** : Virtum génère la clé d'hôte de chaque nouvelle VM, la lui remet par cloud-init et l'inscrit dans son `known_hosts` avant le premier démarrage. La première connexion n'accepte plus une clé inconnue : une machine qui répondrait à la place de la VM (autre VM du lab, machine du LAN en bridge) est refusée. Les VM créées par une version antérieure gardent leur clé enregistrée au premier contact.
+- **Sortie des VM filtrée** : les messages d'erreur venus d'une VM ou d'un outil externe sont affichés sans caractères de contrôle. Une VM ne peut plus changer le titre du terminal, effacer l'écran ou écrire dans le presse-papiers via une séquence d'échappement.
+- Dépendance `url` 2.5.9 (RUSTSEC-2026-0592).
+
 ### Changements
 
 - Le site du projet est https://virtum.dev : lien dans `Cargo.toml` et champ `Homepage` du paquet Debian.

@@ -6,6 +6,7 @@ use anyhow::{bail, Result};
 
 use crate::command::{path_arg, run_command};
 use crate::mounts::ResolvedMount;
+use crate::ssh::GuestHostKey;
 
 /// `/etc/profile.d` : PATH incluant `/usr/sbin` (nginx, ip, etc.) pour les shells interactifs.
 const PATH_PROFILE_SNIPPET: &str = r#"
@@ -113,11 +114,16 @@ pub fn write_user_data(
     grow_root: bool,
     install_agent: bool,
     mounts: &[ResolvedMount],
+    host_key: Option<&GuestHostKey>,
 ) -> Result<PathBuf> {
     validate_cloud_init_user(user)?;
     if public_key.contains('\n') {
         bail!("Clé publique SSH cloud-init invalide : retour ligne interdit.");
     }
+    let host_key_block = match host_key {
+        Some(key) => host_key_block(key)?,
+        None => String::new(),
+    };
 
     let path = instance_dir.join("user-data");
     let grow_block = if grow_root {
@@ -171,11 +177,34 @@ users:
     ssh_authorized_keys:
       - {public_key}
 ssh_pwauth: false
-{path_profile}{package_block}{grow_block}{runcmd_block}"#,
+{host_key_block}{path_profile}{package_block}{grow_block}{runcmd_block}"#,
         path_profile = PATH_PROFILE_SNIPPET,
     );
     crate::fsutil::write_atomic(&path, content.as_bytes(), 0o600)?;
     Ok(path)
+}
+
+/// Clé d'hôte imposée par Virtum : cloud-init remplace les clés de l'image par celle-ci et
+/// n'en génère aucune autre, si bien que la VM ne présente que la clé épinglée.
+fn host_key_block(key: &GuestHostKey) -> Result<String> {
+    if key.public_key.contains('\n')
+        || key
+            .private_key
+            .lines()
+            .any(|l| l.trim().is_empty() || l != l.trim())
+    {
+        bail!("Clé d'hôte SSH cloud-init invalide.");
+    }
+    let mut block = String::from(
+        "ssh_deletekeys: true\nssh_genkeytypes: []\nssh_keys:\n  ed25519_private: |\n",
+    );
+    for line in key.private_key.lines() {
+        block.push_str("    ");
+        block.push_str(line);
+        block.push('\n');
+    }
+    block.push_str(&format!("  ed25519_public: {}\n", key.public_key));
+    Ok(block)
 }
 
 /// Writes `meta-data` with instance-id and hostname.
@@ -233,7 +262,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey virtum";
-        write_user_data(&dir, "virtum", key, false, false, &[]).unwrap();
+        write_user_data(&dir, "virtum", key, false, false, &[], None).unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
         assert!(content.starts_with("#cloud-config\n"));
         assert!(content.contains("  - name: virtum\n"));
@@ -245,7 +274,7 @@ mod tests {
         assert!(!content.contains("qemu-guest-agent"));
 
         // Carte bridge : l'agent sert à trouver l'IP, il est installé par cloud-init.
-        write_user_data(&dir, "virtum", key, false, true, &[]).unwrap();
+        write_user_data(&dir, "virtum", key, false, true, &[], None).unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
         assert!(content.contains("package_update: true"));
         assert!(content.contains("  - qemu-guest-agent"));
@@ -266,6 +295,7 @@ mod tests {
             true,
             true,
             &[],
+            None,
         )
         .unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
@@ -315,6 +345,7 @@ mod tests {
             false,
             false,
             &mounts,
+            None,
         )
         .unwrap();
         let content = fs::read_to_string(dir.join("user-data")).unwrap();
@@ -369,6 +400,7 @@ mod tests {
             false,
             false,
             &[],
+            None,
         )
         .unwrap();
         write_meta_data(&dir, "vm-test", "vm-test").unwrap();
@@ -381,6 +413,54 @@ mod tests {
             assert!(result.is_err());
         }
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_data_imposes_pinned_host_key() {
+        let dir = std::env::temp_dir().join(format!("virtum-ci-hostkey-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let key = GuestHostKey {
+            private_key: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==\n-----END OPENSSH PRIVATE KEY-----\n".into(),
+            public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHost".into(),
+        };
+        write_user_data(
+            &dir,
+            "virtum",
+            "ssh-ed25519 AAAAUser virtum",
+            false,
+            false,
+            &[],
+            Some(&key),
+        )
+        .unwrap();
+        let content = fs::read_to_string(dir.join("user-data")).unwrap();
+        assert!(content.contains(
+            "ssh_deletekeys: true\nssh_genkeytypes: []\nssh_keys:\n  ed25519_private: |\n    -----BEGIN OPENSSH PRIVATE KEY-----\n    b3BlbnNzaA==\n    -----END OPENSSH PRIVATE KEY-----\n  ed25519_public: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHost\n"
+        ));
+        let value: serde_json::Value = serde_saphyr::from_str(&content).unwrap();
+        assert_eq!(value["ssh_genkeytypes"], serde_json::json!([]));
+        assert!(value["ssh_keys"]["ed25519_private"]
+            .as_str()
+            .unwrap()
+            .ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
+
+        // Une clé qui casserait le YAML est refusée.
+        let bad = GuestHostKey {
+            private_key: "-----BEGIN\n\nx".into(),
+            public_key: key.public_key.clone(),
+        };
+        assert!(write_user_data(
+            &dir,
+            "virtum",
+            "ssh-ed25519 AAAAUser",
+            false,
+            false,
+            &[],
+            Some(&bad)
+        )
+        .is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 }

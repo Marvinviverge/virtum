@@ -110,7 +110,7 @@ pub fn image_virtual_size_bytes(path: &Path) -> Result<u64> {
         bail!(
             "qemu-img info a échoué pour {} : {}",
             path.display(),
-            String::from_utf8_lossy(&output.stderr)
+            crate::output::sanitize_terminal(&String::from_utf8_lossy(&output.stderr))
         );
     }
     let json: Value = serde_json::from_slice(&output.stdout)
