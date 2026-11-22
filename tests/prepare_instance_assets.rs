@@ -6,7 +6,9 @@ use virtum::cloud_init::{build_cloud_init_iso, write_meta_data, write_user_data}
 use virtum::config;
 use virtum::disk::create_cow_disk;
 use virtum::images::{ensure_image, resolve_image};
-use virtum::ssh::{ensure_ssh_keypair, read_public_key};
+use virtum::ssh::{
+    ensure_ssh_keypair, generate_guest_host_key, pin_guest_host_key, read_public_key,
+};
 use virtum::test_env::isolated_virtum_state;
 
 #[tokio::test]
@@ -21,7 +23,20 @@ async fn prepare_instance_assets_without_base_image_download() {
     let instance_dir = paths.instances.join(vm_id);
     fs::create_dir_all(&instance_dir).unwrap();
 
-    write_user_data(&instance_dir, "virtum", &pubkey, false, false, &[]).unwrap();
+    let host_key = generate_guest_host_key(&instance_dir).unwrap();
+    write_user_data(
+        &instance_dir,
+        "virtum",
+        &pubkey,
+        false,
+        false,
+        &[],
+        Some(&host_key),
+    )
+    .unwrap();
+    pin_guest_host_key(&instance_dir, &host_key).unwrap();
+    let known_hosts = fs::read_to_string(instance_dir.join("known_hosts")).unwrap();
+    assert_eq!(known_hosts, format!("{vm_id} {}\n", host_key.public_key));
     write_meta_data(&instance_dir, vm_id, vm_id).unwrap();
 
     if std::process::Command::new("cloud-localds")

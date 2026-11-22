@@ -13,8 +13,8 @@ pub fn run_command(program: &str, args: &[&str]) -> Result<Output> {
     if output.status.success() {
         Ok(output)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = crate::output::sanitize_terminal(&String::from_utf8_lossy(&output.stderr));
+        let stdout = crate::output::sanitize_terminal(&String::from_utf8_lossy(&output.stdout));
         bail!(
             "{program} a échoué (code {:?}).\nstdout: {stdout}\nstderr: {stderr}",
             output.status.code()

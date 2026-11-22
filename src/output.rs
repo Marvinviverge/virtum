@@ -28,6 +28,24 @@ pub fn prefixed(text: &str) -> String {
     })
 }
 
+/// Rend inoffensif un texte venu d'un autre programme (stderr d'une commande dans la VM,
+/// sortie d'un outil) avant de l'afficher : les caractères de contrôle autres que le saut
+/// de ligne et la tabulation, dont ESC qui ouvre les séquences de terminal (changer le
+/// titre, effacer l'écran, réécrire la ligne, OSC 52 vers le presse-papiers), et les
+/// caractères de direction bidirectionnelle sont affichés sous forme `\u{1b}`.
+pub fn sanitize_terminal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        if (c.is_control() && c != '\n' && c != '\t') || bidi {
+            out.push_str(&c.escape_unicode().to_string());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// `eprintln!` préfixé par la machine en cours (fil courant).
 #[macro_export]
 macro_rules! verr {
@@ -53,6 +71,18 @@ macro_rules! vout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_terminal_neutralises_escape_sequences() {
+        assert_eq!(sanitize_terminal("ok\n\tligne"), "ok\n\tligne");
+        assert_eq!(
+            sanitize_terminal("\u{1b}]0;titre\u{7}\u{1b}[2J\r\u{9b}x"),
+            "\\u{1b}]0;titre\\u{7}\\u{1b}[2J\\u{d}\\u{9b}x"
+        );
+        assert_eq!(sanitize_terminal("a\u{202e}b"), "a\\u{202e}b");
+        assert!(!sanitize_terminal("\u{1b}[31mrouge").contains('\u{1b}'));
+        assert_eq!(sanitize_terminal("été ✓"), "été ✓");
+    }
 
     #[test]
     fn prefix_is_per_thread_and_per_line() {
