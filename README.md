@@ -12,6 +12,8 @@ virtum shell web                       # session SSH
 virtum up                              # le lab décrit dans ./Virtumfile
 ```
 
+![Démo : virtum up crée un lab de deux VM, nginx répond sur le port redirigé, virtum shell ouvre une session dans la VM](./assets/demo.gif)
+
 ## Pourquoi Virtum
 
 - **Simple** : une commande pour une VM, un fichier YAML pour un lab. Pas de Vagrantfile en Ruby, pas de console web.
