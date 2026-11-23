@@ -202,6 +202,11 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
+    <!-- Carte graphique sans affichage : sans elle, le GRUB des images Debian 13 fait
+         redémarrer la VM en boucle avant de charger le noyau. -->
+    <video>
+      <model type='vga'/>
+    </video>
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>

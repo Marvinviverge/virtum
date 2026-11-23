@@ -42,6 +42,14 @@ const OS_REGISTRY: &[OsImageSpec] = &[
         source_label: "Debian Cloud",
     },
     OsImageSpec {
+        id: "debian-13",
+        filename: "debian-13-20261116.qcow2",
+        url: "https://cloud.debian.org/images/cloud/trixie/20261116-2664/debian-13-generic-amd64-20261116-2664.qcow2",
+        digest: "e53a93ef33f828ceed0e7278c2cc2753bdc7d5098fbfae15bd64b6d878db350ea3744247763a1c8ecb6b4019a0f623c38caf6038ad6f9c357fb4e01493ddf1a3",
+        algo: DigestAlgo::Sha512,
+        source_label: "Debian Cloud",
+    },
+    OsImageSpec {
         id: "ubuntu-24.04",
         filename: "ubuntu-24.04-20261017.qcow2",
         url: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img",
@@ -444,7 +452,7 @@ mod tests {
     fn supported_os_ids_lists_registry() {
         assert_eq!(
             supported_os_ids(),
-            vec!["debian-12", "ubuntu-24.04", "ubuntu-26.04"]
+            vec!["debian-12", "debian-13", "ubuntu-24.04", "ubuntu-26.04"]
         );
     }
 
