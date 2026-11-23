@@ -11,7 +11,7 @@ name: demo-lab
 
 machines:
   web:
-    os: debian-12
+    os: debian-13
     ram: 2048
     cpu: 2
     disk_size: 20G
@@ -22,7 +22,7 @@ machines:
       - apt-get install -y nginx
 
   db:
-    os: ubuntu-24.04
+    os: ubuntu-26.04
     ram: 1024
     cpu: 1
     # ip: 10.42.0.20       # adresse fixe (avec subnet: ci-dessus)

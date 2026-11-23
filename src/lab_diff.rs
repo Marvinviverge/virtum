@@ -9,7 +9,6 @@ use crate::disk::{
     format_virtual_size_label, image_virtual_size_bytes, parse_disk_size, resize_cow_disk, DiskSize,
 };
 use crate::firewall;
-use crate::images::{ensure_image, resolve_image};
 use crate::lab_network;
 use crate::libvirt::{
     destroy_domain, domain_exists, domain_is_active, domain_state, read_ram_vcpu_from_domain,
@@ -766,8 +765,8 @@ async fn apply_machine(
             MachineChange::DiskSize { to_label, .. } => {
                 let size = parse_disk_size(to_label)?;
                 let disk_path = instance_dir.join("disk.qcow2");
-                let image = resolve_image(&spec.os, &paths.images)?;
-                let _ = ensure_image(&image).await?;
+                // L'image dont dépend ce disque, pas l'image actuelle de l'OS.
+                crate::vm::existing_base_image(&disk_path)?;
                 if resize_cow_disk(&disk_path, &size)? {
                     grow_guest = true;
                 }
