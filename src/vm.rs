@@ -235,6 +235,10 @@ pub async fn launch_vm_inner(
     public_key: &str,
     retain_vm_on_error: &mut bool,
 ) -> Result<()> {
+    // Partages demandés mais virtiofsd inutilisable : refus net avant de créer quoi que ce soit.
+    if !config.resolved_mounts.is_empty() {
+        mounts::ensure_virtiofsd_usable()?;
+    }
     prepare_new_instance_dir(instance_dir)?;
 
     let image = resolve_image(&config.os, &paths.images)?;
@@ -1016,6 +1020,34 @@ pub async fn wait_for_ssh_login(
 /// et sans aucun des fichiers que la création va écrire. Un dossier planté d'avance par
 /// un autre compte (nom déterministe) redirigerait sinon qemu-img et cloud-localds, qui
 /// suivent les liens symboliques, avant le contrôle de propriétaire du stockage.
+/// Image de base dont dépend le disque d'une VM existante (lue dans l'en-tête qcow2).
+///
+/// Les images sont nommées par date : quand Virtum passe à une image plus récente, les VM
+/// déjà créées gardent l'ancienne. Celle-ci ne doit jamais être remplacée par une autre
+/// (le disque en copie sur écriture deviendrait incohérent).
+pub(crate) fn existing_base_image(disk_path: &Path) -> Result<PathBuf> {
+    let Some(base) = crate::disk::backing_file(disk_path)? else {
+        bail!(
+            "{} n'a pas d'image de base : disque inattendu pour une VM Virtum.",
+            disk_path.display()
+        );
+    };
+    match std::fs::symlink_metadata(&base) {
+        Ok(meta) if meta.is_file() => Ok(base),
+        Ok(_) => bail!(
+            "L'image de base {} n'est pas un fichier régulier : refusée.",
+            base.display()
+        ),
+        Err(_) => bail!(
+            "Image de base introuvable : {} (disque {}). Restaurez ce fichier ; ne le \
+             re-téléchargez pas avec `virtum pull` (une autre image rendrait le disque \
+             incohérent). Sinon : virtum destroy puis recréez la VM.",
+            base.display(),
+            disk_path.display()
+        ),
+    }
+}
+
 fn prepare_new_instance_dir(instance_dir: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     if let Some(parent) = instance_dir.parent() {
@@ -1141,8 +1173,9 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         }
     }
 
-    let image = resolve_image(&instance.os, &paths.images)?;
-    let base_image = ensure_image(&image).await?;
+    // L'image de base réelle du disque, et non l'image actuelle de l'OS : une VM créée avec
+    // une image plus ancienne continue d'utiliser la sienne (rien n'est re-téléchargé).
+    let base_image = existing_base_image(&disk_path)?;
 
     libvirt_access::prepare_storage_for_system_qemu(
         &paths,
@@ -1632,6 +1665,36 @@ fn generate_vm_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Une VM existante garde l'image de base de son disque, même quand l'image de son OS
+    /// change (nouveau nom de fichier daté) ; une image absente est signalée sans
+    /// proposer de la re-télécharger.
+    #[test]
+    fn existing_vm_keeps_its_own_base_image() {
+        if std::process::Command::new("qemu-img")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let d = crate::test_env::private_temp_dir("basekeep");
+        let old_base = d.join("debian-12.qcow2");
+        crate::command::run_command(
+            "qemu-img",
+            &["create", "-f", "qcow2", old_base.to_str().unwrap(), "16M"],
+        )
+        .unwrap();
+        let disk = d.join("disk.qcow2");
+        crate::disk::create_cow_disk(&old_base, &disk, None).unwrap();
+
+        assert_eq!(existing_base_image(&disk).unwrap(), old_base);
+
+        std::fs::remove_file(&old_base).unwrap();
+        let err = format!("{:#}", existing_base_image(&disk).unwrap_err());
+        assert!(err.contains("introuvable"), "{err}");
+        assert!(err.contains("ne le re-téléchargez pas"), "{err}");
+    }
+
     /// Audit run-4 : un dossier d'instance déjà peuplé (planté d'avance) est refusé avant
     /// toute écriture ; un dossier neuf est créé en 0700.
     #[test]

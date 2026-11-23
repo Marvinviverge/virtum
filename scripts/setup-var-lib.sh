@@ -36,4 +36,4 @@ if [[ -x "$SCRIPT_DIR/setup-apparmor-virtiofs.sh" ]]; then
 fi
 
 echo "OK — Virtum utilisera $ROOT (préféré à ~/.virtum)."
-echo "Relancez : virtum doctor && virtum run --os debian-12"
+echo "Relancez : virtum doctor && virtum run --os debian-13"

@@ -119,53 +119,52 @@ fn check_ansible() -> CheckResult {
     }
 }
 
+/// virtiofsd sert seulement aux dossiers partagés (`mounts:`) : jamais bloquant. Sans lui,
+/// VM et labs fonctionnent ; seuls les partages sont indisponibles (Debian 12, Ubuntu 22.04 :
+/// pas de paquet `virtiofsd`, et l'ancien virtiofsd en C de QEMU n'est pas compatible).
 fn check_virtiofsd() -> CheckResult {
-    const NAME: &str = "virtiofsd";
+    const NAME: &str = "virtiofsd (dossiers partagés, optionnel)";
+    const SANS_PARTAGES: &str =
+        "les VM et les labs fonctionnent, mais pas les dossiers partagés (`mounts:`).";
+    let unavailable = |reason: String| CheckResult {
+        name: NAME.to_string(),
+        ok: true,
+        detail: format!("{reason} : {SANS_PARTAGES}"),
+    };
     let Some(path) = crate::mounts::resolve_virtiofsd_path() else {
-        return CheckResult {
-            name: NAME.to_string(),
-            ok: false,
-            detail: format!(
-                "{NAME} introuvable. Installez le paquet (sudo apt install virtiofsd). \
-                 Sur Debian/Ubuntu le binaire est souvent dans /usr/libexec/virtiofsd, \
-                 pas dans le PATH — Virtum le détecte automatiquement une fois installé."
-            ),
-        };
+        return unavailable(
+            "absent (sudo apt install virtiofsd ; paquet inexistant sur Debian 12 et Ubuntu 22.04)"
+                .to_string(),
+        );
     };
     match Command::new(&path).arg("--version").output() {
         Ok(output) if output.status.success() => {
-            let mut notes = Vec::new();
             // Pas de note uidmap : Virtum lance toujours virtiofsd avec --sandbox=none
             // (SECURITY.md, Limites) ; installer uidmap n'y change rien.
             // Les partages sont en lecture seule par défaut : sans moyen de l'imposer côté
-            // hôte, seuls les partages `rw: true` fonctionnent.
-            let read_only = crate::mounts::read_only_backend(&path);
-            if read_only.is_none() {
-                notes.push(
-                    "Partages en lecture seule impossibles : ce virtiofsd n'a pas --readonly et \
-                     bubblewrap est absent (sudo apt install bubblewrap).",
-                );
+            // hôte, seuls les partages `rw` fonctionnent.
+            if crate::mounts::read_only_backend(&path).is_none() {
+                return CheckResult {
+                    name: format!("{NAME} ({})", path.display()),
+                    ok: true,
+                    detail: "partages en lecture seule impossibles : ce virtiofsd n'a pas \
+                             --readonly et bubblewrap est absent (sudo apt install bubblewrap). \
+                             Seuls les partages `rw` fonctionnent."
+                        .to_string(),
+                };
             }
             CheckResult {
                 name: format!("{NAME} ({})", path.display()),
-                ok: read_only.is_some(),
-                detail: notes.join(" "),
+                ok: true,
+                detail: String::new(),
             }
         }
-        Ok(_) => CheckResult {
-            name: NAME.to_string(),
-            ok: false,
-            detail: format!(
-                "{} est présent ({}) mais `--version` a échoué.",
-                NAME,
-                path.display()
-            ),
-        },
-        Err(e) => CheckResult {
-            name: NAME.to_string(),
-            ok: false,
-            detail: format!("Impossible d'exécuter {} : {e}", path.display()),
-        },
+        Ok(_) => unavailable(format!(
+            "{} ne répond pas à --version (ancien virtiofsd en C fourni par QEMU, \
+             incompatible ; il faut le virtiofsd en Rust, paquet virtiofsd)",
+            path.display()
+        )),
+        Err(e) => unavailable(format!("impossible d'exécuter {} ({e})", path.display())),
     }
 }
 
@@ -546,7 +545,10 @@ fn check_bridge_lan() -> CheckResult {
 
 fn check_libvirt_default_network() -> CheckResult {
     const NAME: &str = "Réseau libvirt « default »";
-    let output = match Command::new("virsh").args(["net-info", "default"]).output() {
+    let output = match crate::libvirt::virsh_command()
+        .args(["net-info", "default"])
+        .output()
+    {
         Ok(o) => o,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return CheckResult {
@@ -571,7 +573,8 @@ fn check_libvirt_default_network() -> CheckResult {
             detail: format!(
                 "Le réseau « default » est introuvable ou inaccessible: {}. \
                  Vérifiez que libvirt est installé et démarré \
-                 (sudo systemctl enable --now libvirtd).",
+                 (sudo systemctl enable --now libvirtd), puis : \
+                 virsh -c qemu:///system net-list --all",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         };
@@ -584,11 +587,14 @@ fn check_libvirt_default_network() -> CheckResult {
 
     let mut problems = Vec::new();
     if !active {
-        problems.push("le réseau n'est pas actif (essayez: virsh net-start default)".to_string());
+        problems.push(
+            "le réseau n'est pas actif (virsh -c qemu:///system net-start default)".to_string(),
+        );
     }
     if !autostart {
         problems.push(
-            "l'autostart n'est pas activé (essayez: virsh net-autostart default)".to_string(),
+            "l'autostart n'est pas activé (virsh -c qemu:///system net-autostart default)"
+                .to_string(),
         );
     }
 

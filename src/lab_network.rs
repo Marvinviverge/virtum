@@ -166,12 +166,12 @@ fn defined_network_xml(net_name: &str) -> Result<Option<String>> {
 }
 
 fn run_virsh(args: &[&str]) -> Result<std::process::Output> {
-    run_command("virsh", args)
+    run_command("virsh", &crate::libvirt::virsh_args(args))
 }
 
 /// `virsh` sans erreur si le réseau/domaine n'existe pas encore (ex. `net-info` → 1).
 fn run_virsh_output(args: &[&str]) -> Result<std::process::Output> {
-    Command::new("virsh")
+    crate::libvirt::virsh_command()
         .args(args)
         .output()
         .with_context(|| format!("Impossible d'exécuter virsh {}", args.join(" ")))

@@ -184,12 +184,36 @@ pub fn start_instance_proxies(
     Ok(())
 }
 
-/// Lance socat sur un port déjà lié par Virtum.
+/// Version de socat (`socat -V`), ex. `(1, 8)`.
+fn socat_version() -> Option<(u32, u32)> {
+    let output = Command::new("socat").arg("-V").output().ok()?;
+    parse_socat_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_socat_version(text: &str) -> Option<(u32, u32)> {
+    let rest = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("socat version "))?;
+    let mut parts = rest.split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// `ACCEPT-FD` (socket d'écoute transmis par Virtum) existe depuis socat 1.8.
+fn socat_accepts_fd(version: Option<(u32, u32)>) -> bool {
+    version.is_some_and(|v| v >= (1, 8))
+}
+
+/// Lance socat pour une redirection de port.
 ///
-/// Virtum lie lui-même le port (`TcpListener`) puis transmet le socket à socat
-/// (`ACCEPT-FD:3`) : le port n'est jamais libre entre la vérification et l'écoute, donc un
-/// autre utilisateur local ne peut pas s'y glisser. socat qui s'arrête tout de suite fait
-/// échouer la commande au lieu d'annoncer une redirection morte.
+/// Avec socat ≥ 1.8, Virtum lie lui-même le port (`TcpListener`) puis transmet le socket à
+/// socat (`ACCEPT-FD:3`) : le port n'est jamais libre entre la vérification et l'écoute.
+/// Avec un socat plus ancien (Debian 12, Ubuntu 22.04), socat lie le port lui-même
+/// (`TCP-LISTEN`) : un autre utilisateur local qui prendrait le port dans l'intervalle
+/// empêche socat de démarrer, ce qui fait échouer la commande (refus de service possible,
+/// pas de détournement). Dans les deux cas, socat qui s'arrête tout de suite fait échouer
+/// la commande au lieu d'annoncer une redirection morte.
 fn spawn_socat_forward(guest_ip: &str, pf: PortForward, bind: PortBind) -> Result<u32> {
     use std::net::TcpListener;
     use std::os::fd::AsRawFd;
@@ -203,14 +227,37 @@ fn spawn_socat_forward(guest_ip: &str, pf: PortForward, bind: PortBind) -> Resul
             pf.host_port
         )
     })?;
-    let fd = listener.as_raw_fd();
     let target = format!("TCP:{guest_ip}:{}", pf.guest_port);
+    let accept_fd = socat_accepts_fd(socat_version());
     let mut cmd = Command::new("socat");
-    cmd.arg(format!("ACCEPT-FD:{SOCAT_LISTEN_FD},fork"))
-        .arg(&target)
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if !accept_fd {
+        // socat < 1.8 : il lie le port lui-même ; Virtum libère le sien juste avant.
+        drop(listener);
+        cmd.arg(format!(
+            "TCP-LISTEN:{},bind={listen_addr},reuseaddr,fork",
+            pf.host_port
+        ))
+        .arg(&target);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().with_context(|| {
+            format!(
+                "Impossible de lancer socat pour {listen_addr}:{} → {guest_ip}:{}",
+                pf.host_port, pf.guest_port
+            )
+        })?;
+        return confirm_socat_started(child, listen_addr, guest_ip, pf);
+    }
+    let fd = listener.as_raw_fd();
+    cmd.arg(format!("ACCEPT-FD:{SOCAT_LISTEN_FD},fork"))
+        .arg(&target);
     unsafe {
         cmd.pre_exec(move || {
             // Le socket devient le descripteur 3 de socat, sans FD_CLOEXEC.
@@ -226,7 +273,7 @@ fn spawn_socat_forward(guest_ip: &str, pf: PortForward, bind: PortBind) -> Resul
             Ok(())
         });
     }
-    let mut child = cmd.spawn().with_context(|| {
+    let child = cmd.spawn().with_context(|| {
         format!(
             "Impossible de lancer socat pour {listen_addr}:{} → {guest_ip}:{}",
             pf.host_port, pf.guest_port
@@ -234,13 +281,22 @@ fn spawn_socat_forward(guest_ip: &str, pf: PortForward, bind: PortBind) -> Resul
     })?;
     // socat détient maintenant le socket ; Virtum peut fermer sa copie.
     drop(listener);
+    confirm_socat_started(child, listen_addr, guest_ip, pf)
+}
 
+/// socat encore en vie après un court délai : la redirection écoute.
+fn confirm_socat_started(
+    mut child: std::process::Child,
+    listen_addr: &str,
+    guest_ip: &str,
+    pf: PortForward,
+) -> Result<u32> {
     let deadline = std::time::Instant::now() + SOCAT_STARTUP_CHECK;
     while std::time::Instant::now() < deadline {
         if let Some(status) = child.try_wait().context("Impossible de suivre socat")? {
             bail!(
                 "socat s'est arrêté au démarrage ({status}) pour {listen_addr}:{} → {guest_ip}:{}. \
-                 Vérifiez que socat ≥ 1.7.4 est installé (ACCEPT-FD).",
+                 Le port a peut-être été pris entre-temps ; vérifiez-le (ss -ltnp) et relancez.",
                 pf.host_port,
                 pf.guest_port
             );
@@ -397,6 +453,21 @@ mod tests {
         let squatter = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
         assert!(spawn_socat_forward("127.0.0.1", pf, PortBind::Local).is_err());
         drop(squatter);
+    }
+
+    #[test]
+    fn socat_version_selects_accept_fd_or_tcp_listen() {
+        let debian12 = "socat by Gerhard Rieger and contributors - see www.dest-unreach.org\n\
+                        socat version 1.7.4.4 on 06 Nov 2022 08:15:51\n";
+        let ubuntu2404 = "socat version 1.8.0.0 on 03 Jul 2026 12:45:49\n";
+        assert_eq!(parse_socat_version(debian12), Some((1, 7)));
+        assert_eq!(parse_socat_version(ubuntu2404), Some((1, 8)));
+        assert_eq!(parse_socat_version("autre chose"), None);
+        assert!(!socat_accepts_fd(Some((1, 7))));
+        assert!(socat_accepts_fd(Some((1, 8))));
+        assert!(socat_accepts_fd(Some((2, 0))));
+        // Version illisible : repli TCP-LISTEN, qui fonctionne avec tout socat.
+        assert!(!socat_accepts_fd(None));
     }
 
     #[test]

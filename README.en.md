@@ -7,7 +7,7 @@
 Virtum runs local virtual machines and multi-VM labs with a Docker-like experience: `virtum run`, `virtum ps`, `virtum shell`, and a `Virtumfile` to describe a whole lab. VMs run on KVM and libvirt, on your own Linux machine.
 
 ```bash
-virtum run --os debian-12 --name web   # a Debian VM, ready in about a minute
+virtum run --os debian-13 --name web   # a Debian VM, ready in about a minute
 virtum shell web                       # SSH session
 virtum up                              # the lab described in ./Virtumfile
 ```
@@ -24,7 +24,17 @@ virtum up                              # the lab described in ./Virtumfile
 
 ## Installation
 
-Requirements: Linux x86_64 with KVM (virtualization enabled in the BIOS/UEFI). Tested on Ubuntu 24.04; the binary needs glibc 2.34 or newer (Debian 12, Ubuntu 22.04 and later), but these systems have not been validated end to end yet.
+Requirements: Linux x86_64 with KVM (virtualization enabled in the BIOS/UEFI), glibc 2.34 or newer. Tested end to end on Ubuntu 24.04, Debian 13 and Debian 12; Ubuntu 22.04 is not validated yet.
+
+KVM is required: a Linux workstation or a dedicated server works, but a regular VPS usually does not expose KVM. Check that `/dev/kvm` exists.
+
+**Debian**: the libvirt `default` network does not start on its own there. After installing, once:
+
+```bash
+virsh -c qemu:///system net-autostart default && virsh -c qemu:///system net-start default
+```
+
+On Debian 12 and Ubuntu 22.04, shared folders (`mounts:`) are not available: the `virtiofsd` package does not exist there. VMs, labs, ports, Ansible and snapshots work.
 
 ### From a release (recommended)
 
@@ -73,13 +83,15 @@ Packages installed by `setup-host.sh` (Debian/Ubuntu): `qemu-kvm`, `libvirt-daem
 ### A single VM
 
 ```bash
-virtum run --os debian-12 --name web              # Debian 12 (also: ubuntu-24.04, ubuntu-26.04)
-virtum run --os ubuntu-24.04 --ram 4096 --cpu 2 --disk-size 20G
+virtum run --os debian-13 --name web              # Debian 13 (also: ubuntu-26.04)
+virtum run --os ubuntu-26.04 --ram 4096 --cpu 2 --disk-size 20G
 virtum ps                                         # running VMs and their IP; -a for all
 virtum shell web
 virtum stop web && virtum start web
 virtum destroy web
 ```
+
+Available images: `debian-13` and `ubuntu-26.04`. `debian-12` and `ubuntu-24.04` are still accepted for existing labs.
 
 The first use of an OS downloads its cloud image (`virtum pull <os>` does it ahead of time).
 
@@ -92,7 +104,7 @@ name: demo-lab
 
 machines:
   web:
-    os: debian-12
+    os: debian-13
     ram: 2048
     cpu: 2
     ports:
@@ -102,7 +114,7 @@ machines:
       - apt-get install -y nginx
 
   db:
-    os: ubuntu-24.04
+    os: ubuntu-26.04
     ram: 1024
 ```
 
@@ -144,7 +156,7 @@ Full example: [`examples/Virtumfile`](./examples/Virtumfile).
 ```yaml
 machines:
   web:
-    os: debian-12
+    os: debian-13
     mounts:
       - ./src:~/src             # read-only (default)
       - ./out:~/out:rw          # the VM can write
@@ -161,7 +173,7 @@ ansible:
 
 machines:
   web:
-    os: debian-12
+    os: debian-13
     groups: [front]
 ```
 

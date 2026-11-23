@@ -26,25 +26,37 @@ struct OsImageSpec {
     source_label: &'static str,
 }
 
+// Toujours une image datée : une adresse « latest » ou « release/ » change à chaque nouvelle
+// image publiée, et l'empreinte épinglée ici ne correspond plus (téléchargement refusé).
+// Le nom du fichier local porte la date : changer d'image en crée un nouveau, sans toucher à
+// l'ancien, dont dépendent les disques des VM déjà créées.
+// Debian : SHA512SUMS du dossier daté (servi en HTTPS, non signé).
+// Ubuntu : SHA256SUMS vérifié avec la clé de signature des images Ubuntu (ubuntu-cloudimage-keyring).
 const OS_REGISTRY: &[OsImageSpec] = &[
     OsImageSpec {
         id: "debian-12",
-        filename: "debian-12.qcow2",
-        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
-        digest: "c39495a4d81927810e93f825b0b135a08e798f46dc748e78d6bfa2984f93ffc4bcfdc7a6b7f97666ad66fbae3e0f21debd24466ce1d844d0de7856fdc7537d58",
+        filename: "debian-12-20261117.qcow2",
+        url: "https://cloud.debian.org/images/cloud/bookworm/20261117-2665/debian-12-generic-amd64-20261117-2665.qcow2",
+        digest: "d597a8b422a0fa7f7cf1a0477d23be7f7514f32e57ccb8d0c69156e1be4a7e1712fb64aee6298520d70aa573b801d0cfe3392ab5de39829728760c0cf99ef4ec",
+        algo: DigestAlgo::Sha512,
+        source_label: "Debian Cloud",
+    },
+    OsImageSpec {
+        id: "debian-13",
+        filename: "debian-13-20261116.qcow2",
+        url: "https://cloud.debian.org/images/cloud/trixie/20261116-2664/debian-13-generic-amd64-20261116-2664.qcow2",
+        digest: "e53a93ef33f828ceed0e7278c2cc2753bdc7d5098fbfae15bd64b6d878db350ea3744247763a1c8ecb6b4019a0f623c38caf6038ad6f9c357fb4e01493ddf1a3",
         algo: DigestAlgo::Sha512,
         source_label: "Debian Cloud",
     },
     OsImageSpec {
         id: "ubuntu-24.04",
-        filename: "ubuntu-24.04.qcow2",
-        url: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img",
-        digest: "53fdde898feed8b027d94baa9cfe8229867f330a1d9c49dc7d84465ee7f229f7",
+        filename: "ubuntu-24.04-20261017.qcow2",
+        url: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img",
+        digest: "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94",
         algo: DigestAlgo::Sha256,
         source_label: "Ubuntu Cloud Images",
     },
-    // Version datée (et non `release/`, qui change à chaque nouvelle image) : l'empreinte reste valable.
-    // SHA256SUMS vérifié avec la clé de signature des images Ubuntu (ubuntu-cloudimage-keyring).
     OsImageSpec {
         id: "ubuntu-26.04",
         filename: "ubuntu-26.04.qcow2",
@@ -323,9 +335,14 @@ async fn validate_base_image(image: &ResolvedImage) -> Result<()> {
 
 /// Tampon de vérification : fichier de l'utilisateur à côté des images.
 fn stamp_path(image: &ResolvedImage) -> PathBuf {
+    let name = image
+        .local_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| image.os.clone());
     image
         .local_path
-        .with_file_name(format!(".{}.verified.json", image.os))
+        .with_file_name(format!(".{name}.verified.json"))
 }
 
 fn stamp_of(meta: &std::fs::Metadata, digest: &str) -> String {
@@ -409,7 +426,7 @@ mod tests {
     fn resolve_debian_12() {
         let dir = Path::new("/tmp/virtum-images");
         let image = resolve_image("debian-12", dir).unwrap();
-        assert_eq!(image.local_path, dir.join("debian-12.qcow2"));
+        assert_eq!(image.local_path, dir.join("debian-12-20261117.qcow2"));
         assert_eq!(image.url, OS_REGISTRY[0].url);
         assert_eq!(image.algo, DigestAlgo::Sha512);
     }
@@ -418,7 +435,7 @@ mod tests {
     fn resolve_ubuntu_24_04() {
         let dir = Path::new("/tmp/virtum-images");
         let image = resolve_image("ubuntu-24.04", dir).unwrap();
-        assert_eq!(image.local_path, dir.join("ubuntu-24.04.qcow2"));
+        assert_eq!(image.local_path, dir.join("ubuntu-24.04-20261017.qcow2"));
         assert_eq!(image.algo, DigestAlgo::Sha256);
     }
 
@@ -435,7 +452,7 @@ mod tests {
     fn supported_os_ids_lists_registry() {
         assert_eq!(
             supported_os_ids(),
-            vec!["debian-12", "ubuntu-24.04", "ubuntu-26.04"]
+            vec!["debian-12", "debian-13", "ubuntu-24.04", "ubuntu-26.04"]
         );
     }
 

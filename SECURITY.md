@@ -45,6 +45,7 @@ Ce que Virtum ne protège pas, et ce qu'il faut faire à la place :
 - **Clé d'hôte d'une VM** : quiconque lit le dossier de l'instance (l'utilisateur, et QEMU pour l'ISO cloud-init) peut se faire passer pour cette VM. Les membres du groupe `libvirt` contrôlent déjà toutes les VM.
 - **`--insecure-ssh`** désactive la vérification de la clé d'hôte. Réservé aux scripts de confiance.
 - **virtiofsd tourne toujours avec `--sandbox=none`**, avec ou sans `uidmap` : il n'est pas confiné au dossier partagé, et une faille de virtiofsd donnerait les droits de l'utilisateur. La lecture seule reste imposée (`--readonly` ou bubblewrap).
+- **socat antérieur à 1.8** (Debian 12, Ubuntu 22.04) : socat ne sait pas recevoir le port déjà ouvert par Virtum, il l'ouvre lui-même. Un autre compte local qui prendrait le port dans l'intervalle ne peut pas détourner la redirection (socat ne démarre pas et la commande échoue), mais peut l'empêcher. Avec socat ≥ 1.8, le port n'est jamais libre.
 - **Failles de QEMU, libvirt, virtiofsd, du noyau ou des images cloud** : hors de portée de Virtum. Tenez l'hôte et les images à jour (`virtum pull`).
 
 ## Signaler une faille

@@ -7,7 +7,6 @@
 //! ne recrée un objet libvirt qu'après avoir vérifié qu'il porte son marqueur.
 
 use std::path::Path;
-use std::process::Command;
 
 use crate::fsutil::current_uid;
 use crate::libvirt::xml_escape;
@@ -57,7 +56,7 @@ pub fn parse_owner_id(xml: &str) -> Option<String> {
 }
 
 fn virsh_metadata(cmd: &str, object: &str) -> Option<String> {
-    let output = Command::new("virsh")
+    let output = crate::libvirt::virsh_command()
         .args([cmd, object, OWNER_NS])
         .output()
         .ok()?;
@@ -102,7 +101,7 @@ fn network_attached_domains(net_name: &str) -> Option<Vec<String>> {
     let names = crate::libvirt::list_domain_names().ok()?;
     let mut attached = Vec::new();
     for dom in names {
-        let output = Command::new("virsh")
+        let output = crate::libvirt::virsh_command()
             .args(["domiflist", &dom])
             .output()
             .ok()?;
@@ -170,7 +169,7 @@ pub fn domain_is_ours_for_instance(vm_id: &str, instance_dir: &Path) -> bool {
     match domain_owner(vm_id) {
         Owner::Us => true,
         Owner::Other(_) => false,
-        Owner::Unknown => Command::new("virsh")
+        Owner::Unknown => crate::libvirt::virsh_command()
             .args(["dumpxml", "--inactive", vm_id])
             .output()
             .ok()
