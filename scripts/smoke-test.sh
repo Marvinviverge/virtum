@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Validation manuelle du cycle de vie d'une VM : run, shell, stop, start, destroy.
-# Prérequis : KVM, libvirt système (réseau default), image debian-12 en cache recommandée.
+# Prérequis : KVM, libvirt système (réseau default), image debian-13 en cache recommandée.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,7 +31,7 @@ echo "==> Cycle de vie (run → stop → start → destroy)"
 echo "    Ce script lance run ; complétez shell manuellement si besoin."
 RUN_LOG="$(mktemp)"
 trap 'rm -f "$RUN_LOG"' EXIT
-"$VIRTUM" run --os debian-12 2>&1 | tee /dev/stderr | tee "$RUN_LOG" >/dev/null
+"$VIRTUM" run --os debian-13 2>&1 | tee /dev/stderr | tee "$RUN_LOG" >/dev/null
 VM_ID="$(awk '/^VM démarrée: / { print $3 }' "$RUN_LOG")"
 IP="$(awk '/^  IP: / { print $2 }' "$RUN_LOG")"
 if [[ -z "${VM_ID:-}" ]]; then
@@ -89,7 +89,8 @@ if grep -q "\"id\": \"$VM_ID\"" "$VIRTUM_ROOT/metadata.json" 2>/dev/null; then
   echo "ERREUR: entrée metadata encore présente" >&2
   exit 1
 fi
-test -f "$VIRTUM_ROOT/images/debian-12.qcow2"
+# Image datée (debian-13-<date>.qcow2) : conservée après destroy.
+compgen -G "$VIRTUM_ROOT/images/debian-13-*.qcow2" >/dev/null
 
 echo ""
 echo "OK — parcours MVP validé pour $VM_ID"

@@ -7,7 +7,7 @@
 Virtum lance des machines virtuelles locales et des labs multi-VM avec une expérience proche de Docker : `virtum run`, `virtum ps`, `virtum shell`, et un fichier `Virtumfile` pour décrire un lab entier. Les VM tournent sur KVM et libvirt, sur votre propre machine Linux.
 
 ```bash
-virtum run --os debian-12 --name web   # une VM Debian, prête en une minute
+virtum run --os debian-13 --name web   # une VM Debian, prête en une minute
 virtum shell web                       # session SSH
 virtum up                              # le lab décrit dans ./Virtumfile
 ```
@@ -24,15 +24,17 @@ virtum up                              # le lab décrit dans ./Virtumfile
 
 ## Installation
 
-Prérequis : Linux x86_64 avec KVM (virtualisation activée dans le BIOS/UEFI), glibc 2.34 ou plus récente. Testé de bout en bout sur Ubuntu 24.04 et Debian 12 ; Ubuntu 22.04 n'est pas encore validé.
+Prérequis : Linux x86_64 avec KVM (virtualisation activée dans le BIOS/UEFI), glibc 2.34 ou plus récente. Testé de bout en bout sur Ubuntu 24.04, Debian 13 et Debian 12 ; Ubuntu 22.04 n'est pas encore validé.
 
-**Debian 12** : le réseau libvirt `default` n'y démarre pas tout seul. Après l'installation, une fois :
+KVM est indispensable : un poste Linux ou un serveur dédié conviennent, mais un VPS classique n'expose généralement pas KVM. Vérifiez que `/dev/kvm` existe.
+
+**Debian** : le réseau libvirt `default` n'y démarre pas tout seul. Après l'installation, une fois :
 
 ```bash
 virsh -c qemu:///system net-autostart default && virsh -c qemu:///system net-start default
 ```
 
-Les dossiers partagés (`mounts:`) n'y sont pas disponibles : le paquet `virtiofsd` n'existe pas sur Debian 12 (ni Ubuntu 22.04). VM, labs, ports, Ansible et instantanés fonctionnent.
+Sur Debian 12 et Ubuntu 22.04, les dossiers partagés (`mounts:`) ne sont pas disponibles : le paquet `virtiofsd` n'y existe pas. VM, labs, ports, Ansible et instantanés y fonctionnent.
 
 ### Depuis une release (recommandé)
 
@@ -81,13 +83,15 @@ Paquets installés par `setup-host.sh` (Debian/Ubuntu) : `qemu-kvm`, `libvirt-da
 ### Une VM
 
 ```bash
-virtum run --os debian-12 --name web              # Debian 12 (aussi : ubuntu-24.04, ubuntu-26.04)
-virtum run --os ubuntu-24.04 --ram 4096 --cpu 2 --disk-size 20G
+virtum run --os debian-13 --name web              # Debian 13 (aussi : ubuntu-26.04)
+virtum run --os ubuntu-26.04 --ram 4096 --cpu 2 --disk-size 20G
 virtum ps                                         # VM en cours, IP ; -a pour toutes
 virtum shell web
 virtum stop web && virtum start web
 virtum destroy web
 ```
+
+Images proposées : `debian-13` et `ubuntu-26.04`. `debian-12` et `ubuntu-24.04` restent acceptées pour les labs existants.
 
 La première utilisation d'un OS télécharge son image cloud (`virtum pull <os>` pour le faire à l'avance).
 
@@ -100,7 +104,7 @@ name: demo-lab
 
 machines:
   web:
-    os: debian-12
+    os: debian-13
     ram: 2048
     cpu: 2
     ports:
@@ -110,7 +114,7 @@ machines:
       - apt-get install -y nginx
 
   db:
-    os: ubuntu-24.04
+    os: ubuntu-26.04
     ram: 1024
 ```
 
@@ -152,7 +156,7 @@ Exemple complet : [`examples/Virtumfile`](./examples/Virtumfile).
 ```yaml
 machines:
   web:
-    os: debian-12
+    os: debian-13
     mounts:
       - ./src:~/src             # lecture seule (par défaut)
       - ./out:~/out:rw          # la VM peut écrire
@@ -169,7 +173,7 @@ ansible:
 
 machines:
   web:
-    os: debian-12
+    os: debian-13
     groups: [front]
 ```
 

@@ -31,8 +31,8 @@ echo "== virtum doctor (bridge) =="
 echo "== virtum plan -f $VIRTUMFILE =="
 "$VIRTUM" plan -f "$VIRTUMFILE"
 
-echo "== virtum pull debian-12 =="
-"$VIRTUM" pull debian-12
+echo "== virtum pull debian-13 =="
+"$VIRTUM" pull debian-13
 
 echo "== virtum up -f $VIRTUMFILE =="
 "$VIRTUM" up -f "$VIRTUMFILE"

@@ -15,8 +15,8 @@ fi
 echo "== virtum doctor =="
 "$VIRTUM" doctor
 
-echo "== virtum pull debian-12 (idempotent) =="
-"$VIRTUM" pull debian-12
+echo "== virtum pull debian-13 (idempotent) =="
+"$VIRTUM" pull debian-13
 
 echo "== virtum up -f $VIRTUMFILE =="
 "$VIRTUM" up -f "$VIRTUMFILE"

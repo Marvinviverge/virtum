@@ -2,10 +2,16 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [1.2.1] - 2026-11-23
+## [1.3.0] - 2026-11-23
+
+### Ajouts
+
+- **Image Debian 13** (`debian-13`), la version stable de Debian. Elle devient l'OS par défaut de `virtum run`, et le README, l'exemple et la documentation utilisent désormais `debian-13` et `ubuntu-26.04`. `debian-12` et `ubuntu-24.04` restent acceptées : aucun Virtumfile existant n'est cassé.
+- **Debian 13 comme hôte**, testé de bout en bout, dossiers partagés compris (`virtiofsd` et socat 1.8 y sont empaquetés).
 
 ### Corrections
 
+- **VM Debian 13 qui redémarraient en boucle** : leur GRUB plante quand la VM n'a aucune carte graphique, et libvirt n'en ajoute pas d'office. Les VM reçoivent une carte VGA sans affichage.
 - **Images Debian 12 et Ubuntu 24.04 introuvables** : Virtum les téléchargeait depuis une adresse « dernière version », qui change à chaque nouvelle image publiée, alors que leur empreinte attendue est fixe. Depuis les images publiées en novembre, le téléchargement était refusé (« Checksum invalide ») pour tout nouvel utilisateur. Les images sont maintenant épinglées sur une version datée (Debian 12 du 17/11/2026, Ubuntu 24.04 du 17/10/2026), dans un fichier qui porte la date.
 - **Les VM existantes gardent leur image** : une VM qui redémarre, ou dont le disque est agrandi, utilise l'image de base de son disque, et non l'image actuelle de son OS. Rien n'est re-téléchargé ni remplacé.
 - **Libvirt système toujours utilisé** : Virtum appelle `virsh -c qemu:///system`. Jusqu'ici, il comptait sur `LIBVIRT_DEFAULT_URI`, que seul Ubuntu pose, et seulement dans un shell de connexion : sur Debian, ou depuis cron ou `ssh hôte virtum …`, virsh visait le libvirt de session.
@@ -15,7 +21,7 @@ Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
 ### Plateformes
 
-Testé de bout en bout sur Debian 12 (paquet `.deb`, `virtum doctor`, VM, lab avec ports et provision). Sur Debian 12, démarrer une fois le réseau `default` (voir README).
+Testé de bout en bout comme hôte sur Ubuntu 24.04, Debian 13 et Debian 12 (paquet `.deb`, `virtum doctor`, VM, lab avec ports et provision ; dossiers partagés sur Ubuntu 24.04 et Debian 13). Sur Debian, démarrer une fois le réseau `default` (voir README). KVM est indispensable : un VPS classique n'en donne généralement pas.
 
 ## [1.2.0] - 2026-11-22
 
