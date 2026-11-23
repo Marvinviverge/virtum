@@ -24,7 +24,15 @@ virtum up                              # the lab described in ./Virtumfile
 
 ## Installation
 
-Requirements: Linux x86_64 with KVM (virtualization enabled in the BIOS/UEFI). Tested on Ubuntu 24.04; the binary needs glibc 2.34 or newer (Debian 12, Ubuntu 22.04 and later), but these systems have not been validated end to end yet.
+Requirements: Linux x86_64 with KVM (virtualization enabled in the BIOS/UEFI), glibc 2.34 or newer. Tested end to end on Ubuntu 24.04 and Debian 12; Ubuntu 22.04 is not validated yet.
+
+**Debian 12**: the libvirt `default` network does not start on its own there. After installing, once:
+
+```bash
+virsh -c qemu:///system net-autostart default && virsh -c qemu:///system net-start default
+```
+
+Shared folders (`mounts:`) are not available there: the `virtiofsd` package does not exist on Debian 12 (nor Ubuntu 22.04). VMs, labs, ports, Ansible and snapshots work.
 
 ### From a release (recommended)
 

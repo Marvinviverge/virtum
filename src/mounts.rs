@@ -37,6 +37,34 @@ pub fn resolve_virtiofsd_path() -> Option<PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
+/// virtiofsd utilisable pour les dossiers partagés, vérifié avant de créer la VM.
+///
+/// Il faut le virtiofsd en Rust (paquet `virtiofsd`). Debian 12 et Ubuntu 22.04 n'ont que
+/// l'ancien virtiofsd en C de QEMU, qui ne répond pas à `--version` et n'accepte pas les
+/// options de Virtum : sans cette vérification, la VM attendrait son socket en vain.
+pub fn ensure_virtiofsd_usable() -> Result<PathBuf> {
+    let Some(path) = resolve_virtiofsd_path() else {
+        bail!(
+            "Dossiers partagés (`mounts:`) indisponibles : virtiofsd est absent. \
+             Installez-le (sudo apt install virtiofsd) ; le paquet n'existe pas sur Debian 12 \
+             ni Ubuntu 22.04. Sinon, retirez `mounts:` du Virtumfile."
+        );
+    };
+    let works = Command::new(&path)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !works {
+        bail!(
+            "Dossiers partagés (`mounts:`) indisponibles : {} est l'ancien virtiofsd en C \
+             fourni par QEMU, incompatible. Il faut le virtiofsd en Rust (paquet virtiofsd, \
+             absent de Debian 12 et d'Ubuntu 22.04). Sinon, retirez `mounts:` du Virtumfile.",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
 /// Mount résolu (chemins absolus hôte + invité).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedMount {

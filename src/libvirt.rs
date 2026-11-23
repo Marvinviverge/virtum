@@ -13,8 +13,27 @@ pub const LIBVIRT_DEFAULT_NETWORK: &str = "default";
 /// Ancienne IP SLIRP (instances créées avant le réseau `default`).
 pub const SLIRP_GUEST_IPV4: &str = "10.0.2.15";
 
+/// Libvirt utilisé par Virtum : toujours le libvirt système. Sans `-c`, virsh suit
+/// `LIBVIRT_DEFAULT_URI`, que seul Ubuntu pose (et seulement dans un shell de connexion) ;
+/// ailleurs (Debian, cron, `ssh hôte virtum …`) il se connecterait à `qemu:///session`.
+pub const LIBVIRT_URI: &str = "qemu:///system";
+
+/// `virsh -c qemu:///system` : seule façon autorisée de lancer virsh dans Virtum.
+pub fn virsh_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("virsh");
+    cmd.args(["-c", LIBVIRT_URI]);
+    cmd
+}
+
+/// Arguments complets d'un appel virsh (connexion explicite au libvirt système).
+pub fn virsh_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut all = vec!["-c", LIBVIRT_URI];
+    all.extend_from_slice(args);
+    all
+}
+
 fn run_virsh(args: &[&str]) -> Result<std::process::Output> {
-    run_command("virsh", args)
+    run_command("virsh", &virsh_args(args))
 }
 
 const QEMU_MACHINE: &str = "pc-q35-7.2";
@@ -1083,6 +1102,36 @@ pub(crate) fn xml_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Tout appel à virsh vise le libvirt système, explicitement : sans `-c`, virsh suivrait
+    /// `LIBVIRT_DEFAULT_URI` et tomberait sur `qemu:///session` hors d'Ubuntu.
+    #[test]
+    fn virsh_always_targets_system_libvirt() {
+        assert_eq!(
+            virsh_args(&["net-info", "default"]),
+            ["-c", "qemu:///system", "net-info", "default"]
+        );
+        let cmd = virsh_command();
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["-c", "qemu:///system"]);
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for entry in std::fs::read_dir(src).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                let raw_command = line.contains(concat!("Command::new(", "\"virsh\")"));
+                let raw_run = line.contains(concat!("run_command(", "\"virsh\""))
+                    && !line.contains("virsh_args");
+                assert!(
+                    !(raw_run || raw_command && name != "libvirt.rs"),
+                    "{name}:{} appelle virsh sans -c qemu:///system : {line}",
+                    i + 1
+                );
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

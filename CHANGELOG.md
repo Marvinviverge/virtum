@@ -2,6 +2,21 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [1.2.1] - 2026-11-23
+
+### Corrections
+
+- **Images Debian 12 et Ubuntu 24.04 introuvables** : Virtum les téléchargeait depuis une adresse « dernière version », qui change à chaque nouvelle image publiée, alors que leur empreinte attendue est fixe. Depuis les images publiées en novembre, le téléchargement était refusé (« Checksum invalide ») pour tout nouvel utilisateur. Les images sont maintenant épinglées sur une version datée (Debian 12 du 17/11/2026, Ubuntu 24.04 du 17/10/2026), dans un fichier qui porte la date.
+- **Les VM existantes gardent leur image** : une VM qui redémarre, ou dont le disque est agrandi, utilise l'image de base de son disque, et non l'image actuelle de son OS. Rien n'est re-téléchargé ni remplacé.
+- **Libvirt système toujours utilisé** : Virtum appelle `virsh -c qemu:///system`. Jusqu'ici, il comptait sur `LIBVIRT_DEFAULT_URI`, que seul Ubuntu pose, et seulement dans un shell de connexion : sur Debian, ou depuis cron ou `ssh hôte virtum …`, virsh visait le libvirt de session.
+- **Ports sur Debian 12 et Ubuntu 22.04** : avec socat antérieur à 1.8 (sans `ACCEPT-FD`), les `ports:` échouaient. socat ouvre alors le port lui-même (voir SECURITY.md, Limites).
+- **Dossiers partagés sans virtiofsd compatible** : refus immédiat avec un message clair, au lieu d'une attente puis d'une erreur de socket. `virtum doctor` signale virtiofsd comme optionnel : son absence ne bloque plus le diagnostic.
+- Commandes proposées par `virtum doctor` pour le réseau `default` : `virsh -c qemu:///system …`.
+
+### Plateformes
+
+Testé de bout en bout sur Debian 12 (paquet `.deb`, `virtum doctor`, VM, lab avec ports et provision). Sur Debian 12, démarrer une fois le réseau `default` (voir README).
+
 ## [1.2.0] - 2026-11-22
 
 ### Sécurité
