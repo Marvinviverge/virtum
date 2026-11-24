@@ -14,6 +14,7 @@ use crate::config;
 use crate::libvirt::SLIRP_GUEST_IPV4;
 use crate::metadata::{self, Instance, InstanceStatus};
 use crate::mounts::{MountSshStep, ResolvedMount};
+use crate::tr;
 use crate::virtumfile::DEFAULT_SSH_PORT;
 
 const PRIVATE_KEY_NAME: &str = "virtum_id_ed25519";
@@ -94,10 +95,11 @@ pub fn generate_guest_host_key(instance_dir: &Path) -> Result<GuestHostKey> {
     let public_path = instance_dir.join(format!("{GUEST_HOST_KEY_TMP}.pub"));
     for p in [&private_path, &public_path] {
         if fs::symlink_metadata(p).is_ok() {
-            bail!(
-                "{} existe déjà : refus de générer la clé d'hôte par-dessus.",
+            bail!(tr!(
+                fr: "{} existe déjà : refus de générer la clé d'hôte par-dessus.",
+                en: "{} already exists: refusing to generate the host key over it.",
                 p.display()
-            );
+            ));
         }
     }
     let result = (|| -> Result<GuestHostKey> {
@@ -115,19 +117,34 @@ pub fn generate_guest_host_key(instance_dir: &Path) -> Result<GuestHostKey> {
                 path_arg(&private_path)?,
             ],
         )
-        .context("Impossible de générer la clé d'hôte SSH de la VM")?;
-        let private_key = fs::read_to_string(&private_path)
-            .with_context(|| format!("Impossible de lire {}", private_path.display()))?;
-        let public_key = parse_ed25519_public_key(
-            &fs::read_to_string(&public_path)
-                .with_context(|| format!("Impossible de lire {}", public_path.display()))?,
-        )?;
+        .context(tr!(
+            fr: "Impossible de générer la clé d'hôte SSH de la VM",
+            en: "Cannot generate the VM's SSH host key"
+        ))?;
+        let private_key = fs::read_to_string(&private_path).with_context(|| {
+            tr!(
+                fr: "Impossible de lire {}",
+                en: "Cannot read {}",
+                private_path.display()
+            )
+        })?;
+        let public_key =
+            parse_ed25519_public_key(&fs::read_to_string(&public_path).with_context(|| {
+                tr!(
+                    fr: "Impossible de lire {}",
+                    en: "Cannot read {}",
+                    public_path.display()
+                )
+            })?)?;
         if !private_key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
             || private_key
                 .lines()
                 .any(|l| l.trim().is_empty() || l != l.trim())
         {
-            bail!("Clé d'hôte SSH générée illisible.");
+            bail!(tr!(
+                fr: "Clé d'hôte SSH générée illisible.",
+                en: "Generated SSH host key is unreadable."
+            ));
         }
         Ok(GuestHostKey {
             private_key,
@@ -150,7 +167,10 @@ fn parse_ed25519_public_key(content: &str) -> Result<String> {
         {
             Ok(format!("ssh-ed25519 {b64}"))
         }
-        _ => bail!("Clé publique d'hôte SSH invalide."),
+        _ => bail!(tr!(
+            fr: "Clé publique d'hôte SSH invalide.",
+            en: "Invalid SSH host public key."
+        )),
     }
 }
 
@@ -159,10 +179,11 @@ fn parse_ed25519_public_key(content: &str) -> Result<String> {
 pub fn pin_guest_host_key(instance_dir: &Path, key: &GuestHostKey) -> Result<()> {
     let opts = SshSessionOpts::new(instance_dir, false);
     let Some(alias) = opts.host_key_alias else {
-        bail!(
-            "Nom d'instance inutilisable comme alias SSH : {}",
+        bail!(tr!(
+            fr: "Nom d'instance inutilisable comme alias SSH : {}",
+            en: "Instance name unusable as an SSH alias: {}",
             instance_dir.display()
-        );
+        ));
     };
     let line = format!("{alias} {}\n", key.public_key);
     crate::fsutil::write_atomic(&opts.known_hosts, line.as_bytes(), 0o600)
@@ -194,8 +215,9 @@ pub struct SshKeyPaths {
 
 /// Creates the Virtum ed25519 key pair if missing; returns paths to private and public keys.
 pub fn ensure_ssh_keypair(keys_dir: &Path) -> Result<SshKeyPaths> {
-    fs::create_dir_all(keys_dir)
-        .with_context(|| format!("Impossible de créer {}", keys_dir.display()))?;
+    fs::create_dir_all(keys_dir).with_context(
+        || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", keys_dir.display()),
+    )?;
     restrict_keys_dir(keys_dir)?;
 
     let private_key = keys_dir.join(PRIVATE_KEY_NAME);
@@ -203,7 +225,7 @@ pub fn ensure_ssh_keypair(keys_dir: &Path) -> Result<SshKeyPaths> {
 
     if let Ok(meta) = fs::symlink_metadata(&private_key) {
         crate::fsutil::ensure_owned_regular_file(&private_key, &meta)
-            .context("Clé privée Virtum refusée")?;
+            .context(tr!(fr: "Clé privée Virtum refusée", en: "Virtum private key refused"))?;
         restrict_private_key_permissions(&private_key)?;
         // La clé publique injectée dans les VM est recalculée depuis la clé privée :
         // un .pub remplacé dans un dossier partagé ne peut pas autoriser une autre clé.
@@ -240,11 +262,20 @@ pub fn ensure_ssh_keypair(keys_dir: &Path) -> Result<SshKeyPaths> {
 
 /// Reads the public key as a single line suitable for cloud-init `ssh_authorized_keys`.
 pub fn read_public_key(public_key_path: &Path) -> Result<String> {
-    let content = fs::read_to_string(public_key_path)
-        .with_context(|| format!("Impossible de lire {}", public_key_path.display()))?;
+    let content = fs::read_to_string(public_key_path).with_context(|| {
+        tr!(
+            fr: "Impossible de lire {}",
+            en: "Cannot read {}",
+            public_key_path.display()
+        )
+    })?;
     let line = content.lines().next().unwrap_or("").trim();
     if line.is_empty() {
-        anyhow::bail!("Clé publique vide dans {}", public_key_path.display());
+        anyhow::bail!(tr!(
+            fr: "Clé publique vide dans {}",
+            en: "Empty public key in {}",
+            public_key_path.display()
+        ));
     }
     Ok(line.to_string())
 }
@@ -252,9 +283,12 @@ pub fn read_public_key(public_key_path: &Path) -> Result<String> {
 fn warn_insecure_ssh_once() {
     if !INSECURE_SSH_WARNED.swap(true, Ordering::Relaxed) {
         crate::verr!(
-            "Avertissement : --insecure-ssh désactive la vérification de clé SSH \
+            fr: "Avertissement : --insecure-ssh désactive la vérification de clé SSH \
              (StrictHostKeyChecking=no). À réserver aux scripts / CI de confiance. \
-             OpenSSH peut afficher « Permanently added » (écriture dans /dev/null) : bruit sans effet."
+             OpenSSH peut afficher « Permanently added » (écriture dans /dev/null) : bruit sans effet.",
+            en: "Warning: --insecure-ssh disables SSH host key checking \
+             (StrictHostKeyChecking=no). Use it only for trusted scripts / CI. \
+             OpenSSH may print 'Permanently added' (written to /dev/null): harmless noise."
         );
     }
 }
@@ -299,10 +333,13 @@ fn map_ssh_host_key_error(stderr: &str, opts: &SshSessionOpts) -> Option<String>
     if upper.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
         || upper.contains("HOST KEY VERIFICATION FAILED")
     {
-        Some(format!(
-            "Connexion refusée : la machine qui répond ne présente pas la clé d'hôte SSH \
+        Some(tr!(
+            fr: "Connexion refusée : la machine qui répond ne présente pas la clé d'hôte SSH \
              épinglée pour cette VM ({}). Une autre machine répond peut-être à sa place. \
              Si la VM a été réinstallée volontairement : virtum destroy <ref> puis recréez-la.",
+            en: "Connection refused: the machine answering does not present the SSH host key \
+             pinned for this VM ({}). Another machine may be answering in its place. \
+             If the VM was reinstalled on purpose: run virtum destroy <ref>, then recreate it.",
             opts.known_hosts.display()
         ))
     } else {
@@ -314,12 +351,19 @@ fn map_ssh_host_key_error(stderr: &str, opts: &SshSessionOpts) -> Option<String>
 fn stopped_vm_message(instance: &Instance) -> String {
     let reference = instance.name.as_deref().unwrap_or(&instance.id);
     let relaunch = match instance.lab_name.as_deref() {
-        Some(lab) => format!(
-            "Relancez-la : `virtum start {reference}`, ou tout le lab '{lab}' : `virtum up` (dans le dossier du Virtumfile)."
+        Some(lab) => tr!(
+            fr: "Relancez-la : `virtum start {reference}`, ou tout le lab '{lab}' : `virtum up` (dans le dossier du Virtumfile).",
+            en: "Restart it: `virtum start {reference}`, or the whole lab '{lab}': `virtum up` (in the Virtumfile folder)."
         ),
-        None => format!("Relancez-la : `virtum start {reference}`."),
+        None => tr!(
+            fr: "Relancez-la : `virtum start {reference}`.",
+            en: "Restart it: `virtum start {reference}`."
+        ),
     };
-    format!("La VM '{reference}' est éteinte (shut off) — l'hôte a peut-être redémarré. {relaunch}")
+    tr!(
+        fr: "La VM '{reference}' est éteinte (shut off) — l'hôte a peut-être redémarré. {relaunch}",
+        en: "The VM '{reference}' is stopped (shut off) — the host may have rebooted. {relaunch}"
+    )
 }
 
 /// SSH interactif vers une instance (étape 17) ; termine le processus avec le code SSH.
@@ -328,7 +372,10 @@ pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?;
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime"
+        ))?;
 
     let (private_key, user, host, port, ssh_opts) = runtime.block_on(async {
         let paths = config::ensure_layout().await?;
@@ -341,10 +388,11 @@ pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
             bail!("{}", stopped_vm_message(&instance));
         }
         if instance.status != InstanceStatus::Running {
-            bail!(
-                "La VM '{vm_id}' n'est pas en cours d'exécution (statut: {:?}).",
+            bail!(tr!(
+                fr: "La VM '{vm_id}' n'est pas en cours d'exécution (statut: {:?}).",
+                en: "The VM '{vm_id}' is not running (status: {:?}).",
                 instance.status
-            );
+            ));
         }
 
         let ip = instance
@@ -352,10 +400,12 @@ pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
             .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Aucune adresse IP enregistrée pour '{vm_id}'. \
-                     Utilisez `virtum start` ou `virtum run`."
-                )
+                anyhow::anyhow!(tr!(
+                    fr: "Aucune adresse IP enregistrée pour '{vm_id}'. \
+                     Utilisez `virtum start` ou `virtum run`.",
+                    en: "No IP address recorded for '{vm_id}'. \
+                     Run `virtum start` or `virtum run`."
+                ))
             })?;
 
         let configured = instance.ssh_port.unwrap_or(DEFAULT_SSH_PORT);
@@ -368,14 +418,18 @@ pub fn shell_to_instance(reference: &str, insecure_ssh: bool) -> Result<()> {
 
         if (ip == "127.0.0.1" || ip == SLIRP_GUEST_IPV4) && instance.ssh_port.is_some() {
             crate::verr!(
-                "Avertissement: instance '{vm_id}' utilise l'ancien mode SLIRP (127.0.0.1:{port}). \
-                 Relancez `virtum run` pour une IP dédiée (192.168.122.x)."
+                fr: "Avertissement: instance '{vm_id}' utilise l'ancien mode SLIRP (127.0.0.1:{port}). \
+                 Relancez `virtum run` pour une IP dédiée (192.168.122.x).",
+                en: "Warning: instance '{vm_id}' uses the legacy SLIRP mode (127.0.0.1:{port}). \
+                 Run `virtum run` again for a dedicated IP (192.168.122.x)."
             );
         } else if ip == SLIRP_GUEST_IPV4 {
-            bail!(
-                "La VM '{vm_id}' a l'IP SLIRP {SLIRP_GUEST_IPV4}, inaccessible depuis l'hôte. \
-                 Recréez-la avec `virtum run` (réseau libvirt default)."
-            );
+            bail!(tr!(
+                fr: "La VM '{vm_id}' a l'IP SLIRP {SLIRP_GUEST_IPV4}, inaccessible depuis l'hôte. \
+                 Recréez-la avec `virtum run` (réseau libvirt default).",
+                en: "The VM '{vm_id}' has the SLIRP IP {SLIRP_GUEST_IPV4}, unreachable from the host. \
+                 Recreate it with `virtum run` (libvirt default network)."
+            ));
         }
 
         let host = ip;
@@ -414,13 +468,17 @@ pub fn run_provision_commands(
             continue;
         }
         if started.elapsed() > timeout {
-            bail!("Provision interrompue : délai global dépassé ({timeout:?}).");
+            bail!(tr!(
+                fr: "Provision interrompue : délai global dépassé ({timeout:?}).",
+                en: "Provisioning aborted: overall timeout exceeded ({timeout:?})."
+            ));
         }
         crate::verr!("  [{}/{}] {trimmed}", i + 1, commands.len());
         ssh_run_provision_command(private_key, user, host, port, trimmed, opts).with_context(
             || {
-                format!(
-                    "Provision échouée à l'étape {}/{}: {trimmed}",
+                tr!(
+                    fr: "Provision échouée à l'étape {}/{}: {trimmed}",
+                    en: "Provisioning failed at step {}/{}: {trimmed}",
                     i + 1,
                     commands.len()
                 )
@@ -543,9 +601,9 @@ fn ssh_run_remote_command(
     }
     cmd.arg(&target).arg(remote);
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Impossible d'exécuter ssh vers {target}"))?;
+    let output = cmd.output().with_context(
+        || tr!(fr: "Impossible d'exécuter ssh vers {target}", en: "Cannot run ssh to {target}"),
+    )?;
 
     if output.status.success() {
         return Ok(());
@@ -554,10 +612,11 @@ fn ssh_run_remote_command(
     if let Some(msg) = map_ssh_host_key_error(&stderr, opts) {
         bail!("{msg}");
     }
-    bail!(
-        "Commande distante échouée (code {}): {stderr}",
+    bail!(tr!(
+        fr: "Commande distante échouée (code {}): {stderr}",
+        en: "Remote command failed (code {}): {stderr}",
         output.status.code().unwrap_or(-1)
-    )
+    ))
 }
 
 /// Commande SSH non interactive (BatchMode), ex. `bash -lc '…'`.
@@ -581,9 +640,9 @@ pub fn ssh_run_command(
     }
     cmd.arg(&target).arg("bash").arg("-lc").arg(command);
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Impossible d'exécuter ssh vers {target}"))?;
+    let output = cmd.output().with_context(
+        || tr!(fr: "Impossible d'exécuter ssh vers {target}", en: "Cannot run ssh to {target}"),
+    )?;
 
     if output.status.success() {
         return Ok(());
@@ -592,10 +651,11 @@ pub fn ssh_run_command(
     if let Some(msg) = map_ssh_host_key_error(&stderr, opts) {
         bail!("{msg}");
     }
-    bail!(
-        "Commande distante échouée (code {}): {stderr}",
+    bail!(tr!(
+        fr: "Commande distante échouée (code {}): {stderr}",
+        en: "Remote command failed (code {}): {stderr}",
         output.status.code().unwrap_or(-1)
-    )
+    ))
 }
 
 /// Vérifie que l'authentification par clé Virtum fonctionne (cloud-init terminé).
@@ -681,27 +741,34 @@ fn exec_ssh_shell(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let status = cmd
-        .status()
-        .with_context(|| format!("Impossible d'exécuter ssh vers {target}"))?;
+    let status = cmd.status().with_context(
+        || tr!(fr: "Impossible d'exécuter ssh vers {target}", en: "Cannot run ssh to {target}"),
+    )?;
 
     std::process::exit(status.code().unwrap_or(1));
 }
 
 /// `keys/` réservé à l'utilisateur (0700) : QEMU n'a jamais besoin des clés.
 fn restrict_keys_dir(keys_dir: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(keys_dir)
-        .with_context(|| format!("Impossible de lire {}", keys_dir.display()))?;
+    let meta = fs::symlink_metadata(keys_dir).with_context(
+        || tr!(fr: "Impossible de lire {}", en: "Cannot read {}", keys_dir.display()),
+    )?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
-        anyhow::bail!(
-            "{} doit être un répertoire (pas un lien).",
+        anyhow::bail!(tr!(
+            fr: "{} doit être un répertoire (pas un lien).",
+            en: "{} must be a directory (not a link).",
             keys_dir.display()
-        );
+        ));
     }
     use std::os::unix::fs::MetadataExt;
     if meta.uid() == crate::fsutil::current_uid() && meta.permissions().mode() & 0o077 != 0 {
-        fs::set_permissions(keys_dir, Permissions::from_mode(0o700))
-            .with_context(|| format!("Impossible de chmod 700 sur {}", keys_dir.display()))?;
+        fs::set_permissions(keys_dir, Permissions::from_mode(0o700)).with_context(|| {
+            tr!(
+                fr: "Impossible de chmod 700 sur {}",
+                en: "Cannot chmod 700 {}",
+                keys_dir.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -712,10 +779,16 @@ fn sync_public_key_from_private(private_key: &Path, public_key: &Path) -> Result
         "ssh-keygen",
         &["-y", "-P", "", "-f", crate::command::path_arg(private_key)?],
     )
-    .context("Impossible de dériver la clé publique Virtum (ssh-keygen -y)")?;
+    .context(tr!(
+        fr: "Impossible de dériver la clé publique Virtum (ssh-keygen -y)",
+        en: "Cannot derive the Virtum public key (ssh-keygen -y)"
+    ))?;
     let derived = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if derived.is_empty() {
-        anyhow::bail!("ssh-keygen -y n'a renvoyé aucune clé publique.");
+        anyhow::bail!(tr!(
+            fr: "ssh-keygen -y n'a renvoyé aucune clé publique.",
+            en: "ssh-keygen -y returned no public key."
+        ));
     }
     let wanted = format!("{derived} virtum\n");
     let current = fs::symlink_metadata(public_key)
@@ -738,8 +811,9 @@ fn sync_public_key_from_private(private_key: &Path, public_key: &Path) -> Result
 
 fn restrict_private_key_permissions(private_key: &Path) -> Result<()> {
     fs::set_permissions(private_key, Permissions::from_mode(0o600)).with_context(|| {
-        format!(
-            "Impossible de définir les permissions 0600 sur {}",
+        tr!(
+            fr: "Impossible de définir les permissions 0600 sur {}",
+            en: "Cannot set permissions 0600 on {}",
             private_key.display()
         )
     })
