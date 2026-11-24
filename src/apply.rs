@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 
+use crate::tr;
+
 pub fn apply(
     file: Option<PathBuf>,
     insecure_ssh: bool,
@@ -16,7 +18,10 @@ pub fn apply(
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime"
+        ))?
         .block_on(crate::lab_diff::apply_lab(
             file,
             insecure_ssh,

@@ -68,7 +68,7 @@ where
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("runtime tokio d'un fil de création");
+                    .expect("runtime tokio d'un fil de création"); // i18n-ok : panique interne
                 loop {
                     let i = next.fetch_add(1, Ordering::SeqCst);
                     if i >= count {
