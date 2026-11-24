@@ -12,14 +12,14 @@ body:
     attributes:
       label: Version
       description: Sortie de `virtum --version`. / Output of `virtum --version`.
-      placeholder: virtum 1.1.0
+      placeholder: virtum 1.4.0
     validations:
       required: true
   - type: textarea
     id: doctor
     attributes:
       label: virtum doctor
-      description: Sortie de `virtum doctor` et distribution de l'hôte. / Output of `virtum doctor` and host distribution.
+      description: Sortie de `VIRTUM_LANG=en virtum doctor` (en anglais, lisible par tous) et distribution de l'hôte. / Output of `VIRTUM_LANG=en virtum doctor` and host distribution.
       render: text
     validations:
       required: true
@@ -33,7 +33,7 @@ body:
     id: actual
     attributes:
       label: Ce qui se passe / What happens
-      description: Message d'erreur complet compris. / Including the full error message.
+      description: Message d'erreur complet compris, de préférence avec `VIRTUM_LANG=en` devant la commande. / Including the full error message, ideally with `VIRTUM_LANG=en` before the command.
     validations:
       required: true
   - type: textarea
