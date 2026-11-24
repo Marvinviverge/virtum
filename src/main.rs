@@ -1,6 +1,9 @@
 fn main() {
     if let Err(err) = virtum::run() {
-        eprintln!("error: {err:#}");
+        eprintln!(
+            "{}",
+            virtum::tr!(fr: "erreur : {err:#}", en: "error: {err:#}")
+        );
         std::process::exit(1);
     }
 }

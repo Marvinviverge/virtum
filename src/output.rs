@@ -47,8 +47,13 @@ pub fn sanitize_terminal(text: &str) -> String {
 }
 
 /// `eprintln!` préfixé par la machine en cours (fil courant).
+///
+/// Forme bilingue : `verr!(fr: "…", en: "…", args…)` (voir [`tr!`](crate::tr)).
 #[macro_export]
 macro_rules! verr {
+    (fr: $fr:literal, en: $en:literal $(, $($arg:tt)+)?) => {
+        eprintln!("{}", $crate::output::prefixed(&$crate::tr!(fr: $fr, en: $en $(, $($arg)+)?)))
+    };
     () => {
         eprintln!("{}", $crate::output::prefixed(""))
     };
@@ -58,8 +63,13 @@ macro_rules! verr {
 }
 
 /// `println!` préfixé par la machine en cours (fil courant).
+///
+/// Forme bilingue : `vout!(fr: "…", en: "…", args…)`.
 #[macro_export]
 macro_rules! vout {
+    (fr: $fr:literal, en: $en:literal $(, $($arg:tt)+)?) => {
+        println!("{}", $crate::output::prefixed(&$crate::tr!(fr: $fr, en: $en $(, $($arg)+)?)))
+    };
     () => {
         println!("{}", $crate::output::prefixed(""))
     };

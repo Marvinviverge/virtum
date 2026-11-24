@@ -155,6 +155,40 @@ pub enum Commands {
         #[command(subcommand)]
         action: SnapshotAction,
     },
+    /// Read or change Virtum settings (output language)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// Réglages de l'utilisateur (`~/.config/virtum/config.yml`).
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Change a setting (e.g. `virtum config set language en`)
+    Set {
+        /// Setting name
+        key: ConfigKey,
+        /// New value (language: en, fr)
+        value: String,
+    },
+    /// Show the current value of a setting and where it comes from
+    Get {
+        /// Setting name
+        key: ConfigKey,
+    },
+    /// Remove a setting (back to the default)
+    Unset {
+        /// Setting name
+        key: ConfigKey,
+    },
+}
+
+/// Réglages connus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ConfigKey {
+    /// Output language (en, fr); defaults to the system language
+    Language,
 }
 
 /// Sans VM citée : toutes les VM du lab du Virtumfile (`-f` ou `./Virtumfile`).
