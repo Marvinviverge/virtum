@@ -7,6 +7,7 @@ use anyhow::{bail, Result};
 use crate::command::{path_arg, run_command};
 use crate::mounts::ResolvedMount;
 use crate::ssh::GuestHostKey;
+use crate::tr;
 
 /// `/etc/profile.d` : PATH incluant `/usr/sbin` (nginx, ip, etc.) pour les shells interactifs.
 const PATH_PROFILE_SNIPPET: &str = r#"
@@ -23,41 +24,62 @@ write_files:
 
 pub fn validate_cloud_init_user(user: &str) -> Result<()> {
     if user.is_empty() || user.len() > 32 {
-        bail!("Utilisateur cloud-init invalide : longueur 1–32 requise.");
+        bail!(tr!(
+            fr: "Utilisateur cloud-init invalide : longueur 1–32 requise.",
+            en: "Invalid cloud-init user: length must be 1–32."
+        ));
     }
     let mut chars = user.chars();
     let first = chars.next().unwrap();
     if !(first.is_ascii_lowercase() || first == '_') {
-        bail!("Utilisateur cloud-init invalide : doit commencer par [a-z_].");
+        bail!(tr!(
+            fr: "Utilisateur cloud-init invalide : doit commencer par [a-z_].",
+            en: "Invalid cloud-init user: must start with [a-z_]."
+        ));
     }
     if !user
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
     {
-        bail!("Utilisateur cloud-init invalide : caractères autorisés [a-z0-9_-].");
+        bail!(tr!(
+            fr: "Utilisateur cloud-init invalide : caractères autorisés [a-z0-9_-].",
+            en: "Invalid cloud-init user: allowed characters are [a-z0-9_-]."
+        ));
     }
     Ok(())
 }
 
 pub fn validate_cloud_init_hostname(hostname: &str) -> Result<()> {
     if hostname.is_empty() || hostname.len() > 64 {
-        bail!("Hostname cloud-init invalide : longueur 1–64 requise.");
+        bail!(tr!(
+            fr: "Hostname cloud-init invalide : longueur 1–64 requise.",
+            en: "Invalid cloud-init hostname: length must be 1–64."
+        ));
     }
     if !hostname
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
     {
-        bail!("Hostname cloud-init invalide : caractères autorisés [a-zA-Z0-9_.-].");
+        bail!(tr!(
+            fr: "Hostname cloud-init invalide : caractères autorisés [a-zA-Z0-9_.-].",
+            en: "Invalid cloud-init hostname: allowed characters are [a-zA-Z0-9_.-]."
+        ));
     }
     Ok(())
 }
 
 pub fn validate_cloud_init_vm_id(vm_id: &str) -> Result<()> {
     if vm_id.is_empty() {
-        bail!("Identifiant instance cloud-init vide.");
+        bail!(tr!(
+            fr: "Identifiant instance cloud-init vide.",
+            en: "Empty cloud-init instance ID."
+        ));
     }
     if !vm_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        bail!("Identifiant instance '{vm_id}' invalide (attendu alphanum + '-').");
+        bail!(tr!(
+            fr: "Identifiant instance '{vm_id}' invalide (attendu alphanum + '-').",
+            en: "Invalid instance ID '{vm_id}' (expected alphanumerics and '-')."
+        ));
     }
     Ok(())
 }
@@ -118,7 +140,10 @@ pub fn write_user_data(
 ) -> Result<PathBuf> {
     validate_cloud_init_user(user)?;
     if public_key.contains('\n') {
-        bail!("Clé publique SSH cloud-init invalide : retour ligne interdit.");
+        bail!(tr!(
+            fr: "Clé publique SSH cloud-init invalide : retour ligne interdit.",
+            en: "Invalid cloud-init SSH public key: line breaks are not allowed."
+        ));
     }
     let host_key_block = match host_key {
         Some(key) => host_key_block(key)?,
@@ -193,7 +218,10 @@ fn host_key_block(key: &GuestHostKey) -> Result<String> {
             .lines()
             .any(|l| l.trim().is_empty() || l != l.trim())
     {
-        bail!("Clé d'hôte SSH cloud-init invalide.");
+        bail!(tr!(
+            fr: "Clé d'hôte SSH cloud-init invalide.",
+            en: "Invalid cloud-init SSH host key."
+        ));
     }
     let mut block = String::from(
         "ssh_deletekeys: true\nssh_genkeytypes: []\nssh_keys:\n  ed25519_private: |\n",
@@ -225,11 +253,13 @@ pub fn build_cloud_init_iso(instance_dir: &Path) -> Result<PathBuf> {
 
     for path in [&user_data, &meta_data] {
         if !path.is_file() {
-            anyhow::bail!(
-                "Fichier cloud-init manquant: {}. \
-                 Générez user-data et meta-data d'abord.",
-                path.display()
-            );
+            let path = path.display();
+            anyhow::bail!(tr!(
+                fr: "Fichier cloud-init manquant: {path}. \
+                     Générez user-data et meta-data d'abord.",
+                en: "Missing cloud-init file: {path}. \
+                     Generate user-data and meta-data first."
+            ));
         }
     }
 
@@ -242,9 +272,10 @@ pub fn build_cloud_init_iso(instance_dir: &Path) -> Result<PathBuf> {
         ],
     )
     .map_err(|err| {
-        err.context(
-            "cloud-localds a échoué. Installez cloud-image-utils ou exécutez `virtum doctor`.",
-        )
+        err.context(tr!(
+            fr: "cloud-localds a échoué. Installez cloud-image-utils ou exécutez `virtum doctor`.",
+            en: "cloud-localds failed. Install cloud-image-utils or run `virtum doctor`."
+        ))
     })?;
 
     Ok(iso_path)
