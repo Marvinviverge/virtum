@@ -140,6 +140,7 @@ Full example: [`examples/Virtumfile`](./examples/Virtumfile).
 | `snapshot create\|restore\|ls\|rm` | Snapshots of a VM or a whole lab |
 | `inventory`, `provision` | The lab's Ansible inventory and playbook |
 | `open`, `close` | Host firewall (ufw) for ports exposed to the local network |
+| `config` | User settings: output language |
 
 `virtum <command> --help` details every option.
 
@@ -200,6 +201,17 @@ Cold disk snapshots: VMs are stopped during the operation, then restarted.
 | `restart: no \| always \| unless-stopped` | Start at host boot, as in Docker Compose |
 
 Removing a machine from the Virtumfile does not delete it: `plan` reports it, `apply --prune` deletes it.
+
+## Language
+
+Virtum prints its messages and help in English or French, following the system language: French if the locale is French (`LANG=fr_FR.UTF-8`…), English otherwise. To choose:
+
+```bash
+virtum config set language en     # or fr; saved in ~/.config/virtum/config.yml
+virtum config get language        # active language and where it comes from
+virtum config unset language      # back to the system language
+VIRTUM_LANG=en virtum up          # for a single command
+```
 
 ## Storage
 

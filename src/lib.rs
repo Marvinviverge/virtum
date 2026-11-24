@@ -9,6 +9,8 @@ pub mod disk;
 pub mod doctor;
 pub mod firewall;
 pub mod fsutil;
+pub mod help_fr;
+pub mod i18n;
 pub mod images;
 pub mod inventory;
 pub mod lab;
@@ -29,15 +31,38 @@ pub mod share_access;
 pub mod snapshot;
 pub mod ssh;
 pub mod test_env;
+pub mod user_config;
 pub mod virtumfile;
 pub mod vm;
 
 use anyhow::{bail, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use cli::{Cli, Commands, SnapshotAction};
 
 pub fn run() -> Result<()> {
-    dispatch(Cli::parse().command)
+    init_language();
+    // Aide dans la langue active (français : textes de help_fr.rs).
+    let matches = help_fr::localize(Cli::command()).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    dispatch(cli.command)
+}
+
+/// Fixe la langue de la sortie avant toute autre chose (l'aide en dépend aussi) :
+/// `VIRTUM_LANG`, puis `~/.config/virtum/config.yml`, puis la locale du système.
+fn init_language() {
+    let loaded = user_config::load();
+    let config = loaded.language.zip(loaded.path.clone());
+    let resolution = i18n::resolve(|key| std::env::var(key).ok(), config);
+    if let Some(warning) = &resolution.warning {
+        eprintln!("warning: {warning}"); // i18n-ok : langue pas encore connue (contrat)
+    }
+    i18n::set_active(resolution);
+    for warning in &loaded.warnings {
+        eprintln!(
+            "{}",
+            tr!(fr: "avertissement : {}", en: "warning: {}", warning.message())
+        );
+    }
 }
 
 fn dispatch(command: Commands) -> Result<()> {
@@ -82,6 +107,7 @@ fn dispatch(command: Commands) -> Result<()> {
             destroy,
             purge,
         } => lab::down(file, destroy, purge)?,
+        Commands::Config { action } => user_config::command(action)?,
         Commands::Snapshot { action } => match action {
             SnapshotAction::Create {
                 name,
@@ -116,18 +142,21 @@ fn run_for_each_vm_destroy(refs: &[String], purge: bool) -> Result<()> {
             continue;
         }
         if let Err(err) = vm::destroy_vm(reference, purge) {
-            eprintln!("error [{reference}]: {err:#}");
+            eprintln!(
+                "{}",
+                tr!(fr: "erreur [{reference}] : {err:#}", en: "error [{reference}]: {err:#}")
+            );
             failures.push(reference.to_string());
         }
     }
     if failures.is_empty() {
         return Ok(());
     }
-    bail!(
-        "{} opération(s) ont échoué sur {} VM.",
-        failures.len(),
-        refs.len()
-    );
+    let (failed, total) = (failures.len(), refs.len());
+    bail!(tr!(
+        fr: "{failed} opération(s) ont échoué sur {total} VM.",
+        en: "{failed} of {total} VM operation(s) failed.",
+    ));
 }
 
 fn run_for_each_vm(refs: &[String], op: fn(&str) -> Result<()>) -> Result<()> {
@@ -138,16 +167,19 @@ fn run_for_each_vm(refs: &[String], op: fn(&str) -> Result<()>) -> Result<()> {
             continue;
         }
         if let Err(err) = op(reference) {
-            eprintln!("error [{reference}]: {err:#}");
+            eprintln!(
+                "{}",
+                tr!(fr: "erreur [{reference}] : {err:#}", en: "error [{reference}]: {err:#}")
+            );
             failures.push(reference.to_string());
         }
     }
     if failures.is_empty() {
         return Ok(());
     }
-    bail!(
-        "{} opération(s) ont échoué sur {} VM.",
-        failures.len(),
-        refs.len()
-    );
+    let (failed, total) = (failures.len(), refs.len());
+    bail!(tr!(
+        fr: "{failed} opération(s) ont échoué sur {total} VM.",
+        en: "{failed} of {total} VM operation(s) failed.",
+    ));
 }

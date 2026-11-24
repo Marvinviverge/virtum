@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::command::run_command;
 use crate::libvirt_access;
+use crate::tr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DigestAlgo {
@@ -101,10 +102,11 @@ pub fn resolve_image(os: &str, images_dir: &Path) -> Result<ResolvedImage> {
             });
         }
     }
-    bail!(
-        "OS non supporté: '{os}'. OS disponibles : {}.",
+    bail!(tr!(
+        fr: "OS non supporté: '{os}'. OS disponibles : {}.",
+        en: "Unsupported OS: '{os}'. Available OSes: {}.",
         format_supported_os_list()
-    );
+    ));
 }
 
 /// Télécharge et met en cache l'image sans lancer de VM (`virtum pull`).
@@ -114,7 +116,8 @@ pub async fn pull_image(os: &str, images_dir: &Path) -> Result<PathBuf> {
         set_libvirt_image_access(&image.local_path).await?;
         validate_base_image(&image).await?;
         crate::verr!(
-            "Image {} déjà en cache: {}",
+            fr: "Image {} déjà en cache: {}",
+            en: "Image {} already cached: {}",
             image.os,
             image.local_path.display()
         );
@@ -134,10 +137,10 @@ pub async fn ensure_image(image: &ResolvedImage) -> Result<PathBuf> {
 }
 
 async fn ensure_image_download(image: &ResolvedImage) -> Result<PathBuf> {
-    let parent = image
-        .local_path
-        .parent()
-        .context("Chemin image sans répertoire parent")?;
+    let parent = image.local_path.parent().context(tr!(
+        fr: "Chemin image sans répertoire parent",
+        en: "Image path has no parent directory"
+    ))?;
     fs::create_dir_all(parent).await?;
 
     let tmp_path = image.local_path.with_extension("qcow2.tmp");
@@ -146,11 +149,12 @@ async fn ensure_image_download(image: &ResolvedImage) -> Result<PathBuf> {
     }
 
     crate::verr!(
-        "Téléchargement de l'image {} depuis {}…",
+        fr: "Téléchargement de l'image {} depuis {}…",
+        en: "Downloading image {} from {}…",
         image.os,
         image.source_label
     );
-    crate::verr!("URL: {}", image.url);
+    crate::verr!("URL: {}", image.url); // i18n-ok : identique dans les deux langues
 
     download_and_verify(image, &tmp_path).await?;
     validate_qcow2_with_qemu_img(&tmp_path).await?;
@@ -158,8 +162,9 @@ async fn ensure_image_download(image: &ResolvedImage) -> Result<PathBuf> {
     fs::rename(&tmp_path, &image.local_path)
         .await
         .with_context(|| {
-            format!(
-                "Impossible de finaliser l'image vers {}",
+            tr!(
+                fr: "Impossible de finaliser l'image vers {}",
+                en: "Cannot finalize the image to {}",
                 image.local_path.display()
             )
         })?;
@@ -168,7 +173,8 @@ async fn ensure_image_download(image: &ResolvedImage) -> Result<PathBuf> {
     record_verified(image)?;
 
     crate::verr!(
-        "Image {} installée: {}",
+        fr: "Image {} installée: {}",
+        en: "Image {} installed: {}",
         image.os,
         image.local_path.display()
     );
@@ -176,15 +182,20 @@ async fn ensure_image_download(image: &ResolvedImage) -> Result<PathBuf> {
 }
 
 async fn download_and_verify(image: &ResolvedImage, dest: &Path) -> Result<()> {
-    let response = reqwest::get(image.url)
-        .await
-        .with_context(|| format!("Échec du téléchargement depuis {}", image.url))?;
+    let response = reqwest::get(image.url).await.with_context(|| {
+        tr!(
+            fr: "Échec du téléchargement depuis {}",
+            en: "Download failed from {}",
+            image.url
+        )
+    })?;
     if !response.status().is_success() {
-        bail!(
-            "Téléchargement refusé (HTTP {}): {}",
+        bail!(tr!(
+            fr: "Téléchargement refusé (HTTP {}): {}",
+            en: "Download refused (HTTP {}): {}",
             response.status(),
             image.url
-        );
+        ));
     }
 
     // Nouveau fichier uniquement, sans suivre de lien planté à cet emplacement.
@@ -195,7 +206,13 @@ async fn download_and_verify(image: &ResolvedImage, dest: &Path) -> Result<()> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(dest)
         .await
-        .with_context(|| format!("Impossible de créer {}", dest.display()))?;
+        .with_context(|| {
+            tr!(
+                fr: "Impossible de créer {}",
+                en: "Cannot create {}",
+                dest.display()
+            )
+        })?;
     let mut hasher: Box<dyn DynDigest> = match image.algo {
         DigestAlgo::Sha512 => Box::new(Sha512::new()),
         DigestAlgo::Sha256 => Box::new(Sha256::new()),
@@ -205,12 +222,19 @@ async fn download_and_verify(image: &ResolvedImage, dest: &Path) -> Result<()> {
 
     use futures_util::StreamExt;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("Erreur pendant le téléchargement de l'image")?;
+        let chunk = chunk.context(tr!(
+            fr: "Erreur pendant le téléchargement de l'image",
+            en: "Error while downloading the image"
+        ))?;
         hasher.update(&chunk);
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
         if downloaded > 0 && downloaded.is_multiple_of(50 * 1024 * 1024) {
-            crate::verr!("  … {} MiB téléchargés", downloaded / (1024 * 1024));
+            crate::verr!(
+                fr: "  … {} MiB téléchargés",
+                en: "  … {} MiB downloaded",
+                downloaded / (1024 * 1024)
+            );
         }
     }
 
@@ -224,14 +248,18 @@ async fn download_and_verify(image: &ResolvedImage, dest: &Path) -> Result<()> {
     };
     if digest != image.digest {
         fs::remove_file(dest).await.ok();
-        bail!(
-            "Checksum {algo_name} invalide pour l'image téléchargée.\n\
+        bail!(tr!(
+            fr: "Checksum {algo_name} invalide pour l'image téléchargée.\n\
              attendu: {}\n\
              obtenu:  {}\n\
              L'image n'a pas été installée.",
+            en: "Invalid {algo_name} checksum for the downloaded image.\n\
+             expected: {}\n\
+             got:      {}\n\
+             The image was not installed.",
             image.digest,
             digest
-        );
+        ));
     }
 
     Ok(())
@@ -265,10 +293,11 @@ async fn validate_qcow2_with_qemu_img(path: &Path) -> Result<()> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.contains("file format: qcow2") {
         fs::remove_file(path).await.ok();
-        bail!(
-            "qemu-img info n'a pas confirmé le format qcow2 pour {}",
+        bail!(tr!(
+            fr: "qemu-img info n'a pas confirmé le format qcow2 pour {}",
+            en: "qemu-img info did not confirm the qcow2 format for {}",
             path.display()
-        );
+        ));
     }
     Ok(())
 }
@@ -284,51 +313,60 @@ async fn validate_qcow2_with_qemu_img(path: &Path) -> Result<()> {
 async fn validate_base_image(image: &ResolvedImage) -> Result<()> {
     let path = &image.local_path;
     let meta = std::fs::symlink_metadata(path)
-        .with_context(|| format!("Impossible de lire {}", path.display()))?;
+        .with_context(|| tr!(fr: "Impossible de lire {}", en: "Cannot read {}", path.display()))?;
     if meta.file_type().is_symlink() || !meta.is_file() {
-        bail!(
-            "L'image en cache {} n'est pas un fichier régulier. Supprimez-la puis relancez \
+        bail!(tr!(
+            fr: "L'image en cache {} n'est pas un fichier régulier. Supprimez-la puis relancez \
              `virtum pull`.",
+            en: "The cached image {} is not a regular file. Delete it, then run \
+             `virtum pull` again.",
             path.display()
-        );
+        ));
     }
     let output = run_command("qemu-img", &["info", "-U", crate::command::path_arg(path)?])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.contains("file format: qcow2") {
-        bail!(
-            "qemu-img info n'a pas confirmé le format qcow2 pour {}",
+        bail!(tr!(
+            fr: "qemu-img info n'a pas confirmé le format qcow2 pour {}",
+            en: "qemu-img info did not confirm the qcow2 format for {}",
             path.display()
-        );
+        ));
     }
     if stdout
         .lines()
         .any(|l| l.trim_start().starts_with("backing file:"))
     {
-        bail!(
-            "L'image en cache {} déclare un fichier de base qcow2 : refusée. Supprimez-la puis \
+        bail!(tr!(
+            fr: "L'image en cache {} déclare un fichier de base qcow2 : refusée. Supprimez-la puis \
              relancez `virtum pull`.",
+            en: "The cached image {} declares a qcow2 backing file: refused. Delete it, then \
+             run `virtum pull` again.",
             path.display()
-        );
+        ));
     }
     if stamp_matches(image, &meta) {
         return Ok(());
     }
     crate::verr!(
-        "Vérification du condensat de l'image {} (modifiée depuis la dernière vérification)…",
+        fr: "Vérification du condensat de l'image {} (modifiée depuis la dernière vérification)…",
+        en: "Verifying the checksum of image {} (modified since the last check)…",
         image.os
     );
     let (algo, expected) = (image.algo, image.digest);
     let p = path.clone();
     let digest = tokio::task::spawn_blocking(move || hash_file(&p, algo))
         .await
-        .context("spawn_blocking hash image")??;
+        .context("spawn_blocking hash image")??; // i18n-ok : libellé technique interne
     if digest != expected {
-        bail!(
-            "L'image en cache {} ne correspond plus au condensat épinglé (modifiée ?).\n\
+        bail!(tr!(
+            fr: "L'image en cache {} ne correspond plus au condensat épinglé (modifiée ?).\n\
              attendu: {expected}\nobtenu:  {digest}\n\
              Supprimez-la puis relancez `virtum pull`.",
+            en: "The cached image {} no longer matches the pinned checksum (modified?).\n\
+             expected: {expected}\ngot:      {digest}\n\
+             Delete it, then run `virtum pull` again.",
             path.display()
-        );
+        ));
     }
     record_verified(image)
 }
@@ -367,8 +405,13 @@ fn stamp_matches(image: &ResolvedImage, meta: &std::fs::Metadata) -> bool {
 }
 
 fn record_verified(image: &ResolvedImage) -> Result<()> {
-    let meta = std::fs::symlink_metadata(&image.local_path)
-        .with_context(|| format!("Impossible de lire {}", image.local_path.display()))?;
+    let meta = std::fs::symlink_metadata(&image.local_path).with_context(|| {
+        tr!(
+            fr: "Impossible de lire {}",
+            en: "Cannot read {}",
+            image.local_path.display()
+        )
+    })?;
     crate::fsutil::write_atomic(
         &stamp_path(image),
         format!("{}\n", stamp_of(&meta, image.digest)).as_bytes(),
@@ -379,7 +422,7 @@ fn record_verified(image: &ResolvedImage) -> Result<()> {
 fn hash_file(path: &Path, algo: DigestAlgo) -> Result<String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)
-        .with_context(|| format!("Impossible d'ouvrir {}", path.display()))?;
+        .with_context(|| tr!(fr: "Impossible d'ouvrir {}", en: "Cannot open {}", path.display()))?;
     let mut hasher: Box<dyn DynDigest> = match algo {
         DigestAlgo::Sha512 => Box::new(Sha512::new()),
         DigestAlgo::Sha256 => Box::new(Sha256::new()),
@@ -400,7 +443,7 @@ async fn set_libvirt_image_access(path: &Path) -> Result<()> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || libvirt_access::set_image_file_for_libvirt(&path))
         .await
-        .context("spawn_blocking set_image_file_for_libvirt")??;
+        .context("spawn_blocking set_image_file_for_libvirt")??; // i18n-ok : libellé technique interne
     Ok(())
 }
 
@@ -409,7 +452,10 @@ pub fn pull(os: &str) -> Result<()> {
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime"
+        ))?
         .block_on(pull_async(os))
 }
 

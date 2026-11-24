@@ -2,11 +2,11 @@ name: demo
 
 machines:
   web:
-    os: debian-12
+    os: debian-13
     ports:
       - "18080:80"
     provision:
       - apt-get update -q
       - apt-get install -y -q nginx
   db:
-    os: ubuntu-24.04
+    os: ubuntu-26.04

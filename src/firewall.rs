@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, VirtumPaths};
+use crate::tr;
 use crate::virtumfile::{self, LanFirewallRule};
 
 const FIREWALL_STATE_PREFIX: &str = "firewall-";
@@ -25,10 +26,12 @@ pub fn open(file: Option<PathBuf>) -> Result<()> {
     let rules = virtumfile::collect_lan_firewall_rules(&lab)?;
 
     if rules.is_empty() {
-        bail!(
-            "Aucun port à ouvrir : définissez `bind: lan` et des `ports:` (ex. 18080:80) \
-             sur au moins une machine du Virtumfile."
-        );
+        bail!(tr!(
+            fr: "Aucun port à ouvrir : définissez `bind: lan` et des `ports:` (ex. 18080:80) \
+             sur au moins une machine du Virtumfile.",
+            en: "No port to open: set `bind: lan` and `ports:` (e.g. 18080:80) \
+             on at least one machine of the Virtumfile."
+        ));
     }
 
     ensure_ufw_available()?;
@@ -45,19 +48,27 @@ pub fn open(file: Option<PathBuf>) -> Result<()> {
     save_firewall_state(&paths, &lab.name, &virtumfile_path, &rules)?;
 
     println!(
-        "Pare-feu : {} règle(s) ajoutée(s) pour le lab '{}'.",
-        rules.len(),
-        lab.name
+        "{}",
+        tr!(
+            fr: "Pare-feu : {} règle(s) ajoutée(s) pour le lab '{}'.",
+            en: "Firewall: {} rule(s) added for lab '{}'.",
+            rules.len(),
+            lab.name
+        )
     );
     for rule in &rules {
         println!(
-            "  allow {}/tcp — machine '{}' ({}:{})",
+            "  allow {}/tcp — machine '{}' ({}:{})", // i18n-ok : identique en anglais
             rule.host_port, rule.machine, rule.host_port, rule.guest_port
         );
     }
     println!(
-        "Pour retirer ces règles : virtum close -f {}",
-        virtumfile_path.display()
+        "{}",
+        tr!(
+            fr: "Pour retirer ces règles : virtum close -f {}",
+            en: "To remove these rules: virtum close -f {}",
+            virtumfile_path.display()
+        )
     );
     Ok(())
 }
@@ -72,15 +83,25 @@ pub fn close(file: Option<PathBuf>) -> Result<()> {
         None => {
             let rules = virtumfile::collect_lan_firewall_rules(&lab)?;
             if rules.is_empty() {
-                bail!(
-                    "Aucune règle Virtum enregistrée pour le lab '{}' et aucun port `bind: lan` dans le Virtumfile.",
+                bail!(tr!(
+                    fr: "Aucune règle Virtum enregistrée pour le lab '{}' \
+                     et aucun port `bind: lan` dans le Virtumfile.",
+                    en: "No Virtum rule recorded for lab '{}' \
+                     and no `bind: lan` port in the Virtumfile.",
                     lab.name
-                );
+                ));
             }
             eprintln!(
-                "Note : aucun `virtum open` enregistré pour '{}'. \
-                 Fermeture des ports `bind: lan` du Virtumfile (ex. ouverture manuelle avec ufw).",
-                lab.name
+                "{}",
+                tr!(
+                    fr: "Note : aucun `virtum open` enregistré pour '{}'. \
+                     Fermeture des ports `bind: lan` du Virtumfile \
+                     (ex. ouverture manuelle avec ufw).",
+                    en: "Note: no `virtum open` recorded for '{}'. \
+                     Closing the Virtumfile's `bind: lan` ports \
+                     (e.g. opened manually with ufw).",
+                    lab.name
+                )
             );
             LabFirewallState {
                 lab_name: lab.name.clone(),
@@ -93,7 +114,11 @@ pub fn close(file: Option<PathBuf>) -> Result<()> {
 
     if state.rules.is_empty() {
         let _ = remove_firewall_state(&paths, &lab.name);
-        bail!("État pare-feu vide pour le lab '{}'.", lab.name);
+        bail!(tr!(
+            fr: "État pare-feu vide pour le lab '{}'.",
+            en: "Empty firewall state for lab '{}'.",
+            lab.name
+        ));
     }
 
     ensure_ufw_available()?;
@@ -110,9 +135,13 @@ pub fn close(file: Option<PathBuf>) -> Result<()> {
     remove_firewall_state(&paths, &lab.name)?;
 
     println!(
-        "Pare-feu : {} règle(s) retirée(s) pour le lab '{}'.",
-        state.rules.len(),
-        lab.name
+        "{}",
+        tr!(
+            fr: "Pare-feu : {} règle(s) retirée(s) pour le lab '{}'.",
+            en: "Firewall: {} rule(s) removed for lab '{}'.",
+            state.rules.len(),
+            lab.name
+        )
     );
     Ok(())
 }
@@ -179,7 +208,8 @@ fn save_firewall_state(
         opened_at: crate::fsutil::now_rfc3339(),
     };
     let path = firewall_state_path(paths, lab_name);
-    let content = serde_json::to_string_pretty(&state).context("sérialisation pare-feu")?;
+    let content = serde_json::to_string_pretty(&state)
+        .context(tr!(fr: "sérialisation pare-feu", en: "serializing firewall state"))?;
     crate::fsutil::write_atomic(&path, format!("{content}\n").as_bytes(), 0o644)
 }
 
@@ -188,16 +218,18 @@ fn load_firewall_state(paths: &VirtumPaths, lab_name: &str) -> Result<Option<Lab
     let Some(content) = crate::fsutil::read_owned(&path)? else {
         return Ok(None);
     };
-    let state: LabFirewallState = serde_json::from_str(&content)
-        .with_context(|| format!("État pare-feu invalide: {}", path.display()))?;
+    let state: LabFirewallState = serde_json::from_str(&content).with_context(
+        || tr!(fr: "État pare-feu invalide: {}", en: "Invalid firewall state: {}", path.display()),
+    )?;
     Ok(Some(state))
 }
 
 fn remove_firewall_state(paths: &VirtumPaths, lab_name: &str) -> Result<()> {
     let path = firewall_state_path(paths, lab_name);
     if path.is_file() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("Impossible de supprimer {}", path.display()))?;
+        std::fs::remove_file(&path).with_context(
+            || tr!(fr: "Impossible de supprimer {}", en: "Cannot delete {}", path.display()),
+        )?;
     }
     Ok(())
 }
@@ -211,19 +243,24 @@ fn ensure_ufw_available() -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
     if !which {
-        bail!(
-            "ufw est introuvable. Sur Debian/Ubuntu : sudo apt install ufw. \
-             Pare-feu firewalld / nftables : ouvrez les ports manuellement."
-        );
+        bail!(tr!(
+            fr: "ufw est introuvable. Sur Debian/Ubuntu : sudo apt install ufw. \
+             Pare-feu firewalld / nftables : ouvrez les ports manuellement.",
+            en: "ufw not found. On Debian/Ubuntu: sudo apt install ufw. \
+             With a firewalld / nftables firewall: open the ports manually."
+        ));
     }
 
     // `ufw status` exige root et sa sortie dépend de la locale ; lire ufw.conf suffit.
     if !ufw_enabled_in_config()? {
-        bail!(
-            "ufw n'est pas activé (ENABLED=no dans /etc/ufw/ufw.conf). \
+        bail!(tr!(
+            fr: "ufw n'est pas activé (ENABLED=no dans /etc/ufw/ufw.conf). \
              Activez-le avec : sudo ufw enable\n\
-             Puis relancez : virtum open -f <Virtumfile>"
-        );
+             Puis relancez : virtum open -f <Virtumfile>",
+            en: "ufw is not enabled (ENABLED=no in /etc/ufw/ufw.conf). \
+             Enable it with: sudo ufw enable\n\
+             Then run again: virtum open -f <Virtumfile>"
+        ));
     }
     Ok(())
 }
@@ -232,7 +269,7 @@ fn ensure_ufw_available() -> Result<()> {
 fn ufw_enabled_in_config() -> Result<bool> {
     const UFW_CONF: &str = "/etc/ufw/ufw.conf";
     let content = std::fs::read_to_string(UFW_CONF)
-        .with_context(|| format!("Impossible de lire {UFW_CONF}"))?;
+        .with_context(|| tr!(fr: "Impossible de lire {UFW_CONF}", en: "Cannot read {UFW_CONF}"))?;
     Ok(parse_ufw_enabled(&content))
 }
 
@@ -244,12 +281,25 @@ fn parse_ufw_enabled(content: &str) -> bool {
 }
 
 fn print_sudo_preview(commands: &[String]) {
-    eprintln!("Les commandes suivantes seront exécutées avec les droits administrateur (sudo) :\n");
+    eprintln!(
+        "{}",
+        tr!(
+            fr: "Les commandes suivantes seront exécutées avec les droits \
+             administrateur (sudo) :\n",
+            en: "The following commands will be run with administrator rights (sudo):\n"
+        )
+    );
     for cmd in commands {
         eprintln!("  {cmd}");
     }
     eprintln!();
-    eprintln!("Un mot de passe sudo peut vous être demandé.\n");
+    eprintln!(
+        "{}",
+        tr!(
+            fr: "Un mot de passe sudo peut vous être demandé.\n",
+            en: "You may be asked for your sudo password.\n"
+        )
+    );
 }
 
 fn run_sudo_commands(commands: &[String]) -> Result<()> {
@@ -265,15 +315,16 @@ fn run_sudo_commands(commands: &[String]) -> Result<()> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .context("Impossible d'exécuter sudo")?;
+        .context(tr!(fr: "Impossible d'exécuter sudo", en: "Cannot run sudo"))?;
 
     if status.success() {
         return Ok(());
     }
-    bail!(
-        "sudo a échoué (code {:?}). Vérifiez ufw et réessayez.",
+    bail!(tr!(
+        fr: "sudo a échoué (code {:?}). Vérifiez ufw et réessayez.",
+        en: "sudo failed (code {:?}). Check ufw and try again.",
         status.code()
-    );
+    ));
 }
 
 #[cfg(test)]

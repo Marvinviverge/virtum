@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 
 use crate::command::{path_arg, run_command};
 use crate::config::{self, VirtumPaths};
+use crate::tr;
 
 pub const LIBVIRT_GROUP: &str = "libvirt";
 /// Groupe partagé par l'utilisateur Virtum et `libvirt-qemu` (sockets virtiofs).
@@ -34,14 +35,21 @@ pub fn prepare_storage_for_system_qemu(
 /// Message d'aide si `virsh start` échoue sur Permission denied.
 pub fn permission_denied_hint(paths: &VirtumPaths) -> String {
     if config::uses_var_lib_storage() {
-        return format!(
-            "QEMU système (libvirt-qemu) ne peut pas accéder aux fichiers ou sockets virtiofs sous {}.\n\
+        return tr!(
+            fr: "QEMU système (libvirt-qemu) ne peut pas accéder aux fichiers ou sockets virtiofs sous {}.\n\
              Sur Ubuntu/Debian, AppArmor bloque souvent les sockets virtiofsd externes :\n\
                sudo {}/scripts/setup-apparmor-virtiofs.sh\n\
              Puis vérifiez les groupes libvirt et kvm (virtum doctor). Si besoin :\n\
                sudo chown -R \"$USER:libvirt\" {}\n\
                sudo chgrp -R kvm {}/instances\n\
              Relancez ensuite virtum up.",
+            en: "System QEMU (libvirt-qemu) cannot access the files or virtiofs sockets under {}.\n\
+             On Ubuntu/Debian, AppArmor often blocks external virtiofsd sockets:\n\
+               sudo {}/scripts/setup-apparmor-virtiofs.sh\n\
+             Then check the libvirt and kvm groups (virtum doctor). If needed:\n\
+               sudo chown -R \"$USER:libvirt\" {}\n\
+               sudo chgrp -R kvm {}/instances\n\
+             Then run virtum up again.",
             paths.root.display(),
             env!("CARGO_MANIFEST_DIR"),
             paths.root.display(),
@@ -49,12 +57,17 @@ pub fn permission_denied_hint(paths: &VirtumPaths) -> String {
         );
     }
 
-    format!(
-        "QEMU système (libvirt-qemu) ne peut pas lire les disques sous {} (AppArmor bloque souvent $HOME).\n\
+    tr!(
+        fr: "QEMU système (libvirt-qemu) ne peut pas lire les disques sous {} (AppArmor bloque souvent $HOME).\n\
          Solution recommandée (une fois) :\n\
            sudo {}/scripts/setup-var-lib.sh\n\
          Puis relancez virtum run (stockage dans /var/lib/virtum).\n\
          Alternative : setfacl sur $HOME + chown de l'image — voir README.",
+        en: "System QEMU (libvirt-qemu) cannot read the disks under {} (AppArmor often blocks $HOME).\n\
+         Recommended fix (once):\n\
+           sudo {}/scripts/setup-var-lib.sh\n\
+         Then run virtum run again (storage in /var/lib/virtum).\n\
+         Alternative: setfacl on $HOME + chown of the image — see README.",
         paths.root.display(),
         env!("CARGO_MANIFEST_DIR")
     )
@@ -106,10 +119,9 @@ fn prepare_home_storage(
     disk_path: &Path,
     iso_path: &Path,
 ) -> Result<()> {
-    let home = paths
-        .root
-        .parent()
-        .context("~/.virtum sans répertoire parent")?;
+    let home = paths.root.parent().context(
+        tr!(fr: "~/.virtum sans répertoire parent", en: "~/.virtum has no parent directory"),
+    )?;
 
     // Avec setfacl, l'ACL nominative suffit : pas de o+x sur $HOME (sinon tout compte
     // local pourrait traverser $HOME et atteindre les dossiers partagés). Sans setfacl,
@@ -144,22 +156,32 @@ fn prepare_home_storage(
 fn prepare_data_file_for_qemu(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let meta = fs::metadata(path)
-        .with_context(|| format!("Impossible de lire les métadonnées de {}", path.display()))?;
+    let meta = fs::metadata(path).with_context(|| {
+        tr!(
+            fr: "Impossible de lire les métadonnées de {}",
+            en: "Cannot read the metadata of {}",
+            path.display(),
+        )
+    })?;
     let current_uid = unsafe { libc::getuid() };
 
     if meta.uid() != current_uid {
-        anyhow::bail!(
-            "Le fichier {} appartient à uid {} (souvent libvirt-qemu après un run libvirt). \
+        anyhow::bail!(tr!(
+            fr: "Le fichier {} appartient à uid {} (souvent libvirt-qemu après un run libvirt). \
              Repassez-le sous votre utilisateur :\n\
                sudo chown \"$USER:{LIBVIRT_GROUP}\" {}\n\
                chmod 664 {}\n\
              Ou migrez vers /var/lib/virtum : sudo ./scripts/setup-var-lib.sh",
+            en: "The file {} belongs to uid {} (often libvirt-qemu after a libvirt run). \
+             Give it back to your user:\n\
+               sudo chown \"$USER:{LIBVIRT_GROUP}\" {}\n\
+               chmod 664 {}\n\
+             Or migrate to /var/lib/virtum: sudo ./scripts/setup-var-lib.sh",
             path.display(),
             meta.uid(),
             path.display(),
             path.display()
-        );
+        ));
     }
 
     let _ = grant_qemu_acl(path, false);
@@ -173,8 +195,13 @@ fn set_libvirt_group_readable(path: &Path, is_dir: bool) -> Result<()> {
 fn set_group_access(path: &Path, group: &str, is_dir: bool, is_socket: bool) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let meta = fs::metadata(path)
-        .with_context(|| format!("Impossible de lire les métadonnées de {}", path.display()))?;
+    let meta = fs::metadata(path).with_context(|| {
+        tr!(
+            fr: "Impossible de lire les métadonnées de {}",
+            en: "Cannot read the metadata of {}",
+            path.display(),
+        )
+    })?;
     let current_uid = unsafe { libc::getuid() };
 
     if meta.uid() != current_uid {
@@ -199,9 +226,11 @@ fn set_group_access(path: &Path, group: &str, is_dir: bool, is_socket: bool) -> 
     }
 
     run_command("chgrp", &[group, path_arg(path)?]).with_context(|| {
-        format!(
-            "chgrp {group} a échoué sur {}. \
+        tr!(
+            fr: "chgrp {group} a échoué sur {}. \
              Ajoutez-vous aux groupes libvirt et kvm (virtum doctor).",
+            en: "chgrp {group} failed on {}. \
+             Add yourself to the libvirt and kvm groups (virtum doctor).",
             path.display()
         )
     })?;
@@ -211,8 +240,13 @@ fn set_group_access(path: &Path, group: &str, is_dir: bool, is_socket: bool) -> 
     // l'utilisateur Virtum.
     let mut perms = meta.permissions();
     perms.set_mode(mode);
-    fs::set_permissions(path, perms)
-        .with_context(|| format!("Impossible de chmod {mode:o} sur {}", path.display()))?;
+    fs::set_permissions(path, perms).with_context(|| {
+        tr!(
+            fr: "Impossible de chmod {mode:o} sur {}",
+            en: "Cannot chmod {mode:o} {}",
+            path.display(),
+        )
+    })?;
     Ok(())
 }
 
@@ -237,9 +271,11 @@ fn grant_qemu_acl(path: &Path, is_dir: bool) -> Result<()> {
         format!("u:{LIBVIRT_QEMU_USER}:r")
     };
     run_command("setfacl", &["-m", &spec, path_arg(path)?]).with_context(|| {
-        format!(
-            "setfacl {spec} a échoué sur {}. \
+        tr!(
+            fr: "setfacl {spec} a échoué sur {}. \
              libvirt-qemu doit traverser ce chemin pour virtiofs.",
+            en: "setfacl {spec} failed on {}. \
+             libvirt-qemu must traverse this path for virtiofs.",
             path.display()
         )
     })?;
@@ -252,8 +288,13 @@ fn grant_qemu_traverse_acl(path: &Path) -> Result<()> {
         return Ok(());
     }
     let spec = format!("u:{LIBVIRT_QEMU_USER}:x");
-    run_command("setfacl", &["-m", &spec, path_arg(path)?])
-        .with_context(|| format!("setfacl {spec} a échoué sur {}.", path.display()))?;
+    run_command("setfacl", &["-m", &spec, path_arg(path)?]).with_context(|| {
+        tr!(
+            fr: "setfacl {spec} a échoué sur {}.",
+            en: "setfacl {spec} failed on {}.",
+            path.display(),
+        )
+    })?;
     Ok(())
 }
 
@@ -264,9 +305,11 @@ fn grant_qemu_socket_acl(path: &Path) -> Result<()> {
     }
     let spec = format!("u:{LIBVIRT_QEMU_USER}:rw");
     run_command("setfacl", &["-m", &spec, path_arg(path)?]).with_context(|| {
-        format!(
-            "setfacl {spec} a échoué sur {}. \
+        tr!(
+            fr: "setfacl {spec} a échoué sur {}. \
              QEMU (libvirt-qemu) ne pourra pas se connecter au socket virtiofs.",
+            en: "setfacl {spec} failed on {}. \
+             QEMU (libvirt-qemu) will not be able to connect to the virtiofs socket.",
             path.display()
         )
     })?;
@@ -296,16 +339,22 @@ fn setfacl_available() -> bool {
 }
 
 fn ensure_others_traverse(dir: &Path) -> Result<()> {
-    let meta = fs::metadata(dir)
-        .with_context(|| format!("Impossible de lire les permissions de {}", dir.display()))?;
+    let meta = fs::metadata(dir).with_context(|| {
+        tr!(
+            fr: "Impossible de lire les permissions de {}",
+            en: "Cannot read the permissions of {}",
+            dir.display(),
+        )
+    })?;
     if !meta.is_dir() {
         return Ok(());
     }
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o001 == 0 {
         fs::set_permissions(dir, Permissions::from_mode(mode | 0o001)).with_context(|| {
-            format!(
-                "Impossible d'ajouter le bit traversée (o+x) sur {}.",
+            tr!(
+                fr: "Impossible d'ajouter le bit traversée (o+x) sur {}.",
+                en: "Cannot add the traverse bit (o+x) on {}.",
                 dir.display()
             )
         })?;
@@ -342,34 +391,39 @@ fn set_private_instance_dir(instance_dir: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
     let meta = fs::symlink_metadata(instance_dir).with_context(|| {
-        format!(
-            "Impossible de lire les métadonnées de {}",
+        tr!(
+            fr: "Impossible de lire les métadonnées de {}",
+            en: "Cannot read the metadata of {}",
             instance_dir.display()
         )
     })?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
-        anyhow::bail!(
-            "{} n'est pas un répertoire d'instance valide (lien symbolique ?).",
+        anyhow::bail!(tr!(
+            fr: "{} n'est pas un répertoire d'instance valide (lien symbolique ?).",
+            en: "{} is not a valid instance directory (symbolic link?).",
             instance_dir.display()
-        );
+        ));
     }
     if meta.uid() != crate::fsutil::current_uid() {
-        anyhow::bail!(
-            "Le répertoire d'instance {} appartient à l'uid {} : refus de l'utiliser.",
+        anyhow::bail!(tr!(
+            fr: "Le répertoire d'instance {} appartient à l'uid {} : refus de l'utiliser.",
+            en: "The instance directory {} belongs to uid {}: refusing to use it.",
             instance_dir.display(),
             meta.uid()
-        );
+        ));
     }
     run_command("chgrp", &[KVM_GROUP, path_arg(instance_dir)?]).with_context(|| {
-        format!(
-            "chgrp {KVM_GROUP} a échoué sur {}. Ajoutez-vous au groupe kvm (virtum doctor).",
+        tr!(
+            fr: "chgrp {KVM_GROUP} a échoué sur {}. Ajoutez-vous au groupe kvm (virtum doctor).",
+            en: "chgrp {KVM_GROUP} failed on {}. Add yourself to the kvm group (virtum doctor).",
             instance_dir.display()
         )
     })?;
     fs::set_permissions(instance_dir, Permissions::from_mode(INSTANCE_DIR_MODE)).with_context(
         || {
-            format!(
-                "Impossible de chmod {INSTANCE_DIR_MODE:o} sur {}",
+            tr!(
+                fr: "Impossible de chmod {INSTANCE_DIR_MODE:o} sur {}",
+                en: "Cannot chmod {INSTANCE_DIR_MODE:o} {}",
                 instance_dir.display()
             )
         },
@@ -386,8 +440,13 @@ pub fn prepare_virtiofs_socket(socket_path: &Path) -> Result<()> {
         return Ok(());
     }
     if setfacl_available() {
-        fs::set_permissions(socket_path, Permissions::from_mode(0o600))
-            .with_context(|| format!("Impossible de chmod 600 sur {}", socket_path.display()))?;
+        fs::set_permissions(socket_path, Permissions::from_mode(0o600)).with_context(|| {
+            tr!(
+                fr: "Impossible de chmod 600 sur {}",
+                en: "Cannot chmod 600 {}",
+                socket_path.display(),
+            )
+        })?;
         return grant_qemu_socket_acl(socket_path);
     }
     warn_socket_group_fallback_once();
@@ -408,8 +467,10 @@ fn warn_socket_group_fallback_once() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
         crate::verr!(
-            "Avertissement : setfacl absent ; les sockets virtiofs sont ouverts au groupe kvm \
-             (tout membre de kvm peut s'y connecter). Installez le paquet acl."
+            fr: "Avertissement : setfacl absent ; les sockets virtiofs sont ouverts au groupe kvm \
+             (tout membre de kvm peut s'y connecter). Installez le paquet acl.",
+            en: "Warning: setfacl is missing; the virtiofs sockets are open to the kvm group \
+             (any kvm member can connect to them). Install the acl package."
         );
     }
 }
@@ -435,16 +496,22 @@ pub fn set_image_file_for_libvirt(path: &Path) -> Result<()> {
 fn set_base_image_read_only(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let meta = fs::metadata(path)
-        .with_context(|| format!("Impossible de lire les métadonnées de {}", path.display()))?;
+    let meta = fs::metadata(path).with_context(|| {
+        tr!(
+            fr: "Impossible de lire les métadonnées de {}",
+            en: "Cannot read the metadata of {}",
+            path.display(),
+        )
+    })?;
     let current_uid = unsafe { libc::getuid() };
     if meta.uid() != current_uid || meta.permissions().mode() & 0o7777 == BASE_IMAGE_MODE {
         return Ok(());
     }
     let mut perms = meta.permissions();
     perms.set_mode(BASE_IMAGE_MODE);
-    fs::set_permissions(path, perms)
-        .with_context(|| format!("Impossible de chmod 444 sur {}", path.display()))
+    fs::set_permissions(path, perms).with_context(
+        || tr!(fr: "Impossible de chmod 444 sur {}", en: "Cannot chmod 444 {}", path.display()),
+    )
 }
 
 #[cfg(test)]

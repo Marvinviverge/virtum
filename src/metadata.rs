@@ -8,6 +8,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::port_forward::{PortBind, PortForward};
+use crate::tr;
 use crate::virtumfile::{MountSpec, RestartPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,11 +81,12 @@ pub async fn load_metadata(path: &Path) -> Result<Metadata> {
 
     let content = fs::read_to_string(path)
         .await
-        .with_context(|| format!("Impossible de lire {}", path.display()))?;
+        .with_context(|| tr!(fr: "Impossible de lire {}", en: "Cannot read {}", path.display()))?;
 
     serde_json::from_str(&content).with_context(|| {
-        format!(
-            "metadata.json invalide (JSON malformé ou schéma incorrect): {}",
+        tr!(
+            fr: "metadata.json invalide (JSON malformé ou schéma incorrect): {}",
+            en: "Invalid metadata.json (malformed JSON or wrong schema): {}",
             path.display()
         )
     })
@@ -93,8 +95,9 @@ pub async fn load_metadata(path: &Path) -> Result<Metadata> {
 /// Persists metadata atomically: `.tmp` → fsync → rename.
 pub async fn save_metadata_atomic(path: &Path, metadata: &Metadata) -> Result<()> {
     let tmp_path = metadata_tmp_path(path);
-    let content =
-        serde_json::to_string_pretty(metadata).context("Impossible de sérialiser metadata.json")?;
+    let content = serde_json::to_string_pretty(metadata).context(
+        tr!(fr: "Impossible de sérialiser metadata.json", en: "Cannot serialize metadata.json"),
+    )?;
 
     // Pas de suivi de lien : un `.tmp` remplacé par un lien ne redirige pas l'écriture.
     let mut file = fs::OpenOptions::new()
@@ -105,14 +108,17 @@ pub async fn save_metadata_atomic(path: &Path, metadata: &Metadata) -> Result<()
         .custom_flags(libc::O_NOFOLLOW)
         .open(&tmp_path)
         .await
-        .with_context(|| format!("Impossible de créer {}", tmp_path.display()))?;
+        .with_context(
+            || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", tmp_path.display()),
+        )?;
     file.write_all(format!("{content}\n").as_bytes()).await?;
     file.sync_all().await?;
     drop(file);
 
     fs::rename(&tmp_path, path).await.with_context(|| {
-        format!(
-            "Impossible de renommer {} vers {}",
+        tr!(
+            fr: "Impossible de renommer {} vers {}",
+            en: "Cannot rename {} to {}",
             tmp_path.display(),
             path.display()
         )
@@ -147,24 +153,34 @@ fn find_by_name<'a>(metadata: &'a Metadata, name: &str) -> Option<&'a Instance> 
 pub fn validate_name(name: &str) -> Result<()> {
     let n = name.trim();
     if n != name {
-        bail!("Le nom '{name}' ne doit pas commencer ni finir par un espace ou un saut de ligne.");
+        bail!(tr!(
+            fr: "Le nom '{name}' ne doit pas commencer ni finir par un espace ou un saut de ligne.",
+            en: "The name '{name}' must not start or end with a space or a line break.",
+        ));
     }
     if n.is_empty() {
-        bail!("Le nom de VM ne peut pas être vide.");
+        bail!(tr!(fr: "Le nom de VM ne peut pas être vide.", en: "The VM name cannot be empty."));
     }
     if n.len() > 32 {
-        bail!("Le nom '{name}' est trop long (max 32 caractères).");
+        bail!(tr!(
+            fr: "Le nom '{name}' est trop long (max 32 caractères).",
+            en: "The name '{name}' is too long (max 32 characters).",
+        ));
     }
     if !n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
-        bail!("Le nom '{name}' doit commencer par une lettre ou un chiffre.");
+        bail!(tr!(
+            fr: "Le nom '{name}' doit commencer par une lettre ou un chiffre.",
+            en: "The name '{name}' must start with a letter or a digit.",
+        ));
     }
     if !n
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        bail!(
-            "Le nom '{name}' n'est pas valide (autorisé : lettres, chiffres, tiret, underscore)."
-        );
+        bail!(tr!(
+            fr: "Le nom '{name}' n'est pas valide (autorisé : lettres, chiffres, tiret, underscore).",
+            en: "The name '{name}' is not valid (allowed: letters, digits, hyphen, underscore)."
+        ));
     }
     Ok(())
 }
@@ -174,16 +190,20 @@ pub fn resolve_instance_ref<'a>(metadata: &'a Metadata, reference: &str) -> Resu
     let reference = reference.trim();
     if let Some(instance) = find_instance(metadata, reference) {
         if instance.status == InstanceStatus::Destroyed {
-            bail!("L'instance '{reference}' est supprimée.");
+            bail!(tr!(
+                fr: "L'instance '{reference}' est supprimée.",
+                en: "The instance '{reference}' is destroyed.",
+            ));
         }
         return Ok(instance);
     }
     if let Some(instance) = find_by_name(metadata, reference) {
         return Ok(instance);
     }
-    bail!(
-        "Instance '{reference}' introuvable. Utilisez `virtum ps -a` pour lister les VM (id ou name)."
-    );
+    bail!(tr!(
+        fr: "Instance '{reference}' introuvable. Utilisez `virtum ps -a` pour lister les VM (id ou name).",
+        en: "Instance '{reference}' not found. Run `virtum ps -a` to list VMs (id or name)."
+    ));
 }
 
 /// Statut réel d'après libvirt : `domain_active` = `None` si le domaine est absent (statut stocké conservé).
@@ -228,9 +248,10 @@ pub fn instances_for_lab<'a>(metadata: &'a Metadata, lab_name: &str) -> Vec<&'a 
 pub fn ensure_name_available(metadata: &Metadata, name: &str) -> Result<()> {
     validate_name(name)?;
     if find_by_name(metadata, name).is_some() {
-        bail!(
-            "Le nom '{name}' est déjà utilisé. Choisissez un autre nom ou `virtum destroy` l'instance existante."
-        );
+        bail!(tr!(
+            fr: "Le nom '{name}' est déjà utilisé. Choisissez un autre nom ou `virtum destroy` l'instance existante.",
+            en: "The name '{name}' is already in use. Choose another name or `virtum destroy` the existing instance."
+        ));
     }
     Ok(())
 }
@@ -242,13 +263,15 @@ pub fn ensure_lab_machine_available(
     machine_name: &str,
 ) -> Result<()> {
     if let Some(existing) = find_by_lab_machine(metadata, lab_name, machine_name) {
-        bail!(
-            "La machine '{machine_name}' du lab '{lab_name}' existe déjà ({}, statut {:?}). \
+        bail!(tr!(
+            fr: "La machine '{machine_name}' du lab '{lab_name}' existe déjà ({}, statut {:?}). \
              Utilisez `virtum down` ou `virtum destroy {}`.",
+            en: "The machine '{machine_name}' of lab '{lab_name}' already exists ({}, status {:?}). \
+             Run `virtum down` or `virtum destroy {}`.",
             existing.id,
             existing.status,
             existing.name.as_deref().unwrap_or(&existing.id)
-        );
+        ));
     }
     ensure_name_available(metadata, machine_name)
 }
@@ -278,7 +301,13 @@ pub fn lock_metadata(path: &Path) -> Result<MetadataLock> {
         .read(true)
         .write(true)
         .open(&lock)
-        .with_context(|| format!("Impossible d'ouvrir le verrou {}", lock.display()))?;
+        .with_context(|| {
+            tr!(
+                fr: "Impossible d'ouvrir le verrou {}",
+                en: "Cannot open the lock {}",
+                lock.display(),
+            )
+        })?;
     loop {
         // SAFETY: descripteur valide tant que `file` vit ; flock n'accède à aucune mémoire.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
@@ -287,7 +316,9 @@ pub fn lock_metadata(path: &Path) -> Result<MetadataLock> {
         }
         let err = std::io::Error::last_os_error();
         if err.kind() != std::io::ErrorKind::Interrupted {
-            return Err(err).with_context(|| format!("Verrou {} impossible", lock.display()));
+            return Err(err).with_context(
+                || tr!(fr: "Verrou {} impossible", en: "Cannot lock {}", lock.display()),
+            );
         }
     }
 }
@@ -315,7 +346,10 @@ pub async fn remove_instance(path: &Path, id: &str) -> Result<Metadata> {
     let before = metadata.instances.len();
     metadata.instances.retain(|instance| instance.id != id);
     if metadata.instances.len() == before {
-        bail!("Instance '{id}' introuvable dans metadata.json");
+        bail!(tr!(
+            fr: "Instance '{id}' introuvable dans metadata.json",
+            en: "Instance '{id}' not found in metadata.json",
+        ));
     }
     save_metadata(path, &metadata).await?;
     Ok(metadata)

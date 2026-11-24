@@ -31,6 +31,7 @@ use crate::ssh::{
     ensure_ssh_keypair, read_public_key, run_provision_commands, ssh_auth_probe, ssh_ports_to_try,
     SshSessionOpts,
 };
+use crate::tr;
 use crate::virtumfile::RestartPolicy;
 
 // v0.9 : sondages rapides, sans pause fixe sur un réseau libvirt (baux DHCP surveillés).
@@ -146,7 +147,7 @@ pub fn run_vm(args: RunArgs) -> Result<()> {
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(fr: "Impossible de démarrer le runtime Tokio", en: "Cannot start the Tokio runtime"))?
         .block_on(run_vm_async(args))
 }
 
@@ -161,9 +162,10 @@ pub async fn run_vm_async(args: RunArgs) -> Result<()> {
 
     let vm_id = generate_vm_id();
     if domain_exists(&vm_id) {
-        bail!(
-            "Collision de nom libvirt improbable mais détectée pour '{vm_id}'. Relancez virtum run."
-        );
+        bail!(tr!(
+            fr: "Collision de nom libvirt improbable mais détectée pour '{vm_id}'. Relancez virtum run.",
+            en: "Unlikely but detected libvirt name collision for '{vm_id}'. Run virtum run again."
+        ));
     }
 
     let mut config = VmLaunchConfig::from_run_args(&args);
@@ -172,9 +174,12 @@ pub async fn run_vm_async(args: RunArgs) -> Result<()> {
         let iface =
             bridge_network::resolve_bridge_interface(args.bridge_interface.as_deref())
                 .with_context(|| {
-                    "Impossible d'utiliser `--network bridge`. Lancez `virtum doctor` pour diagnostiquer l'hôte."
+                    tr!(
+                        fr: "Impossible d'utiliser `--network bridge`. Lancez `virtum doctor` pour diagnostiquer l'hôte.",
+                        en: "Cannot use `--network bridge`. Run `virtum doctor` to diagnose the host."
+                    )
                 })?;
-        crate::verr!("Réseau bridge (macvtap) sur l'interface hôte {iface}…");
+        crate::verr!(fr: "Réseau bridge (macvtap) sur l'interface hôte {iface}…", en: "Bridge network (macvtap) on host interface {iface}…");
         config.bridge_host_interface = Some(iface);
     }
     let hostname = args
@@ -198,24 +203,28 @@ pub async fn run_vm_async(args: RunArgs) -> Result<()> {
             if !retain_vm_on_error {
                 cleanup_failed_run(&vm_id, &instance_dir).await;
             }
-            bail!(
-                "Interrompu (Ctrl+C).{}",
+            bail!(tr!(
+                fr: "Interrompu (Ctrl+C).{}",
+                en: "Interrupted (Ctrl+C).{}",
                 if retain_vm_on_error {
-                    format!(
-                        " La VM '{vm_id}' peut encore tourner ; utilisez `virtum destroy {vm_id}`."
+                    tr!(
+                        fr: " La VM '{vm_id}' peut encore tourner ; utilisez `virtum destroy {vm_id}`.",
+                        en: " VM '{vm_id}' may still be running; use `virtum destroy {vm_id}`."
                     )
                 } else {
                     String::new()
                 }
-            );
+            ));
         }
     };
 
     if let Err(err) = run_result {
         if retain_vm_on_error {
             crate::verr!(
-                "Avertissement: la VM '{vm_id}' est démarrée mais l'opération a échoué.\n\
-                 Utilisez `virtum destroy {vm_id}` pour libérer les ressources."
+                fr: "Avertissement: la VM '{vm_id}' est démarrée mais l'opération a échoué.\n\
+                 Utilisez `virtum destroy {vm_id}` pour libérer les ressources.",
+                en: "Warning: VM '{vm_id}' is running but the operation failed.\n\
+                 Use `virtum destroy {vm_id}` to free its resources."
             );
         } else {
             cleanup_failed_run(&vm_id, &instance_dir).await;
@@ -319,15 +328,20 @@ pub async fn launch_vm_inner(
     let xml_path = write_domain_xml(instance_dir, &spec)?;
 
     define_domain(&xml_path).with_context(|| {
-        format!(
-            "virsh define a échoué pour {vm_id}. \
-             Vérifiez libvirt avec virtum doctor."
+        tr!(
+            fr: "virsh define a échoué pour {vm_id}. \
+             Vérifiez libvirt avec virtum doctor.",
+            en: "virsh define failed for {vm_id}. \
+             Check libvirt with virtum doctor."
         )
     })?;
 
     if !resolved_mounts.is_empty() {
         mounts::ensure_virtiofs_servers(instance_dir, &mut resolved_mounts).with_context(|| {
-            "virtiofsd n'est plus joignable avant virsh start (socket orphelin ?)"
+            tr!(
+                fr: "virtiofsd n'est plus joignable avant virsh start (socket orphelin ?)",
+                en: "virtiofsd is no longer reachable before virsh start (orphaned socket?)"
+            )
         })?;
     }
 
@@ -336,20 +350,25 @@ pub async fn launch_vm_inner(
         libvirt::resolve_nic_mac(instance_dir, vm_id).as_deref(),
     );
     start_domain(vm_id).with_context(|| {
-        format!(
-            "virsh start a échoué pour {vm_id}.\n{}",
+        tr!(
+            fr: "virsh start a échoué pour {vm_id}.\n{}",
+            en: "virsh start failed for {vm_id}.\n{}",
             libvirt_access::permission_denied_hint(paths)
         )
     })?;
 
     let state = domain_state(vm_id)?;
     if state != "running" {
-        bail!("La VM {vm_id} n'est pas en état running (état actuel: {state}).");
+        bail!(tr!(
+            fr: "La VM {vm_id} n'est pas en état running (état actuel: {state}).",
+            en: "VM {vm_id} is not in the running state (current state: {state})."
+        ));
     }
 
     let ip_timeout = network_attach.ip_timeout();
     crate::verr!(
-        "Attente de l'adresse IP ({}, max {} s)…",
+        fr: "Attente de l'adresse IP ({}, max {} s)…",
+        en: "Waiting for the IP address ({}, max {} s)…",
         network_attach.label(),
         ip_timeout.as_secs()
     );
@@ -369,8 +388,10 @@ pub async fn launch_vm_inner(
             if config.bridge_host_interface.is_some() {
                 *retain_vm_on_error = true;
                 crate::verr!(
-                    "La VM '{vm_id}' reste démarrée pour diagnostic bridge. \
-                     Essayez `virsh domifaddr {vm_id}` puis `virtum destroy {vm_id}`."
+                    fr: "La VM '{vm_id}' reste démarrée pour diagnostic bridge. \
+                     Essayez `virsh domifaddr {vm_id}` puis `virtum destroy {vm_id}`.",
+                    en: "VM '{vm_id}' stays running for bridge diagnostics. \
+                     Try `virsh domifaddr {vm_id}`, then `virtum destroy {vm_id}`."
                 );
             }
             return Err(err);
@@ -382,10 +403,12 @@ pub async fn launch_vm_inner(
         None
     };
     if !is_usable_ssh_ip(&ip, network_attach.prefer_non_libvirt_default()) {
-        bail!(
-            "Adresse IP invalide pour '{vm_id}': {ip}. \
-             Vérifiez `virsh domifaddr {vm_id}` et le DHCP du réseau cible."
-        );
+        bail!(tr!(
+            fr: "Adresse IP invalide pour '{vm_id}': {ip}. \
+             Vérifiez `virsh domifaddr {vm_id}` et le DHCP du réseau cible.",
+            en: "Invalid IP address for '{vm_id}': {ip}. \
+             Check `virsh domifaddr {vm_id}` and the DHCP of the target network."
+        ));
     }
 
     let ssh_timeout = if grow_root {
@@ -395,12 +418,14 @@ pub async fn launch_vm_inner(
     };
     if grow_root {
         crate::verr!(
-            "Attente de SSH sur {ip} (cloud-init + agrandissement disque, max {} s)…",
+            fr: "Attente de SSH sur {ip} (cloud-init + agrandissement disque, max {} s)…",
+            en: "Waiting for SSH on {ip} (cloud-init + disk growth, max {} s)…",
             ssh_timeout.as_secs()
         );
     } else {
         crate::verr!(
-            "Attente de SSH sur {ip} (cloud-init, max {} s)…",
+            fr: "Attente de SSH sur {ip} (cloud-init, max {} s)…",
+            en: "Waiting for SSH on {ip} (cloud-init, max {} s)…",
             ssh_timeout.as_secs()
         );
     }
@@ -418,10 +443,14 @@ pub async fn launch_vm_inner(
     .await
     .with_context(|| {
         let (strict, kh) = crate::ssh::ssh_option_strings(&ssh_opts);
-        format!(
-            "Instance : {}/{}\n\
+        tr!(
+            fr: "Instance : {}/{}\n\
              user-data : {}/user-data\n\
              Test manuel : ssh -i {private_key} -o IdentitiesOnly=yes -o {strict} -o {kh} \
+             {user}@{ip}",
+            en: "Instance: {}/{}\n\
+             user-data: {}/user-data\n\
+             Manual test: ssh -i {private_key} -o IdentitiesOnly=yes -o {strict} -o {kh} \
              {user}@{ip}",
             paths.root.display(),
             instance_dir
@@ -446,7 +475,8 @@ pub async fn launch_vm_inner(
         }
         post_boot.extend(config.provision.iter().cloned());
         crate::verr!(
-            "Provision post-SSH ({} commande(s), max {} s)…",
+            fr: "Provision post-SSH ({} commande(s), max {} s)…",
+            en: "Post-SSH provisioning ({} command(s), max {} s)…",
             post_boot.len(),
             SSH_TIMEOUT_PROVISION.as_secs()
         );
@@ -460,7 +490,7 @@ pub async fn launch_vm_inner(
             &ssh_opts,
         )?;
     } else if grow_root && install_agent {
-        crate::verr!("Installation qemu-guest-agent post-SSH…");
+        crate::verr!(fr: "Installation qemu-guest-agent post-SSH…", en: "Installing qemu-guest-agent after SSH…");
         run_provision_commands(
             &keys.private_key,
             &config.user,
@@ -526,35 +556,42 @@ pub async fn launch_vm_inner(
         config.libvirt_network.as_deref(),
         config.bridge_host_interface.as_deref(),
     ) {
-        crate::verr!("Avertissement: impossible d'enregistrer la MAC dans config.xml: {err:#}");
+        crate::verr!(
+            fr: "Avertissement: impossible d'enregistrer la MAC dans config.xml: {err:#}",
+            en: "Warning: cannot save the MAC address in config.xml: {err:#}"
+        );
     }
 
     let shell_ref = config.name.as_deref().unwrap_or(vm_id);
-    crate::vout!("VM démarrée: {vm_id}");
+    crate::vout!(fr: "VM démarrée: {vm_id}", en: "VM started: {vm_id}");
     if let Some(ref name) = config.name {
-        crate::vout!("  Name:     {name}");
+        crate::vout!("  Name:     {name}"); // i18n-ok : identique en anglais
     }
     if let Some(ref lab) = config.lab_name {
-        crate::vout!("  Lab:      {lab}");
+        crate::vout!("  Lab:      {lab}"); // i18n-ok : identique en anglais
     }
-    crate::vout!("  OS:       {}", config.os);
+    crate::vout!("  OS:       {}", config.os); // i18n-ok : identique en anglais
     match &network_attach {
-        NetworkAttach::MacvtapBridge { .. } => crate::vout!("  Réseau:   bridge (LAN)"),
-        NetworkAttach::LabAndBridge { .. } => crate::vout!("  Réseau:   lab + bridge (LAN)"),
+        NetworkAttach::MacvtapBridge { .. } => {
+            crate::vout!(fr: "  Réseau:   bridge (LAN)", en: "  Network:  bridge (LAN)")
+        }
+        NetworkAttach::LabAndBridge { .. } => {
+            crate::vout!(fr: "  Réseau:   lab + bridge (LAN)", en: "  Network:  lab + bridge (LAN)")
+        }
         NetworkAttach::LibvirtNetwork { name } => {
             if config.lab_name.is_some() {
-                crate::vout!("  Réseau:   {name}");
+                crate::vout!(fr: "  Réseau:   {name}", en: "  Network:  {name}");
             }
         }
     }
     if let Some(ref lan) = lan_ip {
-        crate::vout!("  IP (lab): {ip}");
-        crate::vout!("  IP (LAN): {lan}");
+        crate::vout!("  IP (lab): {ip}"); // i18n-ok : identique en anglais
+        crate::vout!("  IP (LAN): {lan}"); // i18n-ok : identique en anglais
     } else {
-        crate::vout!("  IP:       {ip}");
+        crate::vout!("  IP:       {ip}"); // i18n-ok : identique en anglais
     }
     port_forward::print_forward_lines(&config.port_forwards, config.port_bind);
-    crate::vout!("  SSH:      virtum shell {shell_ref}");
+    crate::vout!("  SSH:      virtum shell {shell_ref}"); // i18n-ok : identique en anglais
     Ok(())
 }
 
@@ -579,12 +616,15 @@ impl NetworkAttach {
         match self {
             Self::LibvirtNetwork { name } => format!("libvirt {name}"),
             Self::MacvtapBridge { host_interface } => {
-                format!("bridge macvtap sur {host_interface} (LAN)")
+                tr!(fr: "bridge macvtap sur {host_interface} (LAN)", en: "bridge macvtap on {host_interface} (LAN)")
             }
             Self::LabAndBridge {
                 lab_network,
                 host_interface,
-            } => format!("lab {lab_network} + bridge macvtap sur {host_interface} (LAN)"),
+            } => tr!(
+                fr: "lab {lab_network} + bridge macvtap sur {host_interface} (LAN)",
+                en: "lab {lab_network} + bridge macvtap on {host_interface} (LAN)"
+            ),
         }
     }
 
@@ -798,7 +838,11 @@ async fn wait_for_ip(
                     )
                 })
             {
-                crate::verr!("IP réutilisée (metadata / SSH) : {}", hint.known_ip);
+                crate::verr!(
+                    fr: "IP réutilisée (metadata / SSH) : {}",
+                    en: "Reusing IP (metadata / SSH): {}",
+                    hint.known_ip
+                );
                 return Ok(hint.known_ip.to_string());
             }
         }
@@ -811,30 +855,45 @@ async fn wait_for_ip(
 
     if let (Some(ip), Some(expected)) = (other_ip, expected_ip) {
         crate::verr!(
-            "Avertissement: {vm_id} a obtenu {ip} au lieu de l'adresse déclarée {expected}."
+            fr: "Avertissement: {vm_id} a obtenu {ip} au lieu de l'adresse déclarée {expected}.",
+            en: "Warning: {vm_id} got {ip} instead of the declared address {expected}."
         );
         return Ok(ip);
     }
 
     let dhcp_hint = match attach {
-        NetworkAttach::LibvirtNetwork { name } | NetworkAttach::LabAndBridge { lab_network: name, .. } => {
-            format!("- Vérifiez `virsh domifaddr {vm_id}` et `virsh net-dhcp-leases {name}`\n")
+        NetworkAttach::LibvirtNetwork { name }
+        | NetworkAttach::LabAndBridge {
+            lab_network: name, ..
+        } => {
+            tr!(
+                fr: "- Vérifiez `virsh domifaddr {vm_id}` et `virsh net-dhcp-leases {name}`\n",
+                en: "- Check `virsh domifaddr {vm_id}` and `virsh net-dhcp-leases {name}`\n"
+            )
         }
-        NetworkAttach::MacvtapBridge { host_interface } => format!(
-            "- Interface hôte : {host_interface} (doit être celle de la route par défaut : `ip route`)\n\
+        NetworkAttach::MacvtapBridge { host_interface } => tr!(
+            fr: "- Interface hôte : {host_interface} (doit être celle de la route par défaut : `ip route`)\n\
              - Partage téléphone / Wi‑Fi : macvtap échoue souvent ; essayez `--bridge-interface <iface>`\n\
-             - Vérifiez `virsh domifaddr {vm_id}` et `ip neigh` après ~2 min (cloud-init)\n"
+             - Vérifiez `virsh domifaddr {vm_id}` et `ip neigh` après ~2 min (cloud-init)\n",
+            en: "- Host interface: {host_interface} (must be the one of the default route: `ip route`)\n\
+             - Phone tethering / Wi‑Fi: macvtap often fails; try `--bridge-interface <iface>`\n\
+             - Check `virsh domifaddr {vm_id}` and `ip neigh` after ~2 min (cloud-init)\n"
         ),
     };
 
-    bail!(
-        "Aucune adresse IP trouvée pour '{vm_id}' après {} secondes.\n\
+    bail!(tr!(
+        fr: "Aucune adresse IP trouvée pour '{vm_id}' après {} secondes.\n\
          Suggestions:\n\
          - Exécutez `virtum doctor`\n\
          {dhcp_hint}\
          - Relancez avec `--bridge-interface` si le partage n'utilise pas l'interface détectée",
+        en: "No IP address found for '{vm_id}' after {} seconds.\n\
+         Suggestions:\n\
+         - Run `virtum doctor`\n\
+         {dhcp_hint}\
+         - Run again with `--bridge-interface` if tethering does not use the detected interface",
         timeout.as_secs()
-    );
+    ));
 }
 
 fn try_discover_ip(
@@ -961,7 +1020,7 @@ fn format_ssh_ports(ports: &[u16]) -> String {
     match ports {
         [first, rest @ ..] if !rest.is_empty() => {
             let rest: Vec<String> = rest.iter().map(u16::to_string).collect();
-            format!("{first}, repli {}", rest.join(", "))
+            tr!(fr: "{first}, repli {}", en: "{first}, fallback {}", rest.join(", "))
         }
         _ => ports
             .iter()
@@ -994,7 +1053,8 @@ pub async fn wait_for_ssh_login(
 
         if last_progress.elapsed() >= Duration::from_secs(30) {
             crate::verr!(
-                "  … cloud-init / SSH pas encore prêt ({:.0} s / {} s)",
+                fr: "  … cloud-init / SSH pas encore prêt ({:.0} s / {} s)",
+                en: "  … cloud-init / SSH not ready yet ({:.0} s / {} s)",
                 started.elapsed().as_secs_f64(),
                 timeout.as_secs()
             );
@@ -1007,13 +1067,16 @@ pub async fn wait_for_ssh_login(
         sleep(SSH_POLL_INTERVAL).await;
     }
 
-    bail!(
-        "Connexion SSH refusée pour {user}@{host} (port {}) après {} secondes \
+    bail!(tr!(
+        fr: "Connexion SSH refusée pour {user}@{host} (port {}) après {} secondes \
          (sshd pas encore joignable ; cloud-init ou growpart peut être en cours, \
          ou `ssh_port` du Virtumfile ne correspond pas au port de sshd).",
+        en: "SSH connection refused for {user}@{host} (port {}) after {} seconds \
+         (sshd not reachable yet; cloud-init or growpart may still be running, \
+         or the Virtumfile `ssh_port` does not match the sshd port).",
         format_ssh_ports(ports),
         timeout.as_secs()
-    );
+    ));
 }
 
 /// Dossier d'une nouvelle instance : créé ici, ou déjà présent mais réel, à l'utilisateur
@@ -1027,47 +1090,53 @@ pub async fn wait_for_ssh_login(
 /// (le disque en copie sur écriture deviendrait incohérent).
 pub(crate) fn existing_base_image(disk_path: &Path) -> Result<PathBuf> {
     let Some(base) = crate::disk::backing_file(disk_path)? else {
-        bail!(
-            "{} n'a pas d'image de base : disque inattendu pour une VM Virtum.",
+        bail!(tr!(
+            fr: "{} n'a pas d'image de base : disque inattendu pour une VM Virtum.",
+            en: "{} has no base image: unexpected disk for a Virtum VM.",
             disk_path.display()
-        );
+        ));
     };
     match std::fs::symlink_metadata(&base) {
         Ok(meta) if meta.is_file() => Ok(base),
-        Ok(_) => bail!(
-            "L'image de base {} n'est pas un fichier régulier : refusée.",
+        Ok(_) => bail!(tr!(
+            fr: "L'image de base {} n'est pas un fichier régulier : refusée.",
+            en: "Base image {} is not a regular file: refused.",
             base.display()
-        ),
-        Err(_) => bail!(
-            "Image de base introuvable : {} (disque {}). Restaurez ce fichier ; ne le \
+        )),
+        Err(_) => bail!(tr!(
+            fr: "Image de base introuvable : {} (disque {}). Restaurez ce fichier ; ne le \
              re-téléchargez pas avec `virtum pull` (une autre image rendrait le disque \
              incohérent). Sinon : virtum destroy puis recréez la VM.",
+            en: "Base image not found: {} (disk {}). Restore this file; do not \
+             download it again with `virtum pull` (another image would make the disk \
+             inconsistent). Otherwise: virtum destroy, then recreate the VM.",
             base.display(),
             disk_path.display()
-        ),
+        )),
     }
 }
 
 fn prepare_new_instance_dir(instance_dir: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     if let Some(parent) = instance_dir.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Impossible de créer {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(
+            || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", parent.display()),
+        )?;
     }
     match std::fs::DirBuilder::new().mode(0o700).create(instance_dir) {
         Ok(()) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            return Err(e)
-                .with_context(|| format!("Impossible de créer {}", instance_dir.display()))
-        }
+        Err(e) => return Err(e).with_context(
+            || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", instance_dir.display()),
+        ),
     }
     let meta = std::fs::symlink_metadata(instance_dir)?;
     if !meta.is_dir() || meta.uid() != crate::fsutil::current_uid() {
-        bail!(
-            "{} existe déjà et n'est pas un dossier de l'utilisateur courant : refus de l'utiliser.",
+        bail!(tr!(
+            fr: "{} existe déjà et n'est pas un dossier de l'utilisateur courant : refus de l'utiliser.",
+            en: "{} already exists and is not a directory owned by the current user: refusing to use it.",
             instance_dir.display()
-        );
+        ));
     }
     for leaf in [
         "disk.qcow2",
@@ -1077,10 +1146,11 @@ fn prepare_new_instance_dir(instance_dir: &Path) -> Result<()> {
         "known_hosts",
     ] {
         if std::fs::symlink_metadata(instance_dir.join(leaf)).is_ok() {
-            bail!(
-                "{} contient déjà {leaf} : refus de créer l'instance par-dessus.",
+            bail!(tr!(
+                fr: "{} contient déjà {leaf} : refus de créer l'instance par-dessus.",
+                en: "{} already contains {leaf}: refusing to create the instance over it.",
                 instance_dir.display()
-            );
+            ));
         }
     }
     Ok(())
@@ -1091,7 +1161,7 @@ pub fn start_vm(reference: &str) -> Result<()> {
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(fr: "Impossible de démarrer le runtime Tokio", en: "Cannot start the Tokio runtime"))?
         .block_on(start_vm_async(reference))
 }
 
@@ -1105,24 +1175,28 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
 
     match instance.status {
         InstanceStatus::Destroyed => {
-            bail!(
-                "L'instance '{vm_id}' est supprimée. Lancez `virtum run` pour créer une nouvelle VM."
-            );
+            bail!(tr!(
+                fr: "L'instance '{vm_id}' est supprimée. Lancez `virtum run` pour créer une nouvelle VM.",
+                en: "Instance '{vm_id}' is destroyed. Run `virtum run` to create a new VM."
+            ));
         }
         InstanceStatus::Creating => {
-            bail!(
-                "L'instance '{vm_id}' est encore en cours de création. \
-                 Attendez la fin de `virtum run` ou nettoyez avec `virtum destroy {vm_id}`."
-            );
+            bail!(tr!(
+                fr: "L'instance '{vm_id}' est encore en cours de création. \
+                 Attendez la fin de `virtum run` ou nettoyez avec `virtum destroy {vm_id}`.",
+                en: "Instance '{vm_id}' is still being created. \
+                 Wait for `virtum run` to finish or clean up with `virtum destroy {vm_id}`."
+            ));
         }
         InstanceStatus::Running => {
             if domain_exists(&vm_id) {
                 let state = domain_state(&vm_id)?;
                 if state == "running" {
-                    bail!(
-                        "La VM '{vm_id}' est déjà démarrée (IP: {}). Utilisez `virtum shell {vm_id}`.",
+                    bail!(tr!(
+                        fr: "La VM '{vm_id}' est déjà démarrée (IP: {}). Utilisez `virtum shell {vm_id}`.",
+                        en: "VM '{vm_id}' is already running (IP: {}). Use `virtum shell {vm_id}`.",
                         instance.ip.as_deref().unwrap_or("-")
-                    );
+                    ));
                 }
             }
         }
@@ -1131,11 +1205,13 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
 
     let instance_dir = paths.instances.join(&vm_id);
     if !instance_dir.is_dir() {
-        bail!(
-            "Répertoire instance introuvable: {}. \
+        bail!(tr!(
+            fr: "Répertoire instance introuvable: {}. \
              La VM a peut-être été supprimée manuellement ; utilisez `virtum destroy {vm_id}` puis `virtum run`.",
+            en: "Instance directory not found: {}. \
+             The VM may have been deleted manually; use `virtum destroy {vm_id}`, then `virtum run`.",
             instance_dir.display()
-        );
+        ));
     }
 
     let disk_path = instance_dir.join("disk.qcow2");
@@ -1146,12 +1222,14 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     if mount_state.is_empty() {
         if instance.mounts.as_ref().is_some_and(|m| !m.is_empty()) {
             crate::verr!(
-                "Avertissement: metadata contient des mounts mais mounts-state.json est absent. \
-                 Les partages virtiofs peuvent être incomplets."
+                fr: "Avertissement: metadata contient des mounts mais mounts-state.json est absent. \
+                 Les partages virtiofs peuvent être incomplets.",
+                en: "Warning: metadata lists mounts but mounts-state.json is missing. \
+                 The virtiofs shares may be incomplete."
             );
         }
     } else if let Err(err) = mounts::ensure_virtiofs_servers(&instance_dir, &mut mount_state) {
-        crate::verr!("Avertissement: virtiofsd : {err:#}");
+        crate::verr!(fr: "Avertissement: virtiofsd : {err:#}", en: "Warning: virtiofsd: {err:#}");
     }
     let xml_path = libvirt::refresh_domain_xml(
         &instance_dir,
@@ -1161,15 +1239,17 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     )?;
     if let Some(ref mac) = libvirt::parse_mac_address_from_xml(&std::fs::read_to_string(&xml_path)?)
     {
-        crate::verr!("  Interface MAC conservée : {mac}");
+        crate::verr!(fr: "  Interface MAC conservée : {mac}", en: "  Interface MAC kept: {mac}");
     }
     for path in [&disk_path, &iso_path, &xml_path] {
         if !path.is_file() {
-            bail!(
-                "Fichier manquant pour redémarrer '{vm_id}': {}. \
+            bail!(tr!(
+                fr: "Fichier manquant pour redémarrer '{vm_id}': {}. \
                  Utilisez `virtum destroy {vm_id}` puis `virtum run`.",
+                en: "Missing file to restart '{vm_id}': {}. \
+                 Use `virtum destroy {vm_id}`, then `virtum run`.",
                 path.display()
-            );
+            ));
         }
     }
 
@@ -1186,9 +1266,11 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     )?;
 
     define_or_replace_domain(&vm_id, &xml_path).with_context(|| {
-        format!(
-            "virsh define a échoué pour {vm_id}. \
+        tr!(
+            fr: "virsh define a échoué pour {vm_id}. \
              Vérifiez {} et virtum doctor.",
+            en: "virsh define failed for {vm_id}. \
+             Check {} and virtum doctor.",
             xml_path.display()
         )
     })?;
@@ -1200,15 +1282,19 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         libvirt::resolve_nic_mac(&instance_dir, &vm_id).as_deref(),
     );
     start_domain(&vm_id).with_context(|| {
-        format!(
-            "virsh start a échoué pour {vm_id}.\n{}",
+        tr!(
+            fr: "virsh start a échoué pour {vm_id}.\n{}",
+            en: "virsh start failed for {vm_id}.\n{}",
             libvirt_access::permission_denied_hint(&paths)
         )
     })?;
 
     let state = domain_state(&vm_id)?;
     if state != "running" {
-        bail!("La VM {vm_id} n'est pas en état running (état actuel: {state}).");
+        bail!(tr!(
+            fr: "La VM {vm_id} n'est pas en état running (état actuel: {state}).",
+            en: "VM {vm_id} is not in the running state (current state: {state})."
+        ));
     }
 
     let keys = ensure_ssh_keypair(&paths.keys)?;
@@ -1229,13 +1315,15 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     });
     if resume_hint.is_some() {
         crate::verr!(
-            "Attente de l'adresse IP ({}, max {} s, réutilisation metadata si joignable)…",
+            fr: "Attente de l'adresse IP ({}, max {} s, réutilisation metadata si joignable)…",
+            en: "Waiting for the IP address ({}, max {} s, reusing metadata if reachable)…",
             network_attach.label(),
             IP_TIMEOUT.as_secs()
         );
     } else {
         crate::verr!(
-            "Attente de l'adresse IP ({}, max {} s)…",
+            fr: "Attente de l'adresse IP ({}, max {} s)…",
+            en: "Waiting for the IP address ({}, max {} s)…",
             network_attach.label(),
             IP_TIMEOUT.as_secs()
         );
@@ -1252,14 +1340,17 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     )
     .await?;
     if !is_usable_ssh_ip(&ip, network_attach.prefer_non_libvirt_default()) {
-        bail!(
-            "Adresse IP invalide pour '{vm_id}': {ip}. \
-             Vérifiez `virsh domifaddr {vm_id}`."
-        );
+        bail!(tr!(
+            fr: "Adresse IP invalide pour '{vm_id}': {ip}. \
+             Vérifiez `virsh domifaddr {vm_id}`.",
+            en: "Invalid IP address for '{vm_id}': {ip}. \
+             Check `virsh domifaddr {vm_id}`."
+        ));
     }
 
     crate::verr!(
-        "Attente de SSH sur {ip} (port {}, max {} s)…",
+        fr: "Attente de SSH sur {ip} (port {}, max {} s)…",
+        en: "Waiting for SSH on {ip} (port {}, max {} s)…",
         format_ssh_ports(&ssh_ports),
         SSH_TIMEOUT.as_secs()
     );
@@ -1282,7 +1373,8 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
     // cloud-init ne monte les partages qu'au premier démarrage : on les remonte ici.
     if !mount_state.is_empty() {
         crate::verr!(
-            "Montage virtiofs dans la VM ({} volume(s))…",
+            fr: "Montage virtiofs dans la VM ({} volume(s))…",
+            en: "Mounting virtiofs in the VM ({} volume(s))…",
             mount_state.len()
         );
         if let Err(err) = crate::ssh::run_ssh_mount_steps(
@@ -1293,7 +1385,10 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
             &mount_state,
             &ssh_opts,
         ) {
-            crate::verr!("Avertissement: montage des partages dans la VM : {err:#}");
+            crate::verr!(
+                fr: "Avertissement: montage des partages dans la VM : {err:#}",
+                en: "Warning: mounting the shares in the VM: {err:#}"
+            );
         }
     }
 
@@ -1312,17 +1407,17 @@ pub async fn start_vm_async(reference: &str) -> Result<()> {
         port_forward::start_instance_proxies(&instance_dir, &ip, forwards, port_bind)?;
     }
 
-    crate::vout!("VM démarrée: {vm_id}");
+    crate::vout!(fr: "VM démarrée: {vm_id}", en: "VM started: {vm_id}");
     if let Some(ref lan) = lan_ip {
-        crate::vout!("  IP (lab): {ip}");
-        crate::vout!("  IP (LAN): {lan}");
+        crate::vout!("  IP (lab): {ip}"); // i18n-ok : identique en anglais
+        crate::vout!("  IP (LAN): {lan}"); // i18n-ok : identique en anglais
     } else {
-        crate::vout!("  IP:       {ip}");
+        crate::vout!("  IP:       {ip}"); // i18n-ok : identique en anglais
     }
     if let Some(ref forwards) = forwards_snapshot {
         port_forward::print_forward_lines(forwards, port_bind);
     }
-    crate::vout!("  SSH:      virtum shell {shell_ref}");
+    crate::vout!("  SSH:      virtum shell {shell_ref}"); // i18n-ok : identique en anglais
     Ok(())
 }
 
@@ -1332,8 +1427,9 @@ fn resolve_instance_network_for_refresh(
 ) -> Result<(Option<String>, Option<String>)> {
     let xml_path = instance_dir.join("config.xml");
     if xml_path.is_file() {
-        let xml = std::fs::read_to_string(&xml_path)
-            .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
+        let xml = std::fs::read_to_string(&xml_path).with_context(
+            || tr!(fr: "Impossible de lire {}", en: "Cannot read {}", xml_path.display()),
+        )?;
         let nics = libvirt::parse_nics_from_xml(&xml);
         let lab_net = nics.iter().find_map(|nic| match nic {
             VmNic::LibvirtNetwork { name } => Some(name.clone()),
@@ -1382,7 +1478,7 @@ pub fn stop_vm(reference: &str) -> Result<()> {
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(fr: "Impossible de démarrer le runtime Tokio", en: "Cannot start the Tokio runtime"))?
         .block_on(stop_vm_async(reference))
 }
 
@@ -1393,19 +1489,22 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
     crate::ownership::ensure_domain_ours(&vm_id, &instance_dir_for(&paths, &vm_id)?)?;
 
     if domain_exists(&vm_id) {
-        shutdown_domain(&vm_id).with_context(|| format!("virsh shutdown a échoué pour {vm_id}"))?;
+        shutdown_domain(&vm_id).with_context(|| tr!(fr: "virsh shutdown a échoué pour {vm_id}", en: "virsh shutdown failed for {vm_id}"))?;
         if !wait_for_domain_inactive(&vm_id, STOP_TIMEOUT).await {
             crate::verr!(
-                "La VM '{vm_id}' ne s'est pas arrêtée en {} s ; arrêt forcé (virsh destroy).",
+                fr: "La VM '{vm_id}' ne s'est pas arrêtée en {} s ; arrêt forcé (virsh destroy).",
+                en: "VM '{vm_id}' did not stop within {} s; forcing it off (virsh destroy).",
                 STOP_TIMEOUT.as_secs()
             );
             destroy_domain(&vm_id)
-                .with_context(|| format!("virsh destroy a échoué pour {vm_id}"))?;
+                .with_context(|| tr!(fr: "virsh destroy a échoué pour {vm_id}", en: "virsh destroy failed for {vm_id}"))?;
         }
     } else {
         crate::verr!(
-            "Avertissement: le domaine libvirt '{vm_id}' est introuvable ; \
-             mise à jour du statut metadata uniquement."
+            fr: "Avertissement: le domaine libvirt '{vm_id}' est introuvable ; \
+             mise à jour du statut metadata uniquement.",
+            en: "Warning: libvirt domain '{vm_id}' not found; \
+             updating the metadata status only."
         );
     }
 
@@ -1418,7 +1517,7 @@ pub async fn stop_vm_async(reference: &str) -> Result<()> {
     }
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
-    crate::vout!("VM arrêtée: {vm_id}");
+    crate::vout!(fr: "VM arrêtée: {vm_id}", en: "VM stopped: {vm_id}");
     Ok(())
 }
 
@@ -1429,7 +1528,9 @@ pub async fn kill_vm_async(reference: &str) -> Result<()> {
     let vm_id = instance.id.clone();
     crate::ownership::ensure_domain_ours(&vm_id, &instance_dir_for(&paths, &vm_id)?)?;
 
-    destroy_domain(&vm_id).with_context(|| format!("virsh destroy a échoué pour {vm_id}"))?;
+    destroy_domain(&vm_id).with_context(
+        || tr!(fr: "virsh destroy a échoué pour {vm_id}", en: "virsh destroy failed for {vm_id}"),
+    )?;
     port_forward::stop_instance_proxies(&paths.instances.join(&vm_id));
 
     instance.status = InstanceStatus::Stopped;
@@ -1438,7 +1539,7 @@ pub async fn kill_vm_async(reference: &str) -> Result<()> {
     }
     metadata::upsert_instance(&paths.metadata, instance).await?;
 
-    crate::vout!("VM arrêtée (forcé): {vm_id}");
+    crate::vout!(fr: "VM arrêtée (forcé): {vm_id}", en: "VM stopped (forced): {vm_id}");
     Ok(())
 }
 
@@ -1447,7 +1548,7 @@ pub fn destroy_vm(reference: &str, purge_mounts: bool) -> Result<()> {
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(fr: "Impossible de démarrer le runtime Tokio", en: "Cannot start the Tokio runtime"))?
         .block_on(destroy_vm_async(reference, purge_mounts))
 }
 
@@ -1457,7 +1558,10 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
     let instance_dir = instance_dir_for(&paths, &vm_id)?;
 
     if orphan {
-        crate::verr!("Domaine Virtum orphelin (libvirt sans entrée metadata.json) : {vm_id}");
+        crate::verr!(
+            fr: "Domaine Virtum orphelin (libvirt sans entrée metadata.json) : {vm_id}",
+            en: "Orphaned Virtum domain (libvirt without a metadata.json entry): {vm_id}"
+        );
     }
 
     port_forward::stop_instance_proxies(&instance_dir);
@@ -1475,11 +1579,14 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
     if domain_exists(&vm_id) {
         if domain_is_active(&domain_state(&vm_id)?) {
             destroy_domain(&vm_id)
-                .with_context(|| format!("virsh destroy a échoué pour {vm_id}"))?;
+                .with_context(|| tr!(fr: "virsh destroy a échoué pour {vm_id}", en: "virsh destroy failed for {vm_id}"))?;
         }
-        undefine_domain(&vm_id).with_context(|| format!("virsh undefine a échoué pour {vm_id}"))?;
+        undefine_domain(&vm_id).with_context(|| tr!(fr: "virsh undefine a échoué pour {vm_id}", en: "virsh undefine failed for {vm_id}"))?;
     } else {
-        crate::verr!("Avertissement: le domaine libvirt '{vm_id}' est déjà absent.");
+        crate::verr!(
+            fr: "Avertissement: le domaine libvirt '{vm_id}' est déjà absent.",
+            en: "Warning: libvirt domain '{vm_id}' is already gone."
+        );
     }
 
     // Racine autorisée = répertoire du Virtumfile enregistré à la création (pas déduite
@@ -1493,8 +1600,13 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
     if let Some((net, mac)) = lab_reservation {
         match lab_network::remove_dhcp_reservations(&net, &mac) {
             Ok(0) => {}
-            Ok(_) => crate::verr!("Réservation DHCP retirée du réseau {net}."),
-            Err(err) => crate::verr!("Avertissement: réservation DHCP non retirée ({err:#})."),
+            Ok(_) => {
+                crate::verr!(fr: "Réservation DHCP retirée du réseau {net}.", en: "DHCP reservation removed from network {net}.")
+            }
+            Err(err) => crate::verr!(
+                fr: "Avertissement: réservation DHCP non retirée ({err:#}).",
+                en: "Warning: DHCP reservation not removed ({err:#})."
+            ),
         }
     }
 
@@ -1502,13 +1614,16 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
         mounts::teardown_virtiofs(&instance_dir);
         fs::remove_dir_all(&instance_dir)
             .await
-            .with_context(|| format!("Impossible de supprimer {}", instance_dir.display()))?;
+            .with_context(|| tr!(fr: "Impossible de supprimer {}", en: "Cannot delete {}", instance_dir.display()))?;
     }
 
     if let Some((purge_dirs, root)) = purge_plan {
         let n = mounts::purge_host_mount_dirs(&purge_dirs, &root)?;
         if n == 0 {
-            crate::verr!("Avertissement: --purge n'a supprimé aucun dossier (déjà absents).");
+            crate::verr!(
+                fr: "Avertissement: --purge n'a supprimé aucun dossier (déjà absents).",
+                en: "Warning: --purge deleted no directory (already gone)."
+            );
         }
     }
 
@@ -1517,7 +1632,7 @@ pub async fn destroy_vm_async(reference: &str, purge_mounts: bool) -> Result<()>
         metadata::remove_instance(&paths.metadata, &vm_id).await?;
     }
 
-    crate::vout!("VM supprimée: {vm_id}");
+    crate::vout!(fr: "VM supprimée: {vm_id}", en: "VM destroyed: {vm_id}");
     Ok(())
 }
 
@@ -1538,14 +1653,18 @@ async fn resolve_destroy_target(paths: &VirtumPaths, reference: &str) -> Result<
         let instance_dir = paths.instances.join(reference);
         if !crate::ownership::domain_is_ours_for_instance(reference, &instance_dir) {
             match crate::ownership::domain_owner(reference) {
-                crate::ownership::Owner::Other(id) => bail!(
-                    "Le domaine {reference} appartient à un autre Virtum ({id}) : refus de le supprimer."
-                ),
-                _ => bail!(
-                    "Le domaine {reference} n'a pas de marqueur Virtum et n'utilise pas le disque \
+                crate::ownership::Owner::Other(id) => bail!(tr!(
+                    fr: "Le domaine {reference} appartient à un autre Virtum ({id}) : refus de le supprimer.",
+                    en: "Domain {reference} belongs to another Virtum ({id}): refusing to delete it."
+                )),
+                _ => bail!(tr!(
+                    fr: "Le domaine {reference} n'a pas de marqueur Virtum et n'utilise pas le disque \
                      de cet état : refus. S'il est bien à vous, supprimez-le avec \
-                     `virsh destroy {reference}` puis `virsh undefine {reference}`."
-                ),
+                     `virsh destroy {reference}` puis `virsh undefine {reference}`.",
+                    en: "Domain {reference} has no Virtum marker and does not use the disk \
+                     of this state: refused. If it is really yours, delete it with \
+                     `virsh destroy {reference}`, then `virsh undefine {reference}`."
+                )),
             }
         }
         return Ok((reference.to_string(), true));
@@ -1558,11 +1677,14 @@ async fn resolve_destroy_target(paths: &VirtumPaths, reference: &str) -> Result<
         }
     }
 
-    bail!(
-        "Instance '{reference}' introuvable. Utilisez `virtum ps -a` pour lister les VM (id ou name), \
+    bail!(tr!(
+        fr: "Instance '{reference}' introuvable. Utilisez `virtum ps -a` pour lister les VM (id ou name), \
          `virtum destroy vm-…` si un déploiement a échoué à mi-chemin, ou relancez `virtum up` \
-         (les répertoires orphelins sont nettoyés automatiquement)."
-    );
+         (les répertoires orphelins sont nettoyés automatiquement).",
+        en: "Instance '{reference}' not found. Use `virtum ps -a` to list the VMs (id or name), \
+         `virtum destroy vm-…` if a deployment failed halfway, or run `virtum up` again \
+         (orphaned directories are cleaned up automatically)."
+    ));
 }
 
 /// Répertoire d'instance pour un id venant de metadata.json ou de la CLI : un seul
@@ -1575,7 +1697,10 @@ pub fn instance_dir_for(paths: &VirtumPaths, vm_id: &str) -> Result<PathBuf> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     if !valid {
-        bail!("Identifiant d'instance invalide dans metadata.json : '{vm_id}'.");
+        bail!(tr!(
+            fr: "Identifiant d'instance invalide dans metadata.json : '{vm_id}'.",
+            en: "Invalid instance id in metadata.json: '{vm_id}'."
+        ));
     }
     Ok(paths.instances.join(vm_id))
 }
@@ -1629,29 +1754,35 @@ async fn wait_for_domain_inactive(vm_id: &str, timeout: Duration) -> bool {
 }
 
 pub async fn cleanup_failed_run(vm_id: &str, instance_dir: &Path) {
-    crate::verr!("Nettoyage après échec de virtum run pour '{vm_id}'…");
+    crate::verr!(
+        fr: "Nettoyage après échec de virtum run pour '{vm_id}'…",
+        en: "Cleaning up after the failed virtum run for '{vm_id}'…"
+    );
     mounts::teardown_virtiofs(instance_dir);
     port_forward::stop_instance_proxies(instance_dir);
     if domain_exists(vm_id) {
         // Même nom de domaine qu'un autre Virtum du même libvirt : ne pas y toucher.
         if crate::ownership::domain_is_ours_for_instance(vm_id, instance_dir) {
             if let Err(err) = destroy_domain(vm_id) {
-                crate::verr!("  avertissement destroy: {err:#}");
+                crate::verr!(fr: "  avertissement destroy: {err:#}", en: "  destroy warning: {err:#}");
             }
             if let Err(err) = undefine_domain(vm_id) {
-                crate::verr!("  avertissement undefine: {err:#}");
+                crate::verr!(fr: "  avertissement undefine: {err:#}", en: "  undefine warning: {err:#}");
             }
         } else {
             crate::verr!(
-                "  domaine {vm_id} conservé : il n'appartient pas à cet état Virtum \
-                 (fichiers locaux seuls supprimés)."
+                fr: "  domaine {vm_id} conservé : il n'appartient pas à cet état Virtum \
+                 (fichiers locaux seuls supprimés).",
+                en: "  domain {vm_id} kept: it does not belong to this Virtum state \
+                 (only local files deleted)."
             );
         }
     }
     if instance_dir.exists() {
         if let Err(err) = fs::remove_dir_all(instance_dir).await {
             crate::verr!(
-                "  avertissement suppression {}: {err:#}",
+                fr: "  avertissement suppression {}: {err:#}",
+                en: "  deletion warning {}: {err:#}",
                 instance_dir.display()
             );
         }

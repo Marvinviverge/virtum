@@ -10,6 +10,7 @@ use std::path::Path;
 
 use crate::fsutil::current_uid;
 use crate::libvirt::xml_escape;
+use crate::tr;
 
 /// Espace de noms XML du marqueur (`<metadata>` libvirt).
 pub const OWNER_NS: &str = "https://virtum.dev/xmlns/owner/1";
@@ -191,14 +192,20 @@ pub fn ensure_domain_ours(vm_id: &str, instance_dir: &Path) -> anyhow::Result<()
         return Ok(());
     }
     let owner = match domain_owner(vm_id) {
-        Owner::Other(id) => format!(" (propriétaire : {id})"),
-        _ => " (sans marqueur Virtum, disque d'une autre instance)".to_string(),
+        Owner::Other(id) => tr!(fr: " (propriétaire : {id})", en: " (owner: {id})"),
+        _ => tr!(
+            fr: " (sans marqueur Virtum, disque d'une autre instance)",
+            en: " (no Virtum marker, disk of another instance)"
+        ),
     };
-    anyhow::bail!(
-        "Le domaine libvirt {vm_id} n'appartient pas à cet état Virtum{owner} : refus d'y toucher. \
+    anyhow::bail!(tr!(
+        fr: "Le domaine libvirt {vm_id} n'appartient pas à cet état Virtum{owner} : refus d'y toucher. \
          Le nom est pris par une autre VM du même libvirt ; renommez le lab (`name:`) ou retirez \
-         l'instance de cet état."
-    )
+         l'instance de cet état.",
+        en: "The libvirt domain {vm_id} does not belong to this Virtum state{owner}: refusing to touch it. \
+         The name is taken by another VM on the same libvirt; rename the lab (`name:`) or remove \
+         the instance from this state."
+    ))
 }
 
 #[cfg(test)]

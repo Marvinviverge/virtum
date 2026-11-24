@@ -11,6 +11,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use crate::tr;
+
 /// `true` si le groupe `gid` contient un compte autre que `uid` : membre secondaire
 /// (`/etc/group`) ou compte dont c'est le groupe principal (`/etc/passwd`).
 pub fn group_has_other_members(gid: u32, uid: u32) -> bool {
@@ -111,14 +113,20 @@ pub fn named_acl_traversers_of(path: &Path, uid: u32) -> Result<Vec<String>> {
     {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).context("Impossible d'exécuter getfacl"),
+        Err(e) => {
+            return Err(e).context(tr!(
+                fr: "Impossible d'exécuter getfacl",
+                en: "Cannot run getfacl"
+            ))
+        }
     };
     if !output.status.success() {
-        anyhow::bail!(
-            "getfacl a échoué sur {} : {}",
+        anyhow::bail!(tr!(
+            fr: "getfacl a échoué sur {} : {}",
+            en: "getfacl failed on {}: {}",
             path.display(),
             String::from_utf8_lossy(&output.stderr).trim()
-        );
+        ));
     }
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(named_acl_traversers(&text, uid, |gid| {
