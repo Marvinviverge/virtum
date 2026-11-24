@@ -2,6 +2,12 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Ajouts
+
+- **Langue de la sortie** (en cours, v1.4) : `virtum config set language en|fr`, `virtum config get language` (langue active et son origine), `virtum config unset language`, et la variable `VIRTUM_LANG` pour une commande ponctuelle. Sans réglage, Virtum suit la langue du système : français si la locale est française, anglais sinon. Réglage enregistré dans `~/.config/virtum/config.yml`. La traduction des messages arrive au fil des versions de développement ; tant qu'elle n'est pas terminée, la plupart des messages restent en français.
+
 ## [1.3.0] - 2026-11-23
 
 ### Ajouts

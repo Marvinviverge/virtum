@@ -9,6 +9,7 @@ pub mod disk;
 pub mod doctor;
 pub mod firewall;
 pub mod fsutil;
+pub mod i18n;
 pub mod images;
 pub mod inventory;
 pub mod lab;
@@ -29,6 +30,7 @@ pub mod share_access;
 pub mod snapshot;
 pub mod ssh;
 pub mod test_env;
+pub mod user_config;
 pub mod virtumfile;
 pub mod vm;
 
@@ -37,7 +39,26 @@ use clap::Parser;
 use cli::{Cli, Commands, SnapshotAction};
 
 pub fn run() -> Result<()> {
+    init_language();
     dispatch(Cli::parse().command)
+}
+
+/// Fixe la langue de la sortie avant toute autre chose (l'aide en dépend aussi) :
+/// `VIRTUM_LANG`, puis `~/.config/virtum/config.yml`, puis la locale du système.
+fn init_language() {
+    let loaded = user_config::load();
+    let config = loaded.language.zip(loaded.path.clone());
+    let resolution = i18n::resolve(|key| std::env::var(key).ok(), config);
+    if let Some(warning) = &resolution.warning {
+        eprintln!("warning: {warning}");
+    }
+    i18n::set_active(resolution);
+    for warning in &loaded.warnings {
+        eprintln!(
+            "{}",
+            tr!(fr: "avertissement : {}", en: "warning: {}", warning.message())
+        );
+    }
 }
 
 fn dispatch(command: Commands) -> Result<()> {
@@ -82,6 +103,7 @@ fn dispatch(command: Commands) -> Result<()> {
             destroy,
             purge,
         } => lab::down(file, destroy, purge)?,
+        Commands::Config { action } => user_config::command(action)?,
         Commands::Snapshot { action } => match action {
             SnapshotAction::Create {
                 name,

@@ -46,8 +46,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Les tests ne doivent pas dépendre de la langue du système (v1.4) : trois locales.
       - name: Tests
-        run: TMPDIR="$(mktemp -d)" cargo test --locked
+        run: |
+          for locale in C en_US.UTF-8 fr_FR.UTF-8; do
+            echo "::group::LANG=$locale"
+            LANG="$locale" LC_ALL= LC_MESSAGES= TMPDIR="$(mktemp -d)" cargo test --locked
+            echo "::endgroup::"
+          done
 
   dependencies:
     runs-on: ubuntu-24.04
