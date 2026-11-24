@@ -19,6 +19,10 @@ use std::path::Path;
 /// le test est strict. Ne la remplir que pour une migration en cours.
 const TOLERATED: &[&str] = &[];
 
+/// Fichiers exclus pour de bon : ils ne contiennent que des textes français voulus.
+/// `help_fr.rs` : traductions françaises de l'aide (l'anglais est dans `cli.rs`).
+const EXEMPT: &[&str] = &["help_fr.rs"];
+
 const SINKS: &[&str] = &[
     "bail!(",
     "anyhow!(",
@@ -316,7 +320,9 @@ fn every_message_is_bilingual() {
         }
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         seen.push(name.clone());
-        if TOLERATED.contains(&name.as_str()) && !forced.contains(&name) {
+        if EXEMPT.contains(&name.as_str())
+            || (TOLERATED.contains(&name.as_str()) && !forced.contains(&name))
+        {
             continue;
         }
         let src = std::fs::read_to_string(&path).unwrap();

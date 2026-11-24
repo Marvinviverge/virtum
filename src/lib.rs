@@ -9,6 +9,7 @@ pub mod disk;
 pub mod doctor;
 pub mod firewall;
 pub mod fsutil;
+pub mod help_fr;
 pub mod i18n;
 pub mod images;
 pub mod inventory;
@@ -35,12 +36,15 @@ pub mod virtumfile;
 pub mod vm;
 
 use anyhow::{bail, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use cli::{Cli, Commands, SnapshotAction};
 
 pub fn run() -> Result<()> {
     init_language();
-    dispatch(Cli::parse().command)
+    // Aide dans la langue active (français : textes de help_fr.rs).
+    let matches = help_fr::localize(Cli::command()).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    dispatch(cli.command)
 }
 
 /// Fixe la langue de la sortie avant toute autre chose (l'aide en dépend aussi) :

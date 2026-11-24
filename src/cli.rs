@@ -36,16 +36,16 @@ pub enum Commands {
         /// Path to Virtumfile
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+        /// Disable SSH host key checking (StrictHostKeyChecking=no); for trusted scripts only
         #[arg(long)]
         insecure_ssh: bool,
-        /// Supprime aussi les machines du lab absentes du Virtumfile (VM, disque, instantanés)
+        /// Also delete lab machines missing from the Virtumfile (VM, disk, snapshots)
         #[arg(long)]
         prune: bool,
-        /// Avec `--prune` : pas de confirmation interactive (scripts / CI)
+        /// With `--prune`: no interactive confirmation (scripts / CI)
         #[arg(short, long, requires = "prune")]
         yes: bool,
-        /// Confirme l'exposition `bind: lan` (0.0.0.0) sans invite interactive (CI / scripts).
+        /// Confirm `bind: lan` exposure (0.0.0.0) without an interactive prompt (CI / scripts)
         #[arg(long)]
         yes_lan: bool,
     },
@@ -60,7 +60,7 @@ pub enum Commands {
         /// Write to this file (atomic) instead of stdout
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Inventaire sans vérification de clé SSH (StrictHostKeyChecking=no, comme --insecure-ssh).
+        /// Inventory without SSH host key checking (StrictHostKeyChecking=no, like --insecure-ssh)
         #[arg(long)]
         insecure_ssh: bool,
     },
@@ -69,10 +69,10 @@ pub enum Commands {
         /// Path to Virtumfile
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+        /// Disable SSH host key checking (StrictHostKeyChecking=no); for trusted scripts only
         #[arg(long)]
         insecure_ssh: bool,
-        /// Arguments transmis à ansible-playbook (ex. `-- --tags init --limit node-1`)
+        /// Arguments passed to ansible-playbook (e.g. `-- --tags init --limit node-1`)
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -87,13 +87,13 @@ pub enum Commands {
         /// Path to Virtumfile
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Confirme le déploiement avec `bind: lan` sans invite interactive (CI / scripts).
+        /// Confirm a `bind: lan` deployment without an interactive prompt (CI / scripts)
         #[arg(long)]
         yes_lan: bool,
-        /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+        /// Disable SSH host key checking (StrictHostKeyChecking=no); for trusted scripts only
         #[arg(long)]
         insecure_ssh: bool,
-        /// Machines créées / reprises en même temps (1 = une après l'autre, comme avant la v0.9)
+        /// Machines created or resumed at the same time (1 = one after the other)
         #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..))]
         parallel: u16,
     },
@@ -125,7 +125,7 @@ pub enum Commands {
     Shell {
         /// VM id (`vm-…`) or name (`--name` from `virtum run`)
         vm: String,
-        /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+        /// Disable SSH host key checking (StrictHostKeyChecking=no); for trusted scripts only
         #[arg(long)]
         insecure_ssh: bool,
     },
@@ -277,15 +277,15 @@ pub struct RunArgs {
     #[arg(long)]
     pub disk_size: Option<String>,
 
-    /// Réseau pour la VM isolée : `default` (libvirt NAT 192.168.122.x) ou `bridge` (LAN physique, macvtap).
+    /// Network for the VM: `default` (libvirt NAT 192.168.122.x) or `bridge` (physical LAN, macvtap)
     #[arg(long, value_enum, default_value_t = RunNetworkMode::Default)]
     pub network: RunNetworkMode,
 
-    /// Interface hôte pour `--network bridge` (sinon route par défaut / `virtum doctor`).
+    /// Host interface for `--network bridge` (default: the default route; see `virtum doctor`)
     #[arg(long)]
     pub bridge_interface: Option<String>,
 
-    /// Désactive la vérification de clé SSH (StrictHostKeyChecking=no, comportement v0.4).
+    /// Disable SSH host key checking (StrictHostKeyChecking=no); for trusted scripts only
     #[arg(long)]
     pub insecure_ssh: bool,
 }
@@ -303,10 +303,10 @@ pub enum InventoryFormat {
 /// Réseau `virtum run` (hors Virtumfile).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum RunNetworkMode {
-    /// Réseau libvirt `default` (comportement v0.1/v0.2).
+    /// libvirt `default` network (NAT)
     #[default]
     Default,
-    /// Une NIC sur le LAN du bureau (nécessite Ethernet recommandé ; voir `virtum doctor`).
+    /// A NIC on the physical LAN (Ethernet recommended; see `virtum doctor`)
     Bridge,
 }
 
