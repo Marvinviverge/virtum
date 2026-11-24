@@ -325,8 +325,20 @@ fn violations(src: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// `I18N_CHECK=vm.rs,ssh.rs` : contrôle ces fichiers même s'ils sont encore tolérés
+/// (pendant leur migration).
+fn forced_files() -> Vec<String> {
+    std::env::var("I18N_CHECK")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[test]
 fn every_message_is_bilingual() {
+    let forced = forced_files();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut report = Vec::new();
     let mut seen = Vec::new();
@@ -337,7 +349,7 @@ fn every_message_is_bilingual() {
         }
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         seen.push(name.clone());
-        if TOLERATED.contains(&name.as_str()) {
+        if TOLERATED.contains(&name.as_str()) && !forced.contains(&name) {
             continue;
         }
         let src = std::fs::read_to_string(&path).unwrap();
