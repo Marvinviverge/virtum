@@ -15,27 +15,9 @@
 
 use std::path::Path;
 
-/// Fichiers pas encore migrés (v1.4, étapes 61 à 63). La liste se vide à chaque étape ;
-/// à la fin de l'étape 63, elle est vide et le test est strict.
-const TOLERATED: &[&str] = &[
-    "ansible.rs",
-    "apply.rs",
-    "bridge_network.rs",
-    "cloud_init.rs",
-    "doctor.rs",
-    "firewall.rs",
-    "inventory.rs",
-    "lab.rs",
-    "lab_diff.rs",
-    "lab_network.rs",
-    "mounts.rs",
-    "parallel.rs",
-    "plan.rs",
-    "share_access.rs",
-    "snapshot.rs",
-    "test_env.rs",
-    "virtumfile.rs",
-];
+/// Fichiers pas encore migrés. Vide depuis la fin de la migration (v1.4, étape 63) :
+/// le test est strict. Ne la remplir que pour une migration en cours.
+const TOLERATED: &[&str] = &[];
 
 const SINKS: &[&str] = &[
     "bail!(",

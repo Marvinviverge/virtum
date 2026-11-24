@@ -12,6 +12,7 @@ use crate::lab_network;
 use crate::libvirt::{domain_exists, domain_is_active, domain_state};
 use crate::metadata::{self, InstanceStatus};
 use crate::port_forward::{self, PortBind, PortForward};
+use crate::tr;
 use crate::virtumfile::{self, NetworkMode, Virtumfile};
 use crate::vm::lab_vm_id;
 
@@ -43,7 +44,10 @@ pub fn plan(file: Option<PathBuf>) -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime"
+        ))?
         .block_on(plan_async(file))
 }
 
@@ -90,10 +94,13 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
         };
         if let (Some(want), Some(have)) = (inst.static_ip.as_ref(), inst.ip.as_ref()) {
             if declared.as_ref() == Some(want) && want != have {
-                warnings.push(format!(
-                    "Machine '{machine_name}' : adresse actuelle {have}, déclarée {want} \
+                warnings.push(tr!(
+                    fr: "Machine '{machine_name}' : adresse actuelle {have}, déclarée {want} \
                      (ancien bail ?). `virtum stop {machine_name}` / `virtum start {machine_name}` \
-                     une fois le bail expiré."
+                     une fois le bail expiré.",
+                    en: "Machine '{machine_name}': current address {have}, declared {want} \
+                     (old lease?). Run `virtum stop {machine_name}` / \
+                     `virtum start {machine_name}` once the lease has expired."
                 ));
             }
         }
@@ -123,9 +130,12 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
 
         if let Some(net) = effective_network_label(&lab, machine_name) {
             if net.contains("bridge") && !forwards.is_empty() && bind == PortBind::Local {
-                warnings.push(format!(
-                    "Machine '{machine_name}' : `network: bridge` avec `ports:` en bind local — \
-                     l'IP LAN directe suffit souvent ; `bind: lan` si vous passez par socat."
+                warnings.push(tr!(
+                    fr: "Machine '{machine_name}' : `network: bridge` avec `ports:` en bind \
+                         local — \
+                     l'IP LAN directe suffit souvent ; `bind: lan` si vous passez par socat.",
+                    en: "Machine '{machine_name}': `network: bridge` with `ports:` bound locally — \
+                     the direct LAN IP is often enough; use `bind: lan` if you go through socat."
                 ));
             }
         }
@@ -137,8 +147,11 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
         }
         let vm_id = lab_vm_id(&lab.name, machine_name);
         if domain_exists(&vm_id) {
-            warnings.push(format!(
-                "Domaine orphelin '{vm_id}' (machine '{machine_name}') : `virtum up` le nettoiera avant création."
+            warnings.push(tr!(
+                fr: "Domaine orphelin '{vm_id}' (machine '{machine_name}') : \
+                     `virtum up` le nettoiera avant création.",
+                en: "Orphan domain '{vm_id}' (machine '{machine_name}'): \
+                     `virtum up` will clean it up before creation."
             ));
         }
         if let Err(e) = metadata::ensure_lab_machine_available(&metadata, &lab.name, machine_name) {
@@ -159,10 +172,14 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
             None => MachineAction::Create,
             Some(inst) => {
                 if inst.id != vm_id {
-                    errors.push(format!(
-                        "Machine '{machine_name}' : metadata {} ≠ domaine attendu {vm_id}. \
+                    let inst_id = &inst.id;
+                    errors.push(tr!(
+                        fr: "Machine '{machine_name}' : metadata {inst_id} ≠ domaine attendu \
+                             {vm_id}. \
                          `virtum destroy {machine_name}` puis `virtum up`.",
-                        inst.id
+                        en: "Machine '{machine_name}': metadata {inst_id} ≠ expected domain \
+                             {vm_id}. \
+                         Run `virtum destroy {machine_name}` then `virtum up`."
                     ));
                 }
                 if let Ok(diff) =
@@ -170,9 +187,10 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
                 {
                     for c in &diff.changes {
                         if c.is_blocking() {
-                            errors.push(format!(
-                                "Machine '{machine_name}' : {} — utilisez destroy + up.",
-                                c.summary_line()
+                            let summary = c.summary_line();
+                            errors.push(tr!(
+                                fr: "Machine '{machine_name}' : {summary} — utilisez destroy + up.",
+                                en: "Machine '{machine_name}': {summary} — use destroy + up."
                             ));
                         } else {
                             updates.push(c.summary_line());
@@ -218,10 +236,16 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
         let has_vms = !metadata::instances_for_lab(&metadata, &lab.name).is_empty();
         print_lab_network(&lab, has_vms, &mut errors)?;
     } else {
-        println!("Réseau lab : (non créé — lab entier en `network: bridge`)");
+        println!(
+            "{}",
+            tr!(
+                fr: "Réseau lab : (non créé — lab entier en `network: bridge`)",
+                en: "Lab network: (not created — whole lab in `network: bridge`)"
+            )
+        );
     }
 
-    println!("\nMachines :");
+    println!("{}", tr!(fr: "\nMachines :", en: "\nMachines:"));
     let mut create_n = 0usize;
     let mut update_n = 0usize;
     let mut resume_n = 0usize;
@@ -266,36 +290,60 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
                 .join(", ")
         };
         println!(
-            "  {sym} {action_label:<9} {:<12} ({})  os={} ram={} cpu={} network={} bind={} ports=[{ports}]",
+            "  {sym} {action_label:<9} {:<12} ({})  os={} ram={} cpu={} network={} bind={} ports=[{ports}]", // i18n-ok : identique en anglais
             m.name, m.vm_id, m.os, m.ram, m.cpu, net, bind
         );
         if let Some(ref ip) = m.static_ip {
-            println!("      ip: {ip} (déclarée)");
+            println!(
+                "{}",
+                tr!(fr: "      ip: {ip} (déclarée)", en: "      ip: {ip} (declared)")
+            );
         }
         if m.provision_steps > 0 {
-            println!("      provision: {} commande(s)", m.provision_steps);
+            let steps = m.provision_steps;
+            println!(
+                "{}",
+                tr!(
+                    fr: "      provision: {steps} commande(s)",
+                    en: "      provision: {steps} command(s)"
+                )
+            );
         }
         let mount_list = crate::mounts::format_mount_list(
             &crate::virtumfile::effective_mount_specs(&lab, &m.name),
         );
         if mount_list != "-" {
-            println!("      mounts: {mount_list}");
+            println!("      mounts: {mount_list}"); // i18n-ok : identique en anglais
         }
         for line in &m.updates {
             println!("      → {line}");
         }
         let inst_dir = paths.instances.join(&m.vm_id);
-        println!("      instance: {}", inst_dir.display());
+        println!("      instance: {}", inst_dir.display()); // i18n-ok : identique en anglais
     }
 
     let removals = crate::lab_diff::collect_removals(&lab, &metadata, &paths.instances);
     for r in &removals {
         println!(
-            "  - remove    {:<12} ({})  hors du Virtumfile — supprimée par `virtum apply --prune`",
-            r.machine_name, r.vm_id
+            "{}",
+            tr!(
+                fr: "  - remove    {:<12} ({})  hors du Virtumfile — supprimée par \
+                     `virtum apply --prune`",
+                en: "  - remove    {:<12} ({})  not in the Virtumfile — removed by \
+                     `virtum apply --prune`",
+                r.machine_name,
+                r.vm_id
+            )
         );
         if r.snapshots > 0 {
-            println!("      {} instantané(s) virtum-* seront perdus", r.snapshots);
+            let snapshots = r.snapshots;
+            println!(
+                "{}",
+                tr!(
+                    fr: "      {snapshots} instantané(s) virtum-* seront perdus",
+                    en: "      {snapshots} virtum-* snapshot(s) will be lost"
+                )
+            );
         }
     }
     let remove_n = removals.len();
@@ -303,18 +351,20 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
     print_images(&paths, &lab, &mut warnings)?;
 
     if needs_socat && !command_exists("socat") {
-        errors.push(
-            "socat est introuvable (requis pour `ports:`). Installez-le ou lancez `virtum doctor`."
-                .to_string(),
-        );
+        errors.push(tr!(
+            fr: "socat est introuvable (requis pour `ports:`). Installez-le \
+                 ou lancez `virtum doctor`.",
+            en: "socat not found (required for `ports:`). Install it or run `virtum doctor`."
+        ));
     }
 
     if any_create && !command_exists("cloud-localds") {
-        errors.push(
-            "cloud-localds est introuvable (création de nouvelles VM). \
-             Installez cloud-image-utils ou `virtum doctor`."
-                .to_string(),
-        );
+        errors.push(tr!(
+            fr: "cloud-localds est introuvable (création de nouvelles VM). \
+             Installez cloud-image-utils ou `virtum doctor`.",
+            en: "cloud-localds not found (needed to create new VMs). \
+             Install cloud-image-utils or run `virtum doctor`."
+        ));
     }
 
     if virtumfile::lab_uses_bridge(&lab) {
@@ -324,15 +374,33 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
             warnings.push(w.clone());
         }
         if let Some(iface) = explicit.or(cap.recommended_interface.as_deref()) {
-            println!("\nBridge LAN : interface cible « {iface} » (voir `virtum doctor`).");
+            println!(
+                "{}",
+                tr!(
+                    fr: "\nBridge LAN : interface cible « {iface} » (voir `virtum doctor`).",
+                    en: "\nLAN bridge: target interface '{iface}' (see `virtum doctor`)."
+                )
+            );
         }
         if virtumfile::lab_has_bridge_lab_mix(&lab) {
+            let lab_name = &lab.name;
             println!(
-                "  Mode hybride : machines bridge + NIC lab `virtum-lab-{}` (dual NIC).",
-                lab.name
+                "{}",
+                tr!(
+                    fr: "  Mode hybride : machines bridge + NIC lab `virtum-lab-{lab_name}` \
+                         (dual NIC).",
+                    en: "  Hybrid mode: bridge machines + lab NIC `virtum-lab-{lab_name}` (dual \
+                         NIC)."
+                )
             );
         } else if lab.network == Some(NetworkMode::Bridge) {
-            println!("  Lab entier en bridge : pas de réseau virtum-lab-*.");
+            println!(
+                "{}",
+                tr!(
+                    fr: "  Lab entier en bridge : pas de réseau virtum-lab-*.",
+                    en: "  Whole lab in bridge mode: no virtum-lab-* network."
+                )
+            );
         }
     }
 
@@ -345,77 +413,122 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
                 let when = state.provisioned_at.unwrap_or_default();
                 if any_create {
                     (
-                        format!("provisionné ({when}) ; sera rejoué au up (machines à créer)"),
+                        tr!(
+                            fr: "provisionné ({when}) ; sera rejoué au up (machines à créer)",
+                            en: "provisioned ({when}); will be replayed on up (machines to create)"
+                        ),
                         true,
                     )
                 } else {
                     (
-                        format!("déjà provisionné ({when}) — `virtum provision` pour rejouer"),
+                        tr!(
+                            fr: "déjà provisionné ({when}) — `virtum provision` pour rejouer",
+                            en: "already provisioned ({when}) — run `virtum provision` to replay"
+                        ),
                         false,
                     )
                 }
             }
             Some(_) => (
-                "dernier provisionnement en échec — sera rejoué au up".to_string(),
+                tr!(
+                    fr: "dernier provisionnement en échec — sera rejoué au up",
+                    en: "last provisioning failed — will be replayed on up"
+                ),
                 true,
             ),
-            None => ("sera joué au up (lab non provisionné)".to_string(), true),
+            None => (
+                tr!(
+                    fr: "sera joué au up (lab non provisionné)",
+                    en: "will run on up (lab not provisioned)"
+                ),
+                true,
+            ),
         };
         // L'instantané n'est pris qu'après un provisionnement joué par `up`.
         let snapshot = spec
             .snapshot_name()
             .filter(|_| will_run)
-            .map(|n| format!(", puis instantané '{n}'"))
+            .map(|n| tr!(fr: ", puis instantané '{n}'", en: ", then snapshot '{n}'"))
             .unwrap_or_default();
-        println!("\nAnsible : {} — {status}{snapshot}", spec.playbook);
+        let playbook = &spec.playbook;
+        println!(
+            "{}",
+            tr!(
+                fr: "\nAnsible : {playbook} — {status}{snapshot}",
+                en: "\nAnsible: {playbook} — {status}{snapshot}"
+            )
+        );
     }
 
     collect_bind_lan_warnings(&paths, &lab, &virtumfile_path, &mut warnings)?;
 
     if !warnings.is_empty() {
-        println!("\nAvertissements :");
+        println!("{}", tr!(fr: "\nAvertissements :", en: "\nWarnings:"));
         for w in &warnings {
             println!("  ! {w}");
         }
     }
 
     if !errors.is_empty() {
-        println!("\nErreurs (bloquent `virtum up`) :");
+        println!(
+            "{}",
+            tr!(fr: "\nErreurs (bloquent `virtum up`) :", en: "\nErrors (block `virtum up`):")
+        );
         for e in &errors {
             println!("  ✗ {e}");
         }
     }
 
     println!(
-        "\nRésumé : {create_n} à créer, {update_n} à mettre à jour (apply), {resume_n} à reprendre, {unchanged_n} inchangée(s), \
-         {remove_n} hors du Virtumfile. {} avertissement(s), {} erreur(s).",
-        warnings.len(),
-        errors.len()
+        "{}",
+        tr!(
+            fr: "\nRésumé : {create_n} à créer, {update_n} à mettre à jour (apply), \
+                 {resume_n} à reprendre, {unchanged_n} inchangée(s), \
+                 {remove_n} hors du Virtumfile. {} avertissement(s), {} erreur(s).",
+            en: "\nSummary: {create_n} to create, {update_n} to update (apply), \
+                 {resume_n} to resume, {unchanged_n} unchanged, \
+                 {remove_n} not in the Virtumfile. {} warning(s), {} error(s).",
+            warnings.len(),
+            errors.len()
+        )
     );
 
     if !errors.is_empty() {
-        bail!(
-            "Le plan contient {} erreur(s). Corrigez le Virtumfile ou l'hôte, puis relancez `virtum plan`.",
+        bail!(tr!(
+            fr: "Le plan contient {} erreur(s). Corrigez le Virtumfile ou l'hôte, \
+                 puis relancez `virtum plan`.",
+            en: "The plan has {} error(s). Fix the Virtumfile or the host, \
+                 then run `virtum plan` again.",
             errors.len()
-        );
+        ));
     }
 
+    let vf = virtumfile_path.display();
     if update_n > 0 {
         println!(
-            "Modifications détectées : virtum apply -f {}",
-            virtumfile_path.display()
+            "{}",
+            tr!(
+                fr: "Modifications détectées : virtum apply -f {vf}",
+                en: "Changes detected: virtum apply -f {vf}"
+            )
         );
     }
     if remove_n > 0 {
         println!(
-            "Machines hors du Virtumfile : virtum apply --prune -f {}",
-            virtumfile_path.display()
+            "{}",
+            tr!(
+                fr: "Machines hors du Virtumfile : virtum apply --prune -f {vf}",
+                en: "Machines not in the Virtumfile: virtum apply --prune -f {vf}"
+            )
         );
     }
     if create_n > 0 || resume_n > 0 {
         println!(
-            "Déploiement / reprise : virtum up -f {}",
-            virtumfile_path.display()
+            "{}",
+            tr!(
+                fr: "Déploiement / reprise : virtum up -f {vf}",
+                en: "Deploy / resume: virtum up -f {vf}"
+            )
         );
     }
     Ok(())
@@ -423,21 +536,36 @@ async fn plan_async(file: Option<PathBuf>) -> Result<()> {
 
 fn print_header(path: &Path, lab: &Virtumfile, paths: &VirtumPaths) {
     println!(
-        "Virtum plan — lab '{}' ({} machine(s))",
+        "Virtum plan — lab '{}' ({} machine(s))", // i18n-ok : identique en anglais
         lab.name,
         lab.machines.len()
     );
-    println!("  Virtumfile : {}", path.display());
-    println!("  État       : {}", paths.root.display());
+    let path = path.display();
+    let root = paths.root.display();
+    println!(
+        "{}",
+        tr!(fr: "  Virtumfile : {path}", en: "  Virtumfile:    {path}")
+    );
+    println!(
+        "{}",
+        tr!(fr: "  État       : {root}", en: "  State:         {root}")
+    );
     let bind_lab = lab.bind.map(|b| match b {
         PortBind::Local => "local",
         PortBind::Lan => "lan",
     });
     if let Some(b) = bind_lab {
-        println!("  bind (lab) : {b}");
+        println!(
+            "{}",
+            tr!(fr: "  bind (lab) : {b}", en: "  bind (lab):    {b}")
+        );
     }
     if let Some(network) = lab.network {
-        println!("  network (lab) : {}", network_mode_label(network));
+        let label = network_mode_label(network);
+        println!(
+            "{}",
+            tr!(fr: "  network (lab) : {label}", en: "  network (lab): {label}")
+        );
     }
 }
 
@@ -453,31 +581,47 @@ fn print_lab_network(lab: &Virtumfile, has_vms: bool, errors: &mut Vec<String>) 
         false
     };
     let mut status = if active {
-        "actif".to_string()
+        tr!(fr: "actif", en: "active")
     } else if defined {
-        "défini, inactif (sera démarré au up)".to_string()
+        tr!(
+            fr: "défini, inactif (sera démarré au up)",
+            en: "defined, inactive (will be started on up)"
+        )
     } else {
-        "à créer au up".to_string()
+        tr!(fr: "à créer au up", en: "to be created on up")
     };
     if let Some((addr, len)) = lab_network::defined_subnet(&net_name)? {
         if !(len == 24 && subnet.contains(addr)) {
             if has_vms {
-                errors.push(format!(
-                    "Le réseau {net_name} existe en {addr}/{len}, le Virtumfile demande {subnet} : \
-                     `virtum down -f … --destroy` puis `virtum up` pour changer de sous-réseau."
+                errors.push(tr!(
+                    fr: "Le réseau {net_name} existe en {addr}/{len}, le Virtumfile demande \
+                         {subnet} : \
+                     `virtum down -f … --destroy` puis `virtum up` pour changer de sous-réseau.",
+                    en: "Network {net_name} exists as {addr}/{len}, the Virtumfile asks for \
+                         {subnet}: \
+                     run `virtum down -f … --destroy` then `virtum up` to change the subnet."
                 ));
             } else {
-                status = format!("existe en {addr}/{len}, sera recréé au up (aucune VM)");
+                status = tr!(
+                    fr: "existe en {addr}/{len}, sera recréé au up (aucune VM)",
+                    en: "exists as {addr}/{len}, will be recreated on up (no VM)"
+                );
             }
         }
     }
     errors.extend(lab_network::subnet_conflicts(lab)?);
     let origin = if lab.subnet.is_some() {
-        "déclaré"
+        tr!(fr: "déclaré", en: "declared")
     } else {
-        "calculé"
+        tr!(fr: "calculé", en: "computed")
     };
-    println!("Réseau lab : {net_name} (NAT {subnet}, {origin}) — {status}");
+    println!(
+        "{}",
+        tr!(
+            fr: "Réseau lab : {net_name} (NAT {subnet}, {origin}) — {status}",
+            en: "Lab network: {net_name} (NAT {subnet}, {origin}) — {status}"
+        )
+    );
     Ok(())
 }
 
@@ -486,22 +630,32 @@ fn print_images(paths: &VirtumPaths, lab: &Virtumfile, warnings: &mut Vec<String
     os_set.sort();
     os_set.dedup();
 
-    println!("\nImages :");
+    println!("{}", tr!(fr: "\nImages :", en: "\nImages:"));
     let mut missing = Vec::new();
     for os in &os_set {
         let image = resolve_image(os, &paths.images)?;
         if image.local_path.is_file() {
-            println!("  ok   {}  {}", os, image.local_path.display());
+            println!("  ok   {}  {}", os, image.local_path.display()); // i18n-ok
         } else {
-            println!("  !    {}  manquante", os);
+            println!(
+                "{}",
+                tr!(fr: "  !    {}  manquante", en: "  !    {}  missing", os)
+            );
             missing.push(os.clone());
-            warnings.push(format!(
-                "Image '{os}' absente — téléchargez avec : virtum pull {os}"
+            warnings.push(tr!(
+                fr: "Image '{os}' absente — téléchargez avec : virtum pull {os}",
+                en: "Image '{os}' missing — download it with: virtum pull {os}"
             ));
         }
     }
     if !missing.is_empty() && missing.len() == os_set.len() {
-        println!("  → virtum pull <os> pour chaque OS listé ci-dessus.");
+        println!(
+            "{}",
+            tr!(
+                fr: "  → virtum pull <os> pour chaque OS listé ci-dessus.",
+                en: "  → virtum pull <os> for each OS listed above."
+            )
+        );
     }
     Ok(())
 }
@@ -521,61 +675,78 @@ fn collect_bind_lan_warnings(
         .iter()
         .map(|r| format!("{}/tcp", r.host_port))
         .collect();
+    let lan_list = rules
+        .iter()
+        .map(|r| format!("{}:{}→{}", r.machine, r.host_port, r.guest_port))
+        .collect::<Vec<_>>()
+        .join(", ");
     println!(
-        "\nPorts bind: lan : {} (socat 0.0.0.0)",
-        rules
-            .iter()
-            .map(|r| format!("{}:{}→{}", r.machine, r.host_port, r.guest_port))
-            .collect::<Vec<_>>()
-            .join(", ")
+        "{}",
+        tr!(
+            fr: "\nPorts bind: lan : {lan_list} (socat 0.0.0.0)",
+            en: "\nPorts bind: lan: {lan_list} (socat 0.0.0.0)"
+        )
     );
-    warnings.push(
-        "Sécurité réseau : bind: lan expose les ports mappés sur toutes les interfaces (0.0.0.0) \
-         — accessible depuis le réseau local. `virtum up` et `virtum apply` demanderont une confirmation (ou --yes-lan)."
-            .to_string(),
-    );
+    warnings.push(tr!(
+        fr: "Sécurité réseau : bind: lan expose les ports mappés sur toutes les interfaces \
+             (0.0.0.0) \
+         — accessible depuis le réseau local. `virtum up` et `virtum apply` demanderont une \
+         confirmation (ou --yes-lan).",
+        en: "Network security: bind: lan exposes the mapped ports on all interfaces (0.0.0.0) \
+         — reachable from the local network. `virtum up` and `virtum apply` will ask for \
+         confirmation (or --yes-lan)."
+    ));
 
     match firewall::get_firewall_state(paths, &lab.name)? {
         None => {
-            warnings.push(format!(
-                "Pare-feu hôte : aucun `virtum open` enregistré pour le lab '{}' (ports Virtumfile : {}). \
-                 Après `virtum up` : virtum open -f {}",
-                lab.name,
-                ports.join(", "),
-                virtumfile_path.display()
+            let lab_name = &lab.name;
+            let ports = ports.join(", ");
+            let vf = virtumfile_path.display();
+            warnings.push(tr!(
+                fr: "Pare-feu hôte : aucun `virtum open` enregistré pour le lab '{lab_name}' \
+                 (ports Virtumfile : {ports}). Après `virtum up` : virtum open -f {vf}",
+                en: "Host firewall: no `virtum open` recorded for lab '{lab_name}' \
+                 (Virtumfile ports: {ports}). After `virtum up`: virtum open -f {vf}"
             ));
         }
         Some(state) => {
             let desired_ports = firewall::lan_host_ports(&rules);
             let stored_ports = firewall::lan_host_ports(&state.rules);
             if firewall::firewall_ports_aligned(&rules, &state.rules) {
+                let desired = firewall::format_ports_tcp(&desired_ports);
                 println!(
-                    "  Pare-feu : `virtum open` aligné avec le Virtumfile ({})",
-                    firewall::format_ports_tcp(&desired_ports)
+                    "{}",
+                    tr!(
+                        fr: "  Pare-feu : `virtum open` aligné avec le Virtumfile ({desired})",
+                        en: "  Firewall: `virtum open` matches the Virtumfile ({desired})"
+                    )
                 );
             } else {
-                warnings.push(format!(
-                    "Pare-feu hôte : `virtum open` enregistre {} mais le Virtumfile demande {}. \
-                     Lancez : virtum close -f {} puis virtum open -f {}",
-                    firewall::format_ports_tcp(&stored_ports),
-                    firewall::format_ports_tcp(&desired_ports),
-                    virtumfile_path.display(),
-                    virtumfile_path.display()
+                let stored = firewall::format_ports_tcp(&stored_ports);
+                let desired = firewall::format_ports_tcp(&desired_ports);
+                let vf = virtumfile_path.display();
+                warnings.push(tr!(
+                    fr: "Pare-feu hôte : `virtum open` enregistre {stored} mais le Virtumfile \
+                     demande {desired}. Lancez : virtum close -f {vf} puis virtum open -f {vf}",
+                    en: "Host firewall: `virtum open` records {stored} but the Virtumfile \
+                     asks for {desired}. Run: virtum close -f {vf} then virtum open -f {vf}"
                 ));
             }
         }
     }
 
     if !command_exists("ufw") {
-        warnings.push(
-            "ufw introuvable — ouvrez les ports LAN manuellement ou installez ufw.".to_string(),
-        );
+        warnings.push(tr!(
+            fr: "ufw introuvable — ouvrez les ports LAN manuellement ou installez ufw.",
+            en: "ufw not found — open the LAN ports manually or install ufw."
+        ));
     } else if !firewall::is_ufw_enabled() {
-        warnings.push(
-            "ufw n'est pas activé (ENABLED=no dans /etc/ufw/ufw.conf). \
-             Requis pour `virtum open` : sudo ufw enable"
-                .to_string(),
-        );
+        warnings.push(tr!(
+            fr: "ufw n'est pas activé (ENABLED=no dans /etc/ufw/ufw.conf). \
+             Requis pour `virtum open` : sudo ufw enable",
+            en: "ufw is not enabled (ENABLED=no in /etc/ufw/ufw.conf). \
+             Required for `virtum open`: sudo ufw enable"
+        ));
     }
 
     Ok(())

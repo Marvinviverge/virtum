@@ -15,6 +15,7 @@ use crate::command::{path_arg, run_command};
 use crate::config::{self, VirtumPaths};
 use crate::disk::{format_virtual_size_label, image_virtual_size_bytes, parse_disk_size};
 use crate::metadata::{self, Instance, InstanceStatus};
+use crate::tr;
 use crate::virtumfile;
 use crate::vm;
 
@@ -42,19 +43,28 @@ struct DiskInfo {
 /// Nom d'instantané : lettres, chiffres, tiret, underscore (comme les noms de VM).
 pub fn validate_snapshot_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        bail!("Le nom d'instantané ne peut pas être vide.");
+        bail!(tr!(
+            fr: "Le nom d'instantané ne peut pas être vide.",
+            en: "The snapshot name cannot be empty."
+        ));
     }
     if name.len() > MAX_NAME_LEN {
-        bail!("Le nom d'instantané dépasse {MAX_NAME_LEN} caractères.");
+        bail!(tr!(
+            fr: "Le nom d'instantané dépasse {MAX_NAME_LEN} caractères.",
+            en: "The snapshot name exceeds {MAX_NAME_LEN} characters."
+        ));
     }
     if name.starts_with('-')
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        bail!(
-            "Le nom d'instantané '{name}' n'est pas valide (autorisé : lettres, chiffres, tiret, underscore)."
-        );
+        bail!(tr!(
+            fr: "Le nom d'instantané '{name}' n'est pas valide \
+             (autorisé : lettres, chiffres, tiret, underscore).",
+            en: "Invalid snapshot name '{name}' \
+             (allowed: letters, digits, hyphen, underscore)."
+        ));
     }
     Ok(())
 }
@@ -72,8 +82,10 @@ fn disk_info(disk_path: &Path) -> Result<DiskInfo> {
 }
 
 fn parse_disk_info(json: &str) -> Result<DiskInfo> {
-    let info: Value = serde_json::from_str(json)
-        .context("Impossible de parser la sortie qemu-img info (JSON)")?;
+    let info: Value = serde_json::from_str(json).context(tr!(
+        fr: "Impossible de parser la sortie qemu-img info (JSON)",
+        en: "Cannot parse qemu-img info output (JSON)"
+    ))?;
     let snapshots = info
         .get("snapshots")
         .and_then(Value::as_array)
@@ -124,8 +136,9 @@ fn run_qemu_img_snapshot(flag: &str, disk_path: &Path, name: &str) -> Result<()>
         &["snapshot", flag, tag.as_str(), path_arg(disk_path)?],
     )
     .with_context(|| {
-        format!(
-            "qemu-img snapshot {flag} {tag} a échoué sur {}",
+        tr!(
+            fr: "qemu-img snapshot {flag} {tag} a échoué sur {}",
+            en: "qemu-img snapshot {flag} {tag} failed on {}",
             disk_path.display()
         )
     })?;
@@ -168,10 +181,11 @@ async fn resolve_targets(
             .cloned()
             .collect();
         if instances.is_empty() {
-            bail!(
-                "Aucune VM pour le lab '{}'. Lancez `virtum up`, ou précisez les VM visées.",
+            bail!(tr!(
+                fr: "Aucune VM pour le lab '{}'. Lancez `virtum up`, ou précisez les VM visées.",
+                en: "No VM for lab '{}'. Run `virtum up`, or name the target VMs.",
                 lab.name
-            );
+            ));
         }
         instances
     } else {
@@ -190,11 +204,12 @@ async fn resolve_targets(
         let instance = vm::refresh_instance_status(&paths.metadata, instance).await?;
         let disk = paths.instances.join(&instance.id).join("disk.qcow2");
         if !disk.is_file() {
-            bail!(
-                "Disque introuvable pour '{}' : {}",
+            bail!(tr!(
+                fr: "Disque introuvable pour '{}' : {}",
+                en: "Disk not found for '{}': {}",
                 instance.name.as_deref().unwrap_or(&instance.id),
                 disk.display()
-            );
+            ));
         }
         targets.push(Target { instance, disk });
     }
@@ -229,13 +244,20 @@ where
     let mut stopped: Vec<&Target> = Vec::new();
     let mut result = Ok(());
     for target in &running {
-        eprintln!("Arrêt de '{}'…", target.label());
+        eprintln!(
+            "{}",
+            tr!(fr: "Arrêt de '{}'…", en: "Stopping '{}'…", target.label())
+        );
         let stop = match stop_mode {
             StopMode::Graceful => vm::stop_vm_async(target.label()).await,
             StopMode::Force => vm::kill_vm_async(target.label()).await,
         };
         if let Err(err) = stop {
-            result = Err(err.context(format!("Arrêt de '{}' impossible", target.label())));
+            result = Err(err.context(tr!(
+                fr: "Arrêt de '{}' impossible",
+                en: "Cannot stop '{}'",
+                target.label()
+            )));
             break;
         }
         stopped.push(target);
@@ -246,24 +268,41 @@ where
 
     if !restart {
         if !stopped.is_empty() {
-            eprintln!("VM laissées arrêtées (--no-restart) : {}", labels(&stopped));
+            eprintln!(
+                "{}",
+                tr!(
+                    fr: "VM laissées arrêtées (--no-restart) : {}",
+                    en: "VMs left stopped (--no-restart): {}",
+                    labels(&stopped)
+                )
+            );
         }
         return result;
     }
     let mut restart_failures = Vec::new();
     for target in &stopped {
-        eprintln!("Relance de '{}'…", target.label());
+        eprintln!(
+            "{}",
+            tr!(fr: "Relance de '{}'…", en: "Restarting '{}'…", target.label())
+        );
         if let Err(err) = vm::start_vm_async(target.label()).await {
-            eprintln!("error [{}]: {err:#}", target.label());
+            let label = target.label();
+            eprintln!(
+                "{}",
+                tr!(fr: "erreur [{label}] : {err:#}", en: "error [{label}]: {err:#}")
+            );
             restart_failures.push(target.label().to_string());
         }
     }
     result?;
     if !restart_failures.is_empty() {
-        bail!(
-            "Opération faite, mais relance impossible pour : {}. Relancez avec `virtum start`.",
+        bail!(tr!(
+            fr: "Opération faite, mais relance impossible pour : {}. \
+             Relancez avec `virtum start`.",
+            en: "Operation done, but could not restart: {}. \
+             Restart with `virtum start`.",
             restart_failures.join(", ")
-        );
+        ));
     }
     Ok(())
 }
@@ -272,10 +311,15 @@ fn warn_low_free_space(dir: &Path) {
     if let Some(free) = free_space_bytes(dir) {
         if free < LOW_FREE_SPACE_BYTES {
             eprintln!(
-                "Avertissement: seulement {} libres sous {} — chaque bloc réécrit après \
-                 l'instantané y sera conservé en double.",
-                format_bytes(free),
-                dir.display()
+                "{}",
+                tr!(
+                    fr: "Avertissement: seulement {} libres sous {} — chaque bloc réécrit après \
+                     l'instantané y sera conservé en double.",
+                    en: "Warning: only {} free under {} — every block rewritten after \
+                     the snapshot will be kept twice.",
+                    format_bytes(free),
+                    dir.display()
+                )
             );
         }
     }
@@ -301,9 +345,14 @@ fn warn_mounts_not_included(targets: &[Target]) {
             .is_some_and(|m| !m.is_empty())
         {
             eprintln!(
-                "Avertissement: les dossiers partagés (`mounts:`) de '{}' restent sur l'hôte \
-                 et ne font pas partie de l'instantané.",
-                target.label()
+                "{}",
+                tr!(
+                    fr: "Avertissement: les dossiers partagés (`mounts:`) de '{}' \
+                     restent sur l'hôte et ne font pas partie de l'instantané.",
+                    en: "Warning: the shared folders (`mounts:`) of '{}' stay on the host \
+                     and are not part of the snapshot.",
+                    target.label()
+                )
             );
         }
     }
@@ -318,7 +367,10 @@ fn block_on<F: std::future::Future<Output = Result<()>>>(future: F) -> Result<()
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime"
+        ))?
         .block_on(future)
 }
 
@@ -342,10 +394,13 @@ pub(crate) async fn create_async(
             .iter()
             .any(|s| s.name == name)
         {
-            bail!(
-                "L'instantané '{name}' existe déjà sur '{label}'. Supprimez-le d'abord : `virtum snapshot rm {name} {label}`.",
+            bail!(tr!(
+                fr: "L'instantané '{name}' existe déjà sur '{label}'. \
+                 Supprimez-le d'abord : `virtum snapshot rm {name} {label}`.",
+                en: "Snapshot '{name}' already exists on '{label}'. \
+                 Delete it first: `virtum snapshot rm {name} {label}`.",
                 label = target.label()
-            );
+            ));
         }
     }
     warn_low_free_space(&paths.instances);
@@ -359,19 +414,34 @@ pub(crate) async fn create_async(
                 for created in &done {
                     let _ = delete_disk_snapshot(&created.disk, name);
                 }
-                return Err(err.context(format!(
-                    "Instantané de '{}' impossible ; instantanés partiels annulés.",
+                return Err(err.context(tr!(
+                    fr: "Instantané de '{}' impossible ; instantanés partiels annulés.",
+                    en: "Cannot snapshot '{}'; partial snapshots rolled back.",
                     target.label()
                 )));
             }
-            eprintln!("  Instantané '{name}' pris pour '{}'.", target.label());
+            eprintln!(
+                "{}",
+                tr!(
+                    fr: "  Instantané '{name}' pris pour '{}'.",
+                    en: "  Snapshot '{name}' taken for '{}'.",
+                    target.label()
+                )
+            );
             done.push(target);
         }
         Ok(())
     })
     .await?;
 
-    println!("Instantané '{name}' créé : {}", labels(&refs));
+    println!(
+        "{}",
+        tr!(
+            fr: "Instantané '{name}' créé : {}",
+            en: "Snapshot '{name}' created: {}",
+            labels(&refs)
+        )
+    );
     Ok(())
 }
 
@@ -400,10 +470,13 @@ async fn restore_async(
         }
     }
     if !missing.is_empty() {
-        bail!(
-            "Instantané '{name}' absent de : {}. Rien n'a été modifié. Voir `virtum snapshot ls`.",
+        bail!(tr!(
+            fr: "Instantané '{name}' absent de : {}. Rien n'a été modifié. \
+             Voir `virtum snapshot ls`.",
+            en: "Snapshot '{name}' missing from: {}. Nothing was changed. \
+             See `virtum snapshot ls`.",
             labels(&missing)
-        );
+        ));
     }
     warn_mounts_not_included(&targets);
 
@@ -415,16 +488,24 @@ async fn restore_async(
             if let Err(err) = apply_disk_snapshot(&target.disk, name) {
                 let done: Vec<&Target> = restored.iter().map(|(t, _)| *t).collect();
                 let done = if done.is_empty() {
-                    "aucune".to_string()
+                    tr!(fr: "aucune", en: "none")
                 } else {
                     labels(&done)
                 };
-                return Err(err.context(format!(
-                    "Retour à '{name}' impossible pour '{}'. VM déjà restaurées : {done}.",
+                return Err(err.context(tr!(
+                    fr: "Retour à '{name}' impossible pour '{}'. VM déjà restaurées : {done}.",
+                    en: "Cannot restore '{name}' for '{}'. VMs already restored: {done}.",
                     target.label()
                 )));
             }
-            eprintln!("  '{}' revenue à l'instantané '{name}'.", target.label());
+            eprintln!(
+                "{}",
+                tr!(
+                    fr: "  '{}' revenue à l'instantané '{name}'.",
+                    en: "  '{}' restored to snapshot '{name}'.",
+                    target.label()
+                )
+            );
             restored.push((target, image_virtual_size_bytes(&target.disk)?));
         }
         Ok(())
@@ -433,7 +514,14 @@ async fn restore_async(
     sync_disk_sizes(&paths, &restored).await?;
     result?;
 
-    println!("Instantané '{name}' restauré : {}", labels(&refs));
+    println!(
+        "{}",
+        tr!(
+            fr: "Instantané '{name}' restauré : {}",
+            en: "Snapshot '{name}' restored: {}",
+            labels(&refs)
+        )
+    );
     Ok(())
 }
 
@@ -450,10 +538,15 @@ async fn sync_disk_sizes(paths: &VirtumPaths, restored: &[(&Target, u64)]) -> Re
             continue;
         };
         eprintln!(
-            "Avertissement: le disque de '{}' est revenu à {new_label} (au lieu de {}) ; \
-             `virtum plan` signalera l'écart avec le Virtumfile.",
-            target.label(),
-            instance.disk_size.as_deref().unwrap_or("-")
+            "{}",
+            tr!(
+                fr: "Avertissement: le disque de '{}' est revenu à {new_label} (au lieu de {}) ; \
+                 `virtum plan` signalera l'écart avec le Virtumfile.",
+                en: "Warning: the disk of '{}' went back to {new_label} (instead of {}); \
+                 `virtum plan` will report the drift from the Virtumfile.",
+                target.label(),
+                instance.disk_size.as_deref().unwrap_or("-")
+            )
         );
         let mut instance = instance.clone();
         instance.disk_size = Some(new_label);
@@ -492,22 +585,37 @@ async fn remove_async(
         }
     }
     if holders.is_empty() {
-        bail!(
-            "Instantané '{name}' introuvable sur {}. Voir `virtum snapshot ls`.",
+        bail!(tr!(
+            fr: "Instantané '{name}' introuvable sur {}. Voir `virtum snapshot ls`.",
+            en: "Snapshot '{name}' not found on {}. See `virtum snapshot ls`.",
             labels(&targets.iter().collect::<Vec<_>>())
-        );
+        ));
     }
 
     with_vms_stopped(&holders, StopMode::Graceful, !no_restart, || {
         for target in &holders {
             delete_disk_snapshot(&target.disk, name)?;
-            eprintln!("  Instantané '{name}' supprimé de '{}'.", target.label());
+            eprintln!(
+                "{}",
+                tr!(
+                    fr: "  Instantané '{name}' supprimé de '{}'.",
+                    en: "  Snapshot '{name}' deleted from '{}'.",
+                    target.label()
+                )
+            );
         }
         Ok(())
     })
     .await?;
 
-    println!("Instantané '{name}' supprimé : {}", labels(&holders));
+    println!(
+        "{}",
+        tr!(
+            fr: "Instantané '{name}' supprimé : {}",
+            en: "Snapshot '{name}' deleted: {}",
+            labels(&holders)
+        )
+    );
     Ok(())
 }
 
@@ -543,14 +651,23 @@ fn format_listing(per_disk: &[(String, DiskInfo)]) -> String {
     let mut out = String::new();
     if by_name.is_empty() {
         let all: Vec<&str> = per_disk.iter().map(|(l, _)| l.as_str()).collect();
-        out.push_str(&format!("Aucun instantané ({}).\n", all.join(", ")));
+        out.push_str(&tr!(
+            fr: "Aucun instantané ({}).\n",
+            en: "No snapshot ({}).\n",
+            all.join(", ")
+        ));
     } else {
         let mut rows: Vec<(&str, i64, Vec<&str>)> = by_name
             .into_iter()
             .map(|(name, (date, vms))| (name, date, vms))
             .collect();
         rows.sort_by_key(|(name, date, _)| (*date, *name));
-        out.push_str(&format!("{:<24} {:<17} {}\n", "SNAPSHOT", "DATE", "VMS"));
+        out.push_str(&format!(
+            "{:<24} {:<17} {}\n",
+            "SNAPSHOT", // i18n-ok : en-tête lu par des scripts
+            "DATE",     // i18n-ok : en-tête lu par des scripts
+            "VMS"       // i18n-ok : en-tête lu par des scripts
+        ));
         for (name, date, vms) in rows {
             out.push_str(&format!(
                 "{:<24} {:<17} {}\n",
@@ -564,8 +681,9 @@ fn format_listing(per_disk: &[(String, DiskInfo)]) -> String {
         .iter()
         .map(|(label, info)| format!("{label} {}", format_bytes(info.actual_size)))
         .collect();
-    out.push_str(&format!(
-        "Disques (instantanés compris) : {}\n",
+    out.push_str(&tr!(
+        fr: "Disques (instantanés compris) : {}\n",
+        en: "Disks (snapshots included): {}\n",
         sizes.join(", ")
     ));
     out

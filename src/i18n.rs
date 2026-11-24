@@ -183,6 +183,27 @@ macro_rules! tr {
     };
 }
 
+/// Comme [`tr!`], pour un texte fixe sans argument : renvoie un `&'static str`.
+#[macro_export]
+macro_rules! tr_static {
+    (fr: $fr:literal, en: $en:literal $(,)?) => {
+        match $crate::i18n::lang() {
+            $crate::i18n::Lang::Fr => $fr,
+            $crate::i18n::Lang::En => $en,
+        }
+    };
+}
+
+/// Réponse positive à une question `[o/N]` / `[y/N]` : `y` dans les deux langues (scripts),
+/// `o` en plus en français.
+pub fn confirmed(answer: &str) -> bool {
+    match answer.trim() {
+        "y" | "Y" => true,
+        "o" | "O" => lang() == Lang::Fr,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +302,34 @@ mod tests {
         ] {
             assert_eq!(lang_of_locale(locale), lang, "{locale}");
         }
+    }
+
+    #[test]
+    fn confirmation_accepts_y_and_french_o() {
+        for (answer, fr, en) in [
+            ("y", true, true),
+            ("Y\n", true, true),
+            ("o", true, false),
+            ("O", true, false),
+            ("oui", false, false),
+            ("", false, false),
+            ("n", false, false),
+        ] {
+            assert_eq!(
+                with_lang(Lang::Fr, || confirmed(answer)),
+                fr,
+                "fr {answer:?}"
+            );
+            assert_eq!(
+                with_lang(Lang::En, || confirmed(answer)),
+                en,
+                "en {answer:?}"
+            );
+        }
+        assert_eq!(
+            with_lang(Lang::En, || tr_static!(fr: "oui", en: "yes")),
+            "yes"
+        );
     }
 
     #[test]

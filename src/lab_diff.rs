@@ -21,6 +21,7 @@ use crate::ssh::{
     ensure_ssh_keypair, reachable_ssh_port, run_provision_commands, run_ssh_mount_steps,
     SshSessionOpts,
 };
+use crate::tr;
 use crate::virtumfile::{self, MachineSpec, MountSpec, RestartPolicy, Virtumfile};
 use crate::vm::{self, lab_vm_id};
 
@@ -102,7 +103,10 @@ impl MachineChange {
             Self::PortForwards { from, to } => {
                 format!("ports: {} → {}", format_ports(from), format_ports(to))
             }
-            Self::Os { from, to } => format!("os: {from} → {to} (non applicable)"),
+            Self::Os { from, to } => tr!(
+                fr: "os: {from} → {to} (non applicable)",
+                en: "os: {from} → {to} (not applicable)"
+            ),
             Self::MountsAdd { volumes } => {
                 format!(
                     "mounts: +{} ({})",
@@ -117,9 +121,12 @@ impl MachineChange {
             Self::StaticIp { from, to } => {
                 let label = |ip: &Option<String>| ip.clone().unwrap_or_else(|| "(dhcp)".into());
                 let note = if to.is_some() {
-                    " (redémarrage de la VM)"
+                    tr!(fr: " (redémarrage de la VM)", en: " (VM restart)")
                 } else {
-                    " (adresse actuelle conservée jusqu'à la fin du bail)"
+                    tr!(
+                        fr: " (adresse actuelle conservée jusqu'à la fin du bail)",
+                        en: " (current address kept until the lease expires)"
+                    )
                 };
                 format!("ip: {} → {}{note}", label(from), label(to))
             }
@@ -226,11 +233,11 @@ pub struct LabDiff {
     pub removals: Vec<Removal>,
 }
 
-fn external_note(external: bool) -> &'static str {
+fn external_note(external: bool) -> String {
     if external {
-        " (modifié hors de Virtum)"
+        tr!(fr: " (modifié hors de Virtum)", en: " (changed outside Virtum)")
     } else {
-        ""
+        String::new()
     }
 }
 
@@ -257,16 +264,24 @@ fn live_ram_vcpu(vm_id: &str) -> Option<(u32, u32)> {
         Ok(values) => Some(values),
         Err(err) => {
             eprintln!(
-                "Avertissement: RAM/vCPU illisibles dans libvirt pour {vm_id} ({err:#}) ; \
-                 comparaison avec config.xml."
+                "{}",
+                tr!(
+                    fr: "Avertissement: RAM/vCPU illisibles dans libvirt pour {vm_id} ({err:#}) ; \
+                 comparaison avec config.xml.",
+                    en: "Warning: cannot read RAM/vCPU from libvirt for {vm_id} ({err:#}); \
+                 comparing with config.xml."
+                )
             );
             None
         }
     }
 }
 
-fn restart_label(restart: Option<RestartPolicy>) -> &'static str {
-    restart.map_or("(non géré)", RestartPolicy::label)
+fn restart_label(restart: Option<RestartPolicy>) -> String {
+    restart.map_or_else(
+        || tr!(fr: "(non géré)", en: "(not managed)"),
+        |r| r.label().to_string(),
+    )
 }
 
 pub fn bind_label(bind: PortBind) -> &'static str {
@@ -297,13 +312,19 @@ pub fn collect_lab_blocking_errors(
     let mut errors = Vec::new();
     for machine_name in lab.machines.keys() {
         if let Err(e) = mounts::resolve_machine_mounts(lab, machine_name, &dir) {
-            errors.push(format!("Machine '{machine_name}' : {e:#}"));
+            errors.push(tr!(
+                fr: "Machine '{machine_name}' : {e:#}",
+                en: "Machine '{machine_name}': {e:#}"
+            ));
         }
         if let Some(inst) = metadata::find_by_lab_machine(metadata, &lab.name, machine_name) {
             let stored = inst.mounts.clone().unwrap_or_default();
             let desired = virtumfile::effective_mount_specs(lab, machine_name);
             for msg in mounts::mounts_changed_blocking(&stored, &desired) {
-                errors.push(format!("Machine '{machine_name}' : {msg}"));
+                errors.push(tr!(
+                    fr: "Machine '{machine_name}' : {msg}",
+                    en: "Machine '{machine_name}': {msg}"
+                ));
             }
         }
     }
@@ -320,8 +341,11 @@ pub fn collect_mount_warnings(lab: &Virtumfile, metadata: &metadata::Metadata) -
         let stored = inst.mounts.clone().unwrap_or_default();
         let desired = virtumfile::effective_mount_specs(lab, machine_name);
         for name in mounts::mounts_removed_from_file(&stored, &desired) {
-            warnings.push(format!(
-                "Machine '{machine_name}' : volume mount '{name}' retiré du Virtumfile mais toujours actif sur la VM (destroy pour retirer)."
+            warnings.push(tr!(
+                fr: "Machine '{machine_name}' : volume mount '{name}' retiré du Virtumfile mais \
+                     toujours actif sur la VM (destroy pour retirer).",
+                en: "Machine '{machine_name}': mount volume '{name}' removed from the Virtumfile \
+                     but still active on the VM (destroy to remove it)."
             ));
         }
     }
@@ -488,9 +512,12 @@ pub async fn build_lab_diff(virtumfile_path: PathBuf, lab: Virtumfile) -> Result
             None => creates.push(machine_name.clone()),
             Some(inst) => {
                 if inst.id != vm_id {
-                    blocking_errors.push(format!(
-                        "Machine '{machine_name}' : metadata {} ≠ domaine attendu {vm_id}.",
-                        inst.id
+                    let inst_id = &inst.id;
+                    blocking_errors.push(tr!(
+                        fr: "Machine '{machine_name}' : metadata {inst_id} ≠ domaine attendu \
+                             {vm_id}.",
+                        en: "Machine '{machine_name}': metadata {inst_id} ≠ expected domain \
+                             {vm_id}."
                     ));
                     continue;
                 }
@@ -530,19 +557,31 @@ pub async fn apply_lab(
         for e in &diff.blocking_errors {
             eprintln!("✗ {e}");
         }
-        bail!(
-            "Impossible d'appliquer : {} erreur(s) bloquante(s).",
+        bail!(tr!(
+            fr: "Impossible d'appliquer : {} erreur(s) bloquante(s).",
+            en: "Cannot apply: {} blocking error(s).",
             diff.blocking_errors.len()
-        );
+        ));
     }
 
     if diff.machine_diffs.is_empty() && (diff.removals.is_empty() || !prune) {
-        println!("Aucune modification à appliquer sur le lab '{}'.", lab.name);
+        let lab_name = &lab.name;
+        println!(
+            "{}",
+            tr!(
+                fr: "Aucune modification à appliquer sur le lab '{lab_name}'.",
+                en: "No changes to apply to lab '{lab_name}'."
+            )
+        );
         if !diff.creates.is_empty() {
+            let creates = diff.creates.join(", ");
+            let vf = virtumfile_path.display();
             println!(
-                "Machines absentes : {}. Lancez : virtum up -f {}",
-                diff.creates.join(", "),
-                virtumfile_path.display()
+                "{}",
+                tr!(
+                    fr: "Machines absentes : {creates}. Lancez : virtum up -f {vf}",
+                    en: "Missing machines: {creates}. Run: virtum up -f {vf}"
+                )
             );
         }
         print_removal_reminder(&diff.removals, &virtumfile_path);
@@ -551,7 +590,10 @@ pub async fn apply_lab(
 
     // Confirmation avant toute modification : un refus n'applique rien.
     if prune && !diff.removals.is_empty() && !yes && !confirm_prune(&diff.removals)? {
-        println!("Apply annulé : aucune modification.");
+        println!(
+            "{}",
+            tr!(fr: "Apply annulé : aucune modification.", en: "Apply cancelled: nothing changed.")
+        );
         return Ok(());
     }
     // Même règle que `virtum up` (V-003) : exposer des ports sur 0.0.0.0 demande une
@@ -565,9 +607,13 @@ pub async fn apply_lab(
 
     if !diff.machine_diffs.is_empty() {
         println!(
-            "Application de {} modification(s) sur le lab '{}'…",
-            diff.machine_diffs.len(),
-            lab.name
+            "{}",
+            tr!(
+                fr: "Application de {} modification(s) sur le lab '{}'…",
+                en: "Applying {} change(s) to lab '{}'…",
+                diff.machine_diffs.len(),
+                lab.name
+            )
         );
     }
 
@@ -578,18 +624,23 @@ pub async fn apply_lab(
             .iter()
             .any(|c| matches!(c, MachineChange::Os { .. }))
         {
-            bail!(
-                "La machine '{}' demande un changement d'OS (non supporté par apply). \
+            bail!(tr!(
+                fr: "La machine '{}' demande un changement d'OS (non supporté par apply). \
                  Utilisez `virtum down -f {} --destroy` puis `virtum up`.",
+                en: "Machine '{}' requires an OS change (not supported by apply). \
+                 Use `virtum down -f {} --destroy` then `virtum up`.",
                 md.machine_name,
                 virtumfile_path.display()
-            );
+            ));
         }
         for c in &md.changes {
             if c.is_blocking() {
                 continue;
             }
-            println!("  {} : {}", md.machine_name, c.summary_line());
+            println!(
+                "{}",
+                tr!(fr: "  {} : {}", en: "  {}: {}", md.machine_name, c.summary_line())
+            );
         }
 
         let spec = &lab.machines[&md.machine_name];
@@ -620,16 +671,26 @@ pub async fn apply_lab(
     }
 
     if needs_open_hint && !firewall::has_firewall_state(&paths, &lab.name)? {
+        let vf = virtumfile_path.display();
         println!(
-            "Pare-feu LAN : lancez `virtum open -f {}` si ce n'est pas déjà fait.",
-            virtumfile_path.display()
+            "{}",
+            tr!(
+                fr: "Pare-feu LAN : lancez `virtum open -f {vf}` si ce n'est pas déjà fait.",
+                en: "LAN firewall: run `virtum open -f {vf}` if not done already."
+            )
         );
     }
 
     if lab.ansible.is_some() && !diff.machine_diffs.is_empty() {
+        let vf = virtumfile_path.display();
         println!(
-            "Machines modifiées : `virtum provision -f {}` si le playbook Ansible doit être rejoué.",
-            virtumfile_path.display()
+            "{}",
+            tr!(
+                fr: "Machines modifiées : `virtum provision -f {vf}` si le playbook Ansible doit \
+                     être rejoué.",
+                en: "Machines changed: run `virtum provision -f {vf}` if the Ansible playbook \
+                     must be replayed."
+            )
         );
     }
     if prune {
@@ -638,7 +699,14 @@ pub async fn apply_lab(
         print_removal_reminder(&diff.removals, &virtumfile_path);
     }
 
-    println!("Apply terminé pour le lab '{}'.", lab.name);
+    let lab_name = &lab.name;
+    println!(
+        "{}",
+        tr!(
+            fr: "Apply terminé pour le lab '{lab_name}'.",
+            en: "Apply finished for lab '{lab_name}'."
+        )
+    );
     Ok(())
 }
 
@@ -647,10 +715,16 @@ fn print_removal_reminder(removals: &[Removal], virtumfile_path: &Path) {
         return;
     }
     let names: Vec<&str> = removals.iter().map(|r| r.machine_name.as_str()).collect();
+    let names = names.join(", ");
+    let vf = virtumfile_path.display();
     println!(
-        "Machines hors du Virtumfile, conservées : {}. Pour les supprimer : virtum apply --prune -f {}",
-        names.join(", "),
-        virtumfile_path.display()
+        "{}",
+        tr!(
+            fr: "Machines hors du Virtumfile, conservées : {names}. \
+                 Pour les supprimer : virtum apply --prune -f {vf}",
+            en: "Machines not in the Virtumfile, kept: {names}. \
+                 To remove them: virtum apply --prune -f {vf}"
+        )
     );
 }
 
@@ -659,27 +733,42 @@ fn print_removal_reminder(removals: &[Removal], virtumfile_path: &Path) {
 fn confirm_prune(removals: &[Removal]) -> Result<bool> {
     use std::io::{self, IsTerminal, Write};
 
-    eprintln!("Machines hors du Virtumfile à supprimer (VM, disque et instantanés) :");
+    eprintln!(
+        "{}",
+        tr!(
+            fr: "Machines hors du Virtumfile à supprimer (VM, disque et instantanés) :",
+            en: "Machines not in the Virtumfile to remove (VM, disk and snapshots):"
+        )
+    );
     for r in removals {
         let snaps = if r.snapshots > 0 {
-            format!(", {} instantané(s)", r.snapshots)
+            tr!(fr: ", {} instantané(s)", en: ", {} snapshot(s)", r.snapshots)
         } else {
             String::new()
         };
         eprintln!("  - {} ({}{snaps})", r.machine_name, r.vm_id);
     }
     if !io::stdin().is_terminal() {
-        bail!(
-            "Refus de `--prune` sans terminal interactif : relancez avec `--yes` pour confirmer la suppression."
-        );
+        bail!(tr!(
+            fr: "Refus de `--prune` sans terminal interactif : relancez avec `--yes` pour \
+                 confirmer la suppression.",
+            en: "Refusing `--prune` without an interactive terminal: run again with `--yes` to \
+                 confirm the removal."
+        ));
     }
-    eprint!("Supprimer ces machines ? Les dossiers `mounts:` de l'hôte sont conservés. [y/N] ");
+    eprint!(
+        "{}",
+        tr!(
+            fr: "Supprimer ces machines ? Les dossiers `mounts:` de l'hôte sont conservés. [o/N] ",
+            en: "Remove these machines? The host's `mounts:` folders are kept. [y/N] "
+        )
+    );
     io::stderr().flush().ok();
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
         return Ok(false);
     }
-    Ok(matches!(line.trim(), "y" | "Y"))
+    Ok(crate::i18n::confirmed(&line))
 }
 
 /// Supprime les machines hors du Virtumfile (comme `virtum destroy`, sans `--purge`).
@@ -692,24 +781,39 @@ async fn prune_removals(
 ) -> Result<()> {
     let mut failed = Vec::new();
     for r in removals {
-        eprintln!("  Suppression de '{}' ({})…", r.machine_name, r.vm_id);
+        eprintln!(
+            "{}",
+            tr!(
+                fr: "  Suppression de '{}' ({})…",
+                en: "  Removing '{}' ({})…",
+                r.machine_name,
+                r.vm_id
+            )
+        );
         if let Err(err) = vm::destroy_vm_async(&r.vm_id, false).await {
             eprintln!("  ✗ '{}' : {err:#}", r.machine_name);
             failed.push(r.machine_name.clone());
         }
     }
     if removals.iter().any(|r| r.lan_ports) && firewall::has_firewall_state(paths, lab_name)? {
+        let vf = virtumfile_path.display();
         println!(
-            "Pare-feu LAN : des ports `bind: lan` ont été retirés ; réalignez ufw avec `virtum open -f {}`.",
-            virtumfile_path.display()
+            "{}",
+            tr!(
+                fr: "Pare-feu LAN : des ports `bind: lan` ont été retirés ; \
+                     réalignez ufw avec `virtum open -f {vf}`.",
+                en: "LAN firewall: `bind: lan` ports were removed; \
+                     realign ufw with `virtum open -f {vf}`."
+            )
         );
     }
     if !failed.is_empty() {
-        bail!(
-            "Retrait incomplet : {} machine(s) restent ({}).",
+        bail!(tr!(
+            fr: "Retrait incomplet : {} machine(s) restent ({}).",
+            en: "Incomplete removal: {} machine(s) remain ({}).",
             failed.len(),
             failed.join(", ")
-        );
+        ));
     }
     Ok(())
 }
@@ -726,8 +830,11 @@ async fn apply_machine(
     insecure_ssh: bool,
 ) -> Result<()> {
     let metadata = metadata::load_metadata(&paths.metadata).await?;
-    let instance = metadata::find_by_lab_machine(&metadata, lab_name, &md.machine_name)
-        .context("Instance introuvable pendant apply")?;
+    let instance =
+        metadata::find_by_lab_machine(&metadata, lab_name, &md.machine_name).context(tr!(
+            fr: "Instance introuvable pendant apply",
+            en: "Instance not found during apply"
+        ))?;
     let instance_dir = paths.instances.join(&md.vm_id);
     let vm_id = &md.vm_id;
     let ssh_opts = SshSessionOpts::new(&instance_dir, insecure_ssh);
@@ -748,7 +855,13 @@ async fn apply_machine(
     port_forward::stop_instance_proxies(&instance_dir);
 
     if (needs_stop || ip_renew) && was_running {
-        eprintln!("  Arrêt de '{vm_id}' pour appliquer les changements…");
+        eprintln!(
+            "{}",
+            tr!(
+                fr: "  Arrêt de '{vm_id}' pour appliquer les changements…",
+                en: "  Stopping '{vm_id}' to apply the changes…"
+            )
+        );
         vm::stop_vm_async(instance.name.as_deref().unwrap_or(vm_id)).await?;
     } else if needs_stop && domain_exists(vm_id) {
         destroy_domain(vm_id)?;
@@ -807,8 +920,13 @@ async fn apply_machine(
             net_cfg.bridge_host_interface.as_deref(),
         )?;
         eprintln!(
-            "  Domaine '{vm_id}' redéfini (RAM {} MiB, {} vCPU).",
-            spec.ram, spec.cpu
+            "{}",
+            tr!(
+                fr: "  Domaine '{vm_id}' redéfini (RAM {} MiB, {} vCPU).",
+                en: "  Domain '{vm_id}' redefined (RAM {} MiB, {} vCPU).",
+                spec.ram,
+                spec.cpu
+            )
         );
     }
 
@@ -852,14 +970,20 @@ async fn apply_machine(
 
     if was_running && (needs_stop || ip_renew) {
         let reference = instance.name.clone().unwrap_or_else(|| vm_id.clone());
-        eprintln!("  Redémarrage de '{reference}'…");
+        eprintln!(
+            "{}",
+            tr!(
+                fr: "  Redémarrage de '{reference}'…",
+                en: "  Restarting '{reference}'…"
+            )
+        );
         vm::start_vm_async(&reference).await?;
     }
 
     if grow_guest {
         let meta = metadata::load_metadata(&paths.metadata).await?;
         let inst = metadata::find_by_lab_machine(&meta, lab_name, &md.machine_name)
-            .context("metadata après apply")?;
+            .context(tr!(fr: "metadata après apply", en: "metadata after apply"))?;
         if let Some(ref ip) = inst.ip {
             if domain_exists(vm_id)
                 && domain_state(vm_id)
@@ -867,7 +991,13 @@ async fn apply_machine(
                     .unwrap_or(false)
             {
                 let keys = ensure_ssh_keypair(&paths.keys)?;
-                eprintln!("  Extension de la partition racine sur '{ip}'…");
+                eprintln!(
+                    "{}",
+                    tr!(
+                        fr: "  Extension de la partition racine sur '{ip}'…",
+                        en: "  Growing the root partition on '{ip}'…"
+                    )
+                );
                 let cmds: Vec<String> = GROW_COMMANDS.iter().map(|s| s.to_string()).collect();
                 run_provision_commands(
                     &keys.private_key,
@@ -881,7 +1011,13 @@ async fn apply_machine(
             }
         } else {
             eprintln!(
-                "  Disque qcow2 agrandi. Démarrez la VM (`virtum start` / `virtum up`) puis relancez apply si la partition invitée n'a pas grandi."
+                "{}",
+                tr!(
+                    fr: "  Disque qcow2 agrandi. Démarrez la VM (`virtum start` / `virtum up`) \
+                         puis relancez apply si la partition invitée n'a pas grandi.",
+                    en: "  qcow2 disk grown. Start the VM (`virtum start` / `virtum up`) \
+                         then run apply again if the guest partition did not grow."
+                )
             );
         }
     }
@@ -889,7 +1025,7 @@ async fn apply_machine(
     if !desired_ports.is_empty() {
         let meta = metadata::load_metadata(&paths.metadata).await?;
         let inst = metadata::find_by_lab_machine(&meta, lab_name, &md.machine_name)
-            .context("metadata pour socat")?;
+            .context(tr!(fr: "metadata pour socat", en: "metadata for socat"))?;
         if let Some(ref ip) = inst.ip {
             if domain_exists(vm_id)
                 && domain_state(vm_id)
@@ -910,7 +1046,7 @@ async fn apply_machine(
     if !mounts_added_ssh.is_empty() {
         let meta = metadata::load_metadata(&paths.metadata).await?;
         let inst = metadata::find_by_lab_machine(&meta, lab_name, &md.machine_name)
-            .context("metadata pour mounts SSH")?;
+            .context(tr!(fr: "metadata pour mounts SSH", en: "metadata for SSH mounts"))?;
         if let Some(ref ip) = inst.ip {
             if domain_exists(vm_id)
                 && domain_state(vm_id)
@@ -919,8 +1055,12 @@ async fn apply_machine(
             {
                 let keys = ensure_ssh_keypair(&paths.keys)?;
                 eprintln!(
-                    "  Montage virtiofs dans la VM ({} volume(s))…",
-                    mounts_added_ssh.len()
+                    "{}",
+                    tr!(
+                        fr: "  Montage virtiofs dans la VM ({} volume(s))…",
+                        en: "  Mounting virtiofs in the VM ({} volume(s))…",
+                        mounts_added_ssh.len()
+                    )
                 );
                 run_ssh_mount_steps(
                     &keys.private_key,
@@ -959,18 +1099,37 @@ fn apply_static_ip(
     hostname: &str,
     ip: Option<&str>,
 ) -> Result<()> {
-    let net = lab_net.context("`ip:` nécessite le réseau du lab (virtum-lab-*)")?;
-    let mac = crate::libvirt::resolve_nic_mac(instance_dir, vm_id)
-        .with_context(|| format!("MAC de la carte lab introuvable pour {vm_id}"))?;
+    let net = lab_net.context(tr!(
+        fr: "`ip:` nécessite le réseau du lab (virtum-lab-*)",
+        en: "`ip:` requires the lab network (virtum-lab-*)"
+    ))?;
+    let mac = crate::libvirt::resolve_nic_mac(instance_dir, vm_id).with_context(|| {
+        tr!(
+            fr: "MAC de la carte lab introuvable pour {vm_id}",
+            en: "Lab NIC MAC address not found for {vm_id}"
+        )
+    })?;
     match ip {
         Some(ip) => {
             lab_network::ensure_dhcp_reservation(net, &mac, hostname, ip)?;
-            eprintln!("  Réservation DHCP : {ip} pour {mac}.");
+            eprintln!(
+                "{}",
+                tr!(
+                    fr: "  Réservation DHCP : {ip} pour {mac}.",
+                    en: "  DHCP reservation: {ip} for {mac}."
+                )
+            );
         }
         None => {
             lab_network::remove_dhcp_reservations(net, &mac)?;
             eprintln!(
-                "  Réservation DHCP retirée : la VM garde son adresse actuelle jusqu'à la fin du bail."
+                "{}",
+                tr!(
+                    fr: "  Réservation DHCP retirée : la VM garde son adresse actuelle jusqu'à \
+                         la fin du bail.",
+                    en: "  DHCP reservation removed: the VM keeps its current address until \
+                         the lease expires."
+                )
             );
         }
     }
@@ -990,9 +1149,13 @@ async fn apply_mounts_add(
     let instance_dir = paths.instances.join(&md.vm_id);
     let vm_id = &md.vm_id;
 
-    let vf_dir = vf_dir
-        .canonicalize()
-        .with_context(|| format!("Répertoire Virtumfile invalide: {}", vf_dir.display()))?;
+    let vf_dir = vf_dir.canonicalize().with_context(|| {
+        let dir = vf_dir.display();
+        tr!(
+            fr: "Répertoire Virtumfile invalide: {dir}",
+            en: "Invalid Virtumfile directory: {dir}"
+        )
+    })?;
     let mut state = mounts::load_mounts_state(&instance_dir)?;
     let mut newly_added = Vec::new();
     for add in additions {
@@ -1001,23 +1164,24 @@ async fn apply_mounts_add(
             // Volume retiré puis rajouté : l'entrée encore active ne doit pas garder un
             // autre accès ou un autre dossier que ce que le Virtumfile déclare.
             if existing.read_only != resolved.read_only || existing.host_abs != resolved.host_abs {
-                bail!(
-                    "volume '{}' : encore actif sur {} ({}), alors que le Virtumfile déclare {} \
+                let access = |read_only: bool| {
+                    if read_only {
+                        tr!(fr: "lecture seule", en: "read-only")
+                    } else {
+                        tr!(fr: "lecture-écriture", en: "read-write")
+                    }
+                };
+                bail!(tr!(
+                    fr: "volume '{}' : encore actif sur {} ({}), alors que le Virtumfile déclare {} \
                      ({}). Utilisez virtum destroy puis virtum up.",
+                    en: "volume '{}': still active on {} ({}), while the Virtumfile declares {} \
+                     ({}). Use virtum destroy then virtum up.",
                     add.name,
                     existing.host_abs.display(),
-                    if existing.read_only {
-                        "lecture seule"
-                    } else {
-                        "lecture-écriture"
-                    },
+                    access(existing.read_only),
                     resolved.host_abs.display(),
-                    if resolved.read_only {
-                        "lecture seule"
-                    } else {
-                        "lecture-écriture"
-                    }
-                );
+                    access(resolved.read_only)
+                ));
             }
             continue;
         }
@@ -1051,8 +1215,12 @@ async fn apply_mounts_add(
         net_cfg.bridge_host_interface.as_deref(),
     )?;
     eprintln!(
-        "  Domaine '{vm_id}' redéfini ({} nouveau(x) mount(s) virtiofs).",
-        newly_added.len()
+        "{}",
+        tr!(
+            fr: "  Domaine '{vm_id}' redéfini ({} nouveau(x) mount(s) virtiofs).",
+            en: "  Domain '{vm_id}' redefined ({} new virtiofs mount(s)).",
+            newly_added.len()
+        )
     );
     Ok(newly_added)
 }
