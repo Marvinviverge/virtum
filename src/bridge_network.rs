@@ -6,6 +6,8 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+use crate::tr;
+
 /// Capacité de l'hôte à exposer des VM sur le LAN via bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeCapability {
@@ -23,7 +25,10 @@ pub fn scan_bridge_capability() -> BridgeCapability {
     let names = match list_sys_net_interfaces() {
         Ok(n) => n,
         Err(e) => {
-            warnings.push(format!("Impossible de lire /sys/class/net: {e}"));
+            warnings.push(tr!(
+                fr: "Impossible de lire /sys/class/net: {e}",
+                en: "Cannot read /sys/class/net: {e}"
+            ));
             return BridgeCapability {
                 recommended_interface: None,
                 ethernet_interfaces: Vec::new(),
@@ -52,16 +57,20 @@ pub fn scan_bridge_capability() -> BridgeCapability {
     let recommended = pick_recommended_interface(&ethernet, &wireless);
 
     if recommended.is_none() && ethernet.is_empty() && wireless.is_empty() {
-        warnings.push(
-            "Aucune interface physique détectée (Ethernet ou Wi‑Fi). \
-             Branchez un câble Ethernet ou définissez `bridge_interface:` dans le Virtumfile."
-                .to_string(),
-        );
+        warnings.push(tr!(
+            fr: "Aucune interface physique détectée (Ethernet ou Wi‑Fi). \
+             Branchez un câble Ethernet ou définissez `bridge_interface:` dans le Virtumfile.",
+            en: "No physical interface detected (Ethernet or Wi‑Fi). \
+             Plug in an Ethernet cable or set `bridge_interface:` in the Virtumfile."
+        ));
     } else if let Some(ref iface) = recommended {
         if is_wireless(iface) {
-            warnings.push(format!(
-                "Interface recommandée « {iface} » est du Wi‑Fi : le bridge LAN est souvent \
-                 instable ou indisponible. Préférez Ethernet (câble) pour les démos et la formation."
+            warnings.push(tr!(
+                fr: "Interface recommandée « {iface} » est du Wi‑Fi : le bridge LAN est souvent \
+                 instable ou indisponible. \
+                 Préférez Ethernet (câble) pour les démos et la formation.",
+                en: "Recommended interface '{iface}' is Wi‑Fi: the LAN bridge is often \
+                 unstable or unavailable. Prefer Ethernet (cable) for demos and training."
             ));
         }
     }
@@ -81,14 +90,19 @@ pub fn resolve_bridge_interface(explicit: Option<&str>) -> Result<String> {
 
     let cap = scan_bridge_capability();
     for w in &cap.warnings {
-        eprintln!("Avertissement bridge: {w}");
+        eprintln!(
+            "{}",
+            tr!(fr: "Avertissement bridge: {w}", en: "Bridge warning: {w}")
+        );
     }
 
     cap.recommended_interface.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Aucune interface adaptée au bridge LAN. Branchez un Ethernet ou indiquez \
-             `bridge_interface:` dans le Virtumfile, puis lancez `virtum doctor`."
-        )
+        anyhow::anyhow!(tr!(
+            fr: "Aucune interface adaptée au bridge LAN. Branchez un Ethernet ou indiquez \
+             `bridge_interface:` dans le Virtumfile, puis lancez `virtum doctor`.",
+            en: "No interface suitable for the LAN bridge. Plug in Ethernet or set \
+             `bridge_interface:` in the Virtumfile, then run `virtum doctor`."
+        ))
     })
 }
 
@@ -100,12 +114,20 @@ pub fn require_bridge_interface(explicit: Option<&str>) -> Result<()> {
 fn validate_explicit_interface(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
-        bail!("`bridge_interface` ne peut pas être vide.");
+        bail!(tr!(
+            fr: "`bridge_interface` ne peut pas être vide.",
+            en: "`bridge_interface` cannot be empty."
+        ));
     }
     let path = Path::new("/sys/class/net").join(name);
     if !path.exists() {
         let hint = default_route_interface()
-            .map(|d| format!(" Route par défaut actuelle : `{d}` (ex. `--bridge-interface {d}`)."))
+            .map(|d| {
+                tr!(
+                    fr: " Route par défaut actuelle : `{d}` (ex. `--bridge-interface {d}`).",
+                    en: " Current default route: `{d}` (e.g. `--bridge-interface {d}`)."
+                )
+            })
             .unwrap_or_default();
         let cap = scan_bridge_capability();
         let candidates =
@@ -118,25 +140,41 @@ fn validate_explicit_interface(name: &str) -> Result<String> {
                         list.insert(0, r.clone());
                     }
                 }
-                format!(" Interfaces détectées : {}.", list.join(", "))
+                tr!(
+                    fr: " Interfaces détectées : {}.",
+                    en: " Detected interfaces: {}.",
+                    list.join(", ")
+                )
             };
-        bail!(
-            "Interface réseau « {name} » introuvable sur cet hôte.{hint}{candidates} \
-             Vérifiez `ip -br link` ou `virtum doctor`."
-        );
+        bail!(tr!(
+            fr: "Interface réseau « {name} » introuvable sur cet hôte.{hint}{candidates} \
+             Vérifiez `ip -br link` ou `virtum doctor`.",
+            en: "Network interface '{name}' not found on this host.{hint}{candidates} \
+             Check `ip -br link` or `virtum doctor`."
+        ));
     }
     if name == "lo" {
-        bail!("L'interface loopback « lo » ne peut pas servir de bridge LAN.");
+        bail!(tr!(
+            fr: "L'interface loopback « lo » ne peut pas servir de bridge LAN.",
+            en: "The loopback interface 'lo' cannot be used as a LAN bridge."
+        ));
     }
     if !is_plausible_bridge_candidate(name) {
-        bail!(
-            "L'interface « {name} » semble virtuelle ou gérée par Virtum/libvirt ; \
-             choisissez l'interface physique du bureau (ex. enp3s0, eth0)."
-        );
+        bail!(tr!(
+            fr: "L'interface « {name} » semble virtuelle ou gérée par Virtum/libvirt ; \
+             choisissez l'interface physique du bureau (ex. enp3s0, eth0).",
+            en: "Interface '{name}' looks virtual or managed by Virtum/libvirt; \
+             choose the desk's physical interface (e.g. enp3s0, eth0)."
+        ));
     }
     if is_wireless(name) {
         eprintln!(
-            "Avertissement: « {name} » est du Wi‑Fi — le bridge LAN peut échouer ; Ethernet recommandé."
+            "{}",
+            tr!(
+                fr: "Avertissement: « {name} » est du Wi‑Fi — le bridge LAN peut échouer ; \
+                 Ethernet recommandé.",
+                en: "Warning: '{name}' is Wi‑Fi — the LAN bridge may fail; Ethernet recommended."
+            )
         );
     }
     Ok(name.to_string())
@@ -144,7 +182,8 @@ fn validate_explicit_interface(name: &str) -> Result<String> {
 
 fn list_sys_net_interfaces() -> Result<Vec<String>> {
     let dir = Path::new("/sys/class/net");
-    let entries = fs::read_dir(dir).with_context(|| format!("Lecture de {}", dir.display()))?;
+    let entries = fs::read_dir(dir)
+        .with_context(|| tr!(fr: "Lecture de {}", en: "Reading {}", dir.display()))?;
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry?;

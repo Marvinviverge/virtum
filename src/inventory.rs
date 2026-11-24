@@ -10,6 +10,7 @@ use crate::config::{self, VirtumPaths};
 use crate::libvirt::{domain_exists, domain_is_active, domain_state};
 use crate::metadata::{self, Instance, Metadata};
 use crate::ssh::{self, SshSessionOpts};
+use crate::tr;
 use crate::virtumfile::{self, Virtumfile};
 
 /// Hôte de l'inventaire : nom de machine + variables d'hôte (ordre stable).
@@ -45,20 +46,23 @@ pub fn build(
 
     for (machine, spec) in &lab.machines {
         let Some(inst) = metadata::find_by_lab_machine(metadata, &lab.name, machine) else {
-            warnings.push(format!(
-                "{machine} non créée : exclue de l'inventaire — virtum up"
+            warnings.push(tr!(
+                fr: "{machine} non créée : exclue de l'inventaire — virtum up",
+                en: "{machine} not created: excluded from the inventory — virtum up"
             ));
             continue;
         };
         if !is_running(inst) {
-            warnings.push(format!(
-                "{machine} arrêtée : exclue de l'inventaire — virtum up"
+            warnings.push(tr!(
+                fr: "{machine} arrêtée : exclue de l'inventaire — virtum up",
+                en: "{machine} stopped: excluded from the inventory — virtum up"
             ));
             continue;
         }
         let Some(ip) = inst.ip.clone() else {
-            warnings.push(format!(
-                "{machine} sans adresse IP connue : exclue de l'inventaire"
+            warnings.push(tr!(
+                fr: "{machine} sans adresse IP connue : exclue de l'inventaire",
+                en: "{machine} has no known IP address: excluded from the inventory"
             ));
             continue;
         };
@@ -132,8 +136,7 @@ fn ini_value(value: &str) -> String {
 
 pub fn render_ini(inv: &Inventory) -> String {
     let mut out = format!(
-        "# Généré par virtum inventory — lab {} (ne pas éditer)\n\
-         # Groupe implicite du lab : chaque hôte y est déclaré avec ses variables.\n[{}]\n",
+        "# Généré par virtum inventory — lab {} (ne pas éditer)\n# Groupe implicite du lab : chaque hôte y est déclaré avec ses variables.\n[{}]\n", // i18n-ok : inventaire
         inv.lab_name, inv.lab_group
     );
     for host in &inv.hosts {
@@ -206,10 +209,12 @@ pub fn render_yaml(inv: &Inventory) -> Result<String> {
     let mut root = Mapping::new();
     root.insert(s("all"), Value::Object(all));
 
-    let body =
-        serde_saphyr::to_string(&Value::Object(root)).context("Rendu YAML de l'inventaire")?;
+    let body = serde_saphyr::to_string(&Value::Object(root)).context(tr!(
+        fr: "Rendu YAML de l'inventaire",
+        en: "Rendering the inventory as YAML"
+    ))?;
     Ok(format!(
-        "# Généré par virtum inventory — lab {} (ne pas éditer)\n{body}",
+        "# Généré par virtum inventory — lab {} (ne pas éditer)\n{body}", // i18n-ok : inventaire
         inv.lab_name
     ))
 }
@@ -231,12 +236,13 @@ pub async fn lab_inventory(
     let (inv, warnings) = build(lab, &metadata, paths, insecure_ssh, is_domain_running);
     if inv.hosts.is_empty() {
         for w in &warnings {
-            eprintln!("Avertissement: {w}");
+            eprintln!("{}", tr!(fr: "Avertissement: {w}", en: "Warning: {w}"));
         }
-        bail!(
-            "Aucune machine du lab '{}' ne tourne : inventaire vide. Lancez `virtum up`.",
+        bail!(tr!(
+            fr: "Aucune machine du lab '{}' ne tourne : inventaire vide. Lancez `virtum up`.",
+            en: "No machine of lab '{}' is running: empty inventory. Run `virtum up`.",
             lab.name
-        );
+        ));
     }
     Ok((inv, warnings))
 }
@@ -256,14 +262,17 @@ pub fn inventory(
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime"
+        ))?
         .block_on(async {
             let path = virtumfile::resolve_virtumfile_path(file)?;
             let lab = virtumfile::load(&path)?;
             let paths = config::ensure_layout().await?;
             let (inv, warnings) = lab_inventory(&lab, &paths, insecure_ssh).await?;
             for w in &warnings {
-                eprintln!("Avertissement: {w}");
+                eprintln!("{}", tr!(fr: "Avertissement: {w}", en: "Warning: {w}"));
             }
             let text = match format {
                 InventoryFormat::Ini => render_ini(&inv),
@@ -273,9 +282,13 @@ pub fn inventory(
                 Some(out) => {
                     write_atomic(&out, &text)?;
                     eprintln!(
-                        "Inventaire écrit : {} ({} hôte(s))",
-                        out.display(),
-                        inv.hosts.len()
+                        "{}",
+                        tr!(
+                            fr: "Inventaire écrit : {} ({} hôte(s))",
+                            en: "Inventory written: {} ({} host(s))",
+                            out.display(),
+                            inv.hosts.len()
+                        )
                     );
                 }
                 None => print!("{text}"),

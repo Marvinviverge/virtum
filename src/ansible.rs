@@ -9,7 +9,18 @@ use sha2::{Digest, Sha256};
 use crate::config::{self, VirtumPaths};
 use crate::inventory;
 use crate::ssh::{self, SshSessionOpts};
+use crate::tr;
 use crate::virtumfile::{self, Virtumfile};
+
+/// `tr!` pour un libellé court sans argument renvoyé en `&'static str`.
+macro_rules! tr_static {
+    (fr: $fr:literal, en: $en:literal $(,)?) => {
+        match crate::i18n::lang() {
+            crate::i18n::Lang::Fr => $fr,
+            crate::i18n::Lang::En => $en,
+        }
+    };
+}
 
 /// État du provisionnement d'un lab (`ansible-<lab>.json`, à côté de `firewall-<lab>.json`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +63,11 @@ pub fn load_state(paths: &VirtumPaths, lab_name: &str) -> Result<Option<AnsibleS
         return Ok(None);
     };
     Ok(Some(serde_json::from_str(&text).with_context(|| {
-        format!("État Ansible illisible : {}", path.display())
+        tr!(
+            fr: "État Ansible illisible : {}",
+            en: "Unreadable Ansible state: {}",
+            path.display()
+        )
     })?))
 }
 
@@ -74,12 +89,17 @@ pub fn provision_reason(
     created_machines: bool,
 ) -> Option<&'static str> {
     match previous {
-        None => return Some("lab non provisionné"),
-        Some(state) if !state.succeeded() => return Some("dernier provisionnement en échec"),
+        None => return Some(tr_static!(fr: "lab non provisionné", en: "lab not provisioned")),
+        Some(state) if !state.succeeded() => {
+            return Some(tr_static!(
+                fr: "dernier provisionnement en échec",
+                en: "last provisioning failed"
+            ))
+        }
         Some(_) => {}
     }
     if created_machines {
-        Some("machines ajoutées")
+        Some(tr_static!(fr: "machines ajoutées", en: "machines added"))
     } else {
         None
     }
@@ -104,13 +124,19 @@ pub fn command_in_path(program: &str) -> bool {
 /// Outils Ansible requis par la section `ansible:` (erreur claire sinon).
 pub fn require_tools(spec: &virtumfile::AnsibleSpec) -> Result<()> {
     if !command_in_path("ansible-playbook") {
-        bail!(
-            "`ansible-playbook` est introuvable : installez Ansible (ex. `sudo apt install ansible-core`) \
-             ou retirez la section `ansible:` du Virtumfile."
-        );
+        bail!(tr!(
+            fr: "`ansible-playbook` est introuvable : installez Ansible \
+             (ex. `sudo apt install ansible-core`) ou retirez la section `ansible:` du Virtumfile.",
+            en: "`ansible-playbook` not found: install Ansible \
+             (e.g. `sudo apt install ansible-core`) or remove the `ansible:` section \
+             from the Virtumfile."
+        ));
     }
     if spec.requirements.is_some() && !command_in_path("ansible-galaxy") {
-        bail!("`ansible-galaxy` est introuvable alors que `ansible.requirements` est déclaré.");
+        bail!(tr!(
+            fr: "`ansible-galaxy` est introuvable alors que `ansible.requirements` est déclaré.",
+            en: "`ansible-galaxy` not found although `ansible.requirements` is declared."
+        ));
     }
     Ok(())
 }
@@ -155,7 +181,10 @@ async fn prepare_inventory(
         for w in &warnings {
             eprintln!("  ✗ {w}");
         }
-        bail!("Toutes les machines du lab doivent tourner avant le provisionnement Ansible.");
+        bail!(tr!(
+            fr: "Toutes les machines du lab doivent tourner avant le provisionnement Ansible.",
+            en: "All machines of the lab must be running before Ansible provisioning."
+        ));
     }
     let private_key = ssh::private_key_path(&paths.keys);
     let mut unreachable = Vec::new();
@@ -182,10 +211,11 @@ async fn prepare_inventory(
         }
     }
     if !unreachable.is_empty() {
-        bail!(
-            "Machine(s) injoignable(s) en SSH : {}. Vérifiez avec `virtum shell`.",
+        bail!(tr!(
+            fr: "Machine(s) injoignable(s) en SSH : {}. Vérifiez avec `virtum shell`.",
+            en: "Machine(s) unreachable over SSH: {}. Check with `virtum shell`.",
             unreachable.join(", ")
-        );
+        ));
     }
     let path = inventory_path(paths, &lab.name);
     inventory::write_atomic(&path, &inventory::render_ini(&inv))?;
@@ -195,12 +225,21 @@ async fn prepare_inventory(
 /// Lance un programme en héritant stdin/stdout/stderr. Ctrl-C : le signal atteint aussi
 /// l'enfant (même groupe de processus) ; on attend sa fin pour enregistrer l'échec.
 async fn run_inherited(mut cmd: tokio::process::Command) -> Result<i32> {
-    let mut child = cmd.spawn().context("Impossible de lancer la commande")?;
+    let mut child = cmd.spawn().context(tr!(
+        fr: "Impossible de lancer la commande",
+        en: "Cannot run the command"
+    ))?;
     let status = loop {
         tokio::select! {
             status = child.wait() => break status?,
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("\nInterruption : attente de la fin d'Ansible…");
+                eprintln!(
+                    "{}",
+                    tr!(
+                        fr: "\nInterruption : attente de la fin d'Ansible…",
+                        en: "\nInterrupted: waiting for Ansible to finish…"
+                    )
+                );
             }
         }
     };
@@ -228,8 +267,10 @@ fn requirements_local_paths(content: &str) -> Result<Vec<String>> {
             _ => {}
         }
     }
-    let v: serde_json::Value = serde_saphyr::from_str(content)
-        .context("ansible.requirements : YAML illisible, sources locales non vérifiables")?;
+    let v: serde_json::Value = serde_saphyr::from_str(content).context(tr!(
+        fr: "ansible.requirements : YAML illisible, sources locales non vérifiables",
+        en: "ansible.requirements: unreadable YAML, local sources cannot be checked"
+    ))?;
     let mut out = Vec::new();
     walk(&v, &mut out);
     Ok(out)
@@ -253,13 +294,16 @@ fn ensure_requirements_sources_outside_shares(
         for c in candidates {
             let resolved = c.canonicalize().unwrap_or(c);
             if let Some((label, share)) = shares.iter().find(|(_, s)| resolved.starts_with(s)) {
-                bail!(
-                    "ansible.requirements : la source locale '{raw}' ({}) est dans le partage \
+                bail!(tr!(
+                    fr: "ansible.requirements : la source locale '{raw}' ({}) est dans le partage \
                      inscriptible '{label}' ({}) : ansible-galaxy installerait du code écrit \
                      par l'invité. Retirez `rw` de ce partage ou déplacez la source.",
+                    en: "ansible.requirements: local source '{raw}' ({}) is in the writable \
+                     share '{label}' ({}): ansible-galaxy would install code written \
+                     by the guest. Remove `rw` from this share or move the source.",
                     resolved.display(),
                     share.display()
-                );
+                ));
             }
         }
     }
@@ -273,8 +317,9 @@ async fn install_requirements(
     shares: &[(String, PathBuf)],
     state: &mut AnsibleState,
 ) -> Result<()> {
-    let content = std::fs::read(requirements)
-        .with_context(|| format!("Impossible de lire {}", requirements.display()))?;
+    let content = std::fs::read(requirements).with_context(
+        || tr!(fr: "Impossible de lire {}", en: "Cannot read {}", requirements.display()),
+    )?;
     let mut bases = vec![vf_dir.to_path_buf()];
     if let Some(dir) = requirements.parent() {
         bases.push(dir.to_path_buf());
@@ -293,14 +338,17 @@ async fn install_requirements(
             continue;
         }
         eprintln!(
-            "  ansible-galaxy {kind} install -r {}",
+            "  ansible-galaxy {kind} install -r {}", // i18n-ok : commande affichée
             requirements.display()
         );
         let mut cmd = tokio::process::Command::new("ansible-galaxy");
         cmd.arg(kind).arg("install").arg("-r").arg(requirements);
         let code = run_inherited(cmd).await?;
         if code != 0 {
-            bail!("ansible-galaxy {kind} install a échoué (code {code}).");
+            bail!(tr!(
+                fr: "ansible-galaxy {kind} install a échoué (code {code}).",
+                en: "ansible-galaxy {kind} install failed (code {code})."
+            ));
         }
     }
     state.requirements_sha256 = Some(sha);
@@ -372,10 +420,11 @@ pub struct SnapshotReport {
 /// La copie est figée : l'invité ne peut plus rien y changer pendant l'exécution.
 pub fn snapshot_project(root: &Path, dest: &Path, excluded: &[PathBuf]) -> Result<SnapshotReport> {
     if excluded.iter().any(|e| root.starts_with(e)) {
-        bail!(
-            "Le répertoire du Virtumfile ({}) est dans un partage inscriptible.",
+        bail!(tr!(
+            fr: "Le répertoire du Virtumfile ({}) est dans un partage inscriptible.",
+            en: "The Virtumfile directory ({}) is in a writable share.",
             root.display()
-        );
+        ));
     }
     create_private_dir(dest)?;
     let mut report = SnapshotReport::default();
@@ -397,7 +446,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(path)
-        .with_context(|| format!("Impossible de créer {}", path.display()))
+        .with_context(|| tr!(fr: "Impossible de créer {}", en: "Cannot create {}", path.display()))
 }
 
 fn copy_tree(
@@ -409,8 +458,8 @@ fn copy_tree(
     ancestors: &mut Vec<PathBuf>,
     report: &mut SnapshotReport,
 ) -> Result<()> {
-    let entries =
-        std::fs::read_dir(src).with_context(|| format!("Impossible de lire {}", src.display()))?;
+    let entries = std::fs::read_dir(src)
+        .with_context(|| tr!(fr: "Impossible de lire {}", en: "Cannot read {}", src.display()))?;
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
@@ -434,16 +483,20 @@ fn copy_tree(
             // Le lien resterait actif dans la copie : sa cible ne doit contenir aucun
             // partage inscriptible, sinon ce que l'invité y écrit serait chargé.
             if let Some(share) = excluded.iter().find(|e| e.starts_with(&canonical)) {
-                bail!(
-                    "{} pointe vers {}, qui contient le partage inscriptible {} : copie Ansible \
-                     refusée. Retirez `rw` de ce partage ou remplacez le lien par un dossier.",
+                bail!(tr!(
+                    fr: "{} pointe vers {}, qui contient le partage inscriptible {} : \
+                     copie Ansible refusée. \
+                     Retirez `rw` de ce partage ou remplacez le lien par un dossier.",
+                    en: "{} points to {}, which contains the writable share {}: Ansible copy \
+                     refused. Remove `rw` from this share or replace the link with a folder.",
                     rel_entry.display(),
                     canonical.display(),
                     share.display()
-                );
+                ));
             }
-            std::os::unix::fs::symlink(&canonical, &target)
-                .with_context(|| format!("Impossible de créer {}", target.display()))?;
+            std::os::unix::fs::symlink(&canonical, &target).with_context(
+                || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", target.display()),
+            )?;
             continue;
         }
         let meta = std::fs::metadata(&canonical)?;
@@ -461,15 +514,18 @@ fn copy_tree(
         } else if meta.is_file() {
             report.bytes += meta.len();
             if report.bytes > SNAPSHOT_MAX_BYTES {
-                bail!(
-                    "Dossier du playbook trop volumineux pour la copie Ansible (> {} Mio). \
+                bail!(tr!(
+                    fr: "Dossier du playbook trop volumineux pour la copie Ansible (> {} Mio). \
                      Placez le playbook dans un sous-dossier dédié (ex. ansible/).",
+                    en: "Playbook folder too large for the Ansible copy (> {} MiB). \
+                     Put the playbook in a dedicated subfolder (e.g. ansible/).",
                     SNAPSHOT_MAX_BYTES >> 20
-                );
+                ));
             }
             std::fs::copy(&canonical, &target).with_context(|| {
-                format!(
-                    "Impossible de copier {} vers {}",
+                tr!(
+                    fr: "Impossible de copier {} vers {}",
+                    en: "Cannot copy {} to {}",
                     canonical.display(),
                     target.display()
                 )
@@ -483,8 +539,9 @@ fn copy_tree(
 fn reset_workspace(ws: &Path) -> Result<()> {
     match std::fs::symlink_metadata(ws) {
         Ok(m) if m.file_type().is_symlink() || !m.is_dir() => std::fs::remove_file(ws)?,
-        Ok(_) => std::fs::remove_dir_all(ws)
-            .with_context(|| format!("Impossible de vider {}", ws.display()))?,
+        Ok(_) => std::fs::remove_dir_all(ws).with_context(
+            || tr!(fr: "Impossible de vider {}", en: "Cannot empty {}", ws.display()),
+        )?,
         Err(_) => {}
     }
     if let Some(parent) = ws.parent() {
@@ -512,16 +569,16 @@ pub async fn run_playbook(
     extra_args: &[String],
     insecure_ssh: bool,
 ) -> Result<RunOutcome> {
-    let spec = lab
-        .ansible
-        .as_ref()
-        .context("Pas de section `ansible:` dans le Virtumfile.")?;
+    let spec = lab.ansible.as_ref().context(tr!(
+        fr: "Pas de section `ansible:` dans le Virtumfile.",
+        en: "No `ansible:` section in the Virtumfile."
+    ))?;
     require_tools(spec)?;
     let vf_dir = virtumfile::virtumfile_dir(virtumfile_path);
     let playbook = virtumfile::resolve_ansible_path(&vf_dir, "playbook", &spec.playbook)?;
     let shares = writable_shares(lab, &vf_dir, paths).await?;
     virtumfile::ensure_host_code_outside_shares(lab, &vf_dir, &shares)
-        .context("Provisionnement refusé")?;
+        .context(tr!(fr: "Provisionnement refusé", en: "Provisioning refused"))?;
 
     let inventory = prepare_inventory(lab, paths, insecure_ssh).await?;
 
@@ -546,7 +603,7 @@ pub async fn run_playbook(
     let copy = ws.join("playbook");
     let playbook_dir = playbook
         .parent()
-        .context("Playbook sans dossier parent")?
+        .context(tr!(fr: "Playbook sans dossier parent", en: "Playbook has no parent folder"))?
         .to_path_buf();
     let excluded: Vec<PathBuf> = shares.iter().map(|(_, p)| p.clone()).collect();
     let report = snapshot_project(&playbook_dir, &copy, &excluded)?;
@@ -557,17 +614,29 @@ pub async fn run_playbook(
             .map(|p| format!("./{}", p.display()))
             .collect();
         eprintln!(
-            "  Ansible : partages inscriptibles exclus de la copie du playbook : {}",
-            list.join(", ")
+            "{}",
+            tr!(
+                fr: "  Ansible : partages inscriptibles exclus de la copie du playbook : {}",
+                en: "  Ansible: writable shares excluded from the playbook copy: {}",
+                list.join(", ")
+            )
         );
     }
-    let copied_playbook = copy.join(playbook.file_name().context("Playbook sans nom")?);
+    let copied_playbook = copy.join(
+        playbook
+            .file_name()
+            .context(tr!(fr: "Playbook sans nom", en: "Playbook has no name"))?,
+    );
 
     eprintln!(
-        "Ansible : {} sur le lab '{}' (inventaire {})",
-        spec.playbook,
-        lab.name,
-        inventory.display()
+        "{}",
+        tr!(
+            fr: "Ansible : {} sur le lab '{}' (inventaire {})",
+            en: "Ansible: {} on lab '{}' (inventory {})",
+            spec.playbook,
+            lab.name,
+            inventory.display()
+        )
     );
     let mut cmd = tokio::process::Command::new("ansible-playbook");
     cmd.arg("-i")
@@ -598,7 +667,10 @@ pub fn provision(file: Option<PathBuf>, args: Vec<String>, insecure_ssh: bool) -
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime"
+        ))?
         .block_on(async {
             let path = virtumfile::resolve_virtumfile_path(file)?;
             let lab = virtumfile::load(&path)?;
@@ -607,11 +679,20 @@ pub fn provision(file: Option<PathBuf>, args: Vec<String>, insecure_ssh: bool) -
         })?;
     match outcome {
         RunOutcome::Success => {
-            println!("Provisionnement réussi.");
+            println!(
+                "{}",
+                tr!(fr: "Provisionnement réussi.", en: "Provisioning succeeded.")
+            );
             Ok(())
         }
         RunOutcome::Failed(code) => {
-            eprintln!("Provisionnement en échec (ansible-playbook, code {code}).");
+            eprintln!(
+                "{}",
+                tr!(
+                    fr: "Provisionnement en échec (ansible-playbook, code {code}).",
+                    en: "Provisioning failed (ansible-playbook, code {code})."
+                )
+            );
             std::process::exit(code);
         }
     }
