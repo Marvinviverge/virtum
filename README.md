@@ -140,6 +140,7 @@ Exemple complet : [`examples/Virtumfile`](./examples/Virtumfile).
 | `snapshot create\|restore\|ls\|rm` | Instantanés d'une VM ou d'un lab entier |
 | `inventory`, `provision` | Inventaire et playbook Ansible du lab |
 | `open`, `close` | Pare-feu de l'hôte (ufw) pour les ports exposés au réseau local |
+| `config` | Réglages de l'utilisateur : langue de la sortie |
 
 `virtum <commande> --help` détaille chaque option.
 
@@ -200,6 +201,17 @@ Instantanés à froid des disques : les VM sont arrêtées le temps de l'opérat
 | `restart: no \| always \| unless-stopped` | Démarrage au boot de l'hôte, comme dans Docker Compose |
 
 Retirer une machine du Virtumfile ne la supprime pas : `plan` la signale, `apply --prune` la supprime.
+
+## Langue
+
+Virtum affiche ses messages et son aide en français ou en anglais, selon la langue du système : français si la locale est française (`LANG=fr_FR.UTF-8`…), anglais sinon. Pour choisir :
+
+```bash
+virtum config set language en     # ou fr ; enregistré dans ~/.config/virtum/config.yml
+virtum config get language        # langue active et son origine
+virtum config unset language      # revient à la langue du système
+VIRTUM_LANG=en virtum up          # pour une seule commande
+```
 
 ## Stockage
 

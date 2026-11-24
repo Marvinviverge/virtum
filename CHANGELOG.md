@@ -2,11 +2,21 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [Non publié]
+## [1.4.0] - 2026-11-24
 
 ### Ajouts
 
-- **Langue de la sortie** (en cours, v1.4) : `virtum config set language en|fr`, `virtum config get language` (langue active et son origine), `virtum config unset language`, et la variable `VIRTUM_LANG` pour une commande ponctuelle. Sans réglage, Virtum suit la langue du système : français si la locale est française, anglais sinon. Réglage enregistré dans `~/.config/virtum/config.yml`. La traduction des messages arrive au fil des versions de développement ; tant qu'elle n'est pas terminée, la plupart des messages restent en français.
+- **Virtum en français ou en anglais.** Tous les messages (progression, erreurs et leurs pistes de résolution, `virtum doctor`, `virtum plan`, questions de confirmation) et l'aide (`--help`) existent dans les deux langues.
+  - Sans réglage, Virtum suit la langue du système : français si la locale est française (`LC_ALL`, `LC_MESSAGES`, `LANG`), anglais sinon.
+  - `virtum config set language en|fr` enregistre un choix dans `~/.config/virtum/config.yml` ; `virtum config get language` affiche la langue active et son origine ; `virtum config unset language` revient à la langue du système.
+  - `VIRTUM_LANG=en` ou `fr` force la langue d'une seule commande.
+- Questions de confirmation : `[o/N]` en français (`o` ou `y` acceptés), `[y/N]` en anglais.
+
+### Changements
+
+- **Sur un système qui n'est pas en français, Virtum s'affiche désormais en anglais.** Sur un système en français, la sortie ne change pas, à deux détails près : le préfixe d'erreur devient « erreur : » et les confirmations « [o/N] ».
+- Les formats lus par des programmes ne changent pas : en-têtes de `virtum ps` et `virtum snapshot ls`, inventaire Ansible, codes de sortie.
+- Limite : les erreurs de syntaxe de la ligne de commande produites par clap (« unexpected argument ») restent en anglais.
 
 ## [1.3.0] - 2026-11-23
 
