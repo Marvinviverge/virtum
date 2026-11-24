@@ -128,8 +128,9 @@ fn render_interface_xml(nic: &VmNic, mac: Option<&str>) -> String {
 }
 
 /// Builds libvirt domain XML for a headless KVM guest.
-// rustfmt garderait `/* i18n-ok */` sur sa propre ligne, hors de celle du modèle XML.
-#[rustfmt::skip]
+///
+/// Carte graphique `<video>` sans affichage : sans elle, le GRUB des images Debian 13 fait
+/// redémarrer la VM en boucle avant de charger le noyau (libvirt n'en ajoute pas d'office).
 pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
     if spec.nics.is_empty() {
         bail!(tr!(
@@ -174,7 +175,7 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
         )
     };
     Ok(format!(
-        /* i18n-ok */ r#"<domain type='kvm'>
+        r#"<domain type='kvm'>
   <name>{name}</name>
 {owner}  <memory unit='MiB'>{ram}</memory>
   <vcpu>{vcpus}</vcpu>
@@ -208,8 +209,6 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
-    <!-- Carte graphique sans affichage : sans elle, le GRUB des images Debian 13 fait
-         redémarrer la VM en boucle avant de charger le noyau. -->
     <video>
       <model type='vga'/>
     </video>

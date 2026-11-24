@@ -50,7 +50,7 @@ fn init_language() {
     let config = loaded.language.zip(loaded.path.clone());
     let resolution = i18n::resolve(|key| std::env::var(key).ok(), config);
     if let Some(warning) = &resolution.warning {
-        eprintln!("warning: {warning}");
+        eprintln!("warning: {warning}"); // i18n-ok : langue pas encore connue (contrat)
     }
     i18n::set_active(resolution);
     for warning in &loaded.warnings {
@@ -138,18 +138,21 @@ fn run_for_each_vm_destroy(refs: &[String], purge: bool) -> Result<()> {
             continue;
         }
         if let Err(err) = vm::destroy_vm(reference, purge) {
-            eprintln!("error [{reference}]: {err:#}");
+            eprintln!(
+                "{}",
+                tr!(fr: "erreur [{reference}] : {err:#}", en: "error [{reference}]: {err:#}")
+            );
             failures.push(reference.to_string());
         }
     }
     if failures.is_empty() {
         return Ok(());
     }
-    bail!(
-        "{} opération(s) ont échoué sur {} VM.",
-        failures.len(),
-        refs.len()
-    );
+    let (failed, total) = (failures.len(), refs.len());
+    bail!(tr!(
+        fr: "{failed} opération(s) ont échoué sur {total} VM.",
+        en: "{failed} of {total} VM operation(s) failed.",
+    ));
 }
 
 fn run_for_each_vm(refs: &[String], op: fn(&str) -> Result<()>) -> Result<()> {
@@ -160,16 +163,19 @@ fn run_for_each_vm(refs: &[String], op: fn(&str) -> Result<()>) -> Result<()> {
             continue;
         }
         if let Err(err) = op(reference) {
-            eprintln!("error [{reference}]: {err:#}");
+            eprintln!(
+                "{}",
+                tr!(fr: "erreur [{reference}] : {err:#}", en: "error [{reference}]: {err:#}")
+            );
             failures.push(reference.to_string());
         }
     }
     if failures.is_empty() {
         return Ok(());
     }
-    bail!(
-        "{} opération(s) ont échoué sur {} VM.",
-        failures.len(),
-        refs.len()
-    );
+    let (failed, total) = (failures.len(), refs.len());
+    bail!(tr!(
+        fr: "{failed} opération(s) ont échoué sur {total} VM.",
+        en: "{failed} of {total} VM operation(s) failed.",
+    ));
 }
