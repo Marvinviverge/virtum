@@ -12,6 +12,7 @@ use crate::images::resolve_image;
 use crate::metadata::validate_name;
 use crate::mounts::{self, parse_mount_entries};
 use crate::port_forward::{self, PortBind, PortForward};
+use crate::tr;
 use serde::Deserializer;
 
 pub const DEFAULT_VIRTUMFILE: &str = "Virtumfile";
@@ -31,11 +32,13 @@ pub fn resolve_virtumfile_path(file: Option<std::path::PathBuf>) -> Result<std::
     if path.is_file() {
         return Ok(path);
     }
-    bail!(
-        "Virtumfile introuvable: {}. \
-         Lancez la commande depuis le répertoire du lab ou utilisez `-f /chemin/Virtumfile`.",
-        path.display()
-    );
+    let path = path.display();
+    bail!(tr!(
+        fr: "Virtumfile introuvable: {path}. \
+             Lancez la commande depuis le répertoire du lab ou utilisez `-f /chemin/Virtumfile`.",
+        en: "Virtumfile not found: {path}. \
+             Run the command from the lab directory or use `-f /path/Virtumfile`."
+    ));
 }
 
 /// Ports à exposer sur le pare-feu hôte (`bind: lan` + `ports:`).
@@ -47,8 +50,12 @@ pub fn collect_lan_firewall_rules(lab: &Virtumfile) -> Result<Vec<LanFirewallRul
             continue;
         }
         for port in &spec.ports {
-            let (host_port, guest_port) = parse_port_mapping(port)
-                .with_context(|| format!("Machine '{machine_name}': port invalide"))?;
+            let (host_port, guest_port) = parse_port_mapping(port).with_context(|| {
+                tr!(
+                    fr: "Machine '{machine_name}': port invalide",
+                    en: "Machine '{machine_name}': invalid port"
+                )
+            })?;
             if seen.insert(host_port) {
                 rules.push(LanFirewallRule {
                     machine: machine_name.clone(),
@@ -148,23 +155,37 @@ pub fn resolve_ansible_path(
 ) -> Result<std::path::PathBuf> {
     let rel = Path::new(value.trim());
     if value.trim().is_empty() || rel.is_absolute() {
-        bail!("ansible.{field} : chemin relatif au Virtumfile attendu ('{value}').");
+        bail!(tr!(
+            fr: "ansible.{field} : chemin relatif au Virtumfile attendu ('{value}').",
+            en: "ansible.{field}: a path relative to the Virtumfile is required ('{value}')."
+        ));
     }
     let base = virtumfile_dir.canonicalize().with_context(|| {
-        format!(
-            "Répertoire du Virtumfile introuvable : {}",
-            virtumfile_dir.display()
+        let dir = virtumfile_dir.display();
+        tr!(
+            fr: "Répertoire du Virtumfile introuvable : {dir}",
+            en: "Virtumfile directory not found: {dir}"
         )
     })?;
     let full = base.join(rel);
-    let resolved = full
-        .canonicalize()
-        .with_context(|| format!("ansible.{field} : fichier introuvable ({})", full.display()))?;
+    let resolved = full.canonicalize().with_context(|| {
+        let full = full.display();
+        tr!(
+            fr: "ansible.{field} : fichier introuvable ({full})",
+            en: "ansible.{field}: file not found ({full})"
+        )
+    })?;
     if !resolved.starts_with(&base) {
-        bail!("ansible.{field} : '{value}' sort du répertoire du Virtumfile.");
+        bail!(tr!(
+            fr: "ansible.{field} : '{value}' sort du répertoire du Virtumfile.",
+            en: "ansible.{field}: '{value}' is outside the Virtumfile directory."
+        ));
     }
     if !resolved.is_file() {
-        bail!("ansible.{field} : '{value}' n'est pas un fichier.");
+        bail!(tr!(
+            fr: "ansible.{field} : '{value}' n'est pas un fichier.",
+            en: "ansible.{field}: '{value}' is not a file."
+        ));
     }
     Ok(resolved)
 }
@@ -178,7 +199,10 @@ fn validate_ansible(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
         resolve_ansible_path(virtumfile_dir, "requirements", req)?;
     }
     if let Some(name) = spec.snapshot_name() {
-        crate::snapshot::validate_snapshot_name(&name).context("ansible.snapshot invalide")?;
+        crate::snapshot::validate_snapshot_name(&name).context(tr!(
+            fr: "ansible.snapshot invalide",
+            en: "invalid ansible.snapshot"
+        ))?;
     }
     Ok(())
 }
@@ -199,15 +223,16 @@ pub(crate) fn ensure_host_code_outside_shares(
         return Ok(());
     }
     let base = virtumfile_dir.canonicalize().with_context(|| {
-        format!(
-            "Répertoire du Virtumfile introuvable : {}",
-            virtumfile_dir.display()
+        let dir = virtumfile_dir.display();
+        tr!(
+            fr: "Répertoire du Virtumfile introuvable : {dir}",
+            en: "Virtumfile directory not found: {dir}"
         )
     })?;
-    let mut protected = vec![(base.clone(), "le Virtumfile".to_string())];
+    let mut protected = vec![(base.clone(), tr!(fr: "le Virtumfile", en: "the Virtumfile"))];
     if let Some(ref spec) = lab.ansible {
         let playbook = resolve_ansible_path(virtumfile_dir, "playbook", &spec.playbook)?;
-        protected.push((playbook, "le playbook".to_string()));
+        protected.push((playbook, tr!(fr: "le playbook", en: "the playbook")));
         if let Some(ref req) = spec.requirements {
             let req = resolve_ansible_path(virtumfile_dir, "requirements", req)?;
             protected.push((req, "ansible.requirements".to_string()));
@@ -217,13 +242,18 @@ pub(crate) fn ensure_host_code_outside_shares(
         let host = host.canonicalize().unwrap_or_else(|_| host.clone());
         for (path, what) in &protected {
             if path.starts_with(&host) {
-                bail!(
-                    "Mount '{label}' ({}) est inscriptible (rw) et contient {what} ({}) : \
-                     l'invité pourrait modifier ce que l'hôte exécute. Partagez un sous-dossier \
-                     qui ne contient ni le Virtumfile ni les fichiers Ansible, ou retirez `rw`.",
-                    host.display(),
-                    path.display()
-                );
+                let host = host.display();
+                let path = path.display();
+                bail!(tr!(
+                    fr: "Mount '{label}' ({host}) est inscriptible (rw) et contient {what} \
+                         ({path}) : l'invité pourrait modifier ce que l'hôte exécute. \
+                         Partagez un sous-dossier qui ne contient ni le Virtumfile ni les \
+                         fichiers Ansible, ou retirez `rw`.",
+                    en: "Mount '{label}' ({host}) is writable (rw) and contains {what} \
+                         ({path}): the guest could modify what the host runs. Share a \
+                         subfolder that contains neither the Virtumfile nor the Ansible \
+                         files, or remove `rw`."
+                ));
             }
         }
     }
@@ -413,8 +443,11 @@ pub fn resolve_machine_network(
         mode == NetworkMode::Lab || (mode == NetworkMode::Bridge && lab_has_bridge_lab_mix(lab));
     let libvirt_network = if needs_lab_nic {
         let name = lab_net_name.with_context(|| {
-            format!(
-                "Réseau lab requis pour la machine '{machine_name}' mais `virtum-lab-*` n'a pas été créé."
+            tr!(
+                fr: "Réseau lab requis pour la machine '{machine_name}' mais `virtum-lab-*` n'a \
+                     pas été créé.",
+                en: "Lab network required for machine '{machine_name}' but `virtum-lab-*` was \
+                     not created."
             )
         })?;
         Some(name.to_string())
@@ -455,18 +488,34 @@ fn validate_static_ips(lab: &Virtumfile) -> Result<()> {
             continue;
         };
         let ip: std::net::Ipv4Addr = raw.trim().parse().map_err(|_| {
-            anyhow::anyhow!("Machine '{machine_name}' : ip: '{raw}' n'est pas une adresse IPv4.")
+            anyhow::anyhow!(tr!(
+                fr: "Machine '{machine_name}' : ip: '{raw}' n'est pas une adresse IPv4.",
+                en: "Machine '{machine_name}': ip: '{raw}' is not an IPv4 address."
+            ))
         })?;
         if !machine_has_lab_nic(lab, machine_name) {
-            bail!(
-                "Machine '{machine_name}' : `ip:` n'est possible que sur le réseau du lab. \
-                 En `network: bridge`, l'adresse vient du DHCP du LAN, que Virtum ne contrôle pas."
-            );
+            bail!(tr!(
+                fr: "Machine '{machine_name}' : `ip:` n'est possible que sur le réseau du lab. \
+                     En `network: bridge`, l'adresse vient du DHCP du LAN, que Virtum ne \
+                     contrôle pas.",
+                en: "Machine '{machine_name}': `ip:` is only possible on the lab network. \
+                     With `network: bridge`, the address comes from the LAN's DHCP, which Virtum \
+                     does not control."
+            ));
         }
-        crate::lab_network::validate_lab_ip(crate::lab_network::lab_subnet(lab), ip)
-            .with_context(|| format!("Machine '{machine_name}' : ip: {ip} invalide"))?;
+        crate::lab_network::validate_lab_ip(crate::lab_network::lab_subnet(lab), ip).with_context(
+            || {
+                tr!(
+                    fr: "Machine '{machine_name}' : ip: {ip} invalide",
+                    en: "Machine '{machine_name}': invalid ip: {ip}"
+                )
+            },
+        )?;
         if let Some(other) = seen.insert(ip, machine_name) {
-            bail!("ip: {ip} est déclarée pour '{other}' et '{machine_name}'.");
+            bail!(tr!(
+                fr: "ip: {ip} est déclarée pour '{other}' et '{machine_name}'.",
+                en: "ip: {ip} is declared for both '{other}' and '{machine_name}'."
+            ));
         }
     }
     Ok(())
@@ -479,9 +528,12 @@ fn validate_subnet(lab: &Virtumfile) -> Result<()> {
     };
     crate::lab_network::LabSubnet::parse(value)?;
     if !lab_needs_isolated_network(lab) {
-        bail!(
-            "`subnet:` est sans effet : le lab n'a pas de réseau isolé (toutes les machines en `network: bridge`)."
-        );
+        bail!(tr!(
+            fr: "`subnet:` est sans effet : le lab n'a pas de réseau isolé (toutes les machines \
+                 en `network: bridge`).",
+            en: "`subnet:` has no effect: the lab has no isolated network (all machines use \
+                 `network: bridge`)."
+        ));
     }
     Ok(())
 }
@@ -512,21 +564,32 @@ fn validate_groups(lab: &Virtumfile) -> Result<()> {
         let mut seen = std::collections::BTreeSet::new();
         for group in &spec.groups {
             if !is_ansible_group_name(group) {
-                bail!(
-                    "Machine '{machine_name}' : groupe '{group}' invalide — lettres, chiffres et `_`, \
-                     sans commencer par un chiffre (Ansible refuse `-`)."
-                );
+                bail!(tr!(
+                    fr: "Machine '{machine_name}' : groupe '{group}' invalide — lettres, \
+                         chiffres et `_`, sans commencer par un chiffre (Ansible refuse `-`).",
+                    en: "Machine '{machine_name}': invalid group '{group}' — letters, digits \
+                         and `_`, not starting with a digit (Ansible rejects `-`)."
+                ));
             }
             if group == "all" || group == "ungrouped" {
-                bail!("Machine '{machine_name}' : '{group}' est un groupe réservé d'Ansible.");
+                bail!(tr!(
+                    fr: "Machine '{machine_name}' : '{group}' est un groupe réservé d'Ansible.",
+                    en: "Machine '{machine_name}': '{group}' is a reserved Ansible group."
+                ));
             }
             if lab.machines.contains_key(group.as_str()) {
-                bail!(
-                    "Machine '{machine_name}' : le groupe '{group}' porte le nom d'une machine du lab."
-                );
+                bail!(tr!(
+                    fr: "Machine '{machine_name}' : le groupe '{group}' porte le nom d'une \
+                         machine du lab.",
+                    en: "Machine '{machine_name}': group '{group}' has the same name as a lab \
+                         machine."
+                ));
             }
             if !seen.insert(group.as_str()) {
-                bail!("Machine '{machine_name}' : groupe '{group}' en double.");
+                bail!(tr!(
+                    fr: "Machine '{machine_name}' : groupe '{group}' en double.",
+                    en: "Machine '{machine_name}': duplicate group '{group}'."
+                ));
             }
         }
     }
@@ -578,10 +641,14 @@ pub fn lab_bridge_interface_for_validation(lab: &Virtumfile) -> Option<&str> {
 
 /// Charge et valide un Virtumfile depuis le disque.
 pub fn load(path: &Path) -> Result<Virtumfile> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Impossible de lire {}", path.display()))?;
-    let lab = load_from_str(&content)
-        .with_context(|| format!("Virtumfile invalide: {}", path.display()))?;
+    let content = std::fs::read_to_string(path).with_context(|| {
+        let path = path.display();
+        tr!(fr: "Impossible de lire {path}", en: "Cannot read {path}")
+    })?;
+    let lab = load_from_str(&content).with_context(|| {
+        let path = path.display();
+        tr!(fr: "Virtumfile invalide: {path}", en: "Invalid Virtumfile: {path}")
+    })?;
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -599,60 +666,104 @@ pub fn virtumfile_dir(path: &Path) -> std::path::PathBuf {
 }
 
 pub fn load_from_str(content: &str) -> Result<Virtumfile> {
-    let lab: Virtumfile = serde_saphyr::from_str(content)
-        .context("YAML invalide (vérifiez `network:` — valeurs acceptées : lab, bridge)")?;
+    let lab: Virtumfile = serde_saphyr::from_str(content).context(tr!(
+        fr: "YAML invalide (vérifiez `network:` — valeurs acceptées : lab, bridge)",
+        en: "Invalid YAML (check `network:` — accepted values: lab, bridge)"
+    ))?;
     Ok(lab)
 }
 
 pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
-    validate_name(&lab.name).context("Champ `name` (nom du lab) invalide")?;
+    validate_name(&lab.name).context(tr!(
+        fr: "Champ `name` (nom du lab) invalide",
+        en: "Invalid `name` field (lab name)"
+    ))?;
     if lab.machines.is_empty() {
-        bail!("Le Virtumfile doit définir au moins une machine sous `machines`.");
+        bail!(tr!(
+            fr: "Le Virtumfile doit définir au moins une machine sous `machines`.",
+            en: "The Virtumfile must define at least one machine under `machines`."
+        ));
     }
     if let Some(ref iface) = lab.bridge_interface {
         validate_bridge_interface_name(iface)?;
     }
     if lab.ssh_port == Some(0) {
-        bail!("`ssh_port` doit être compris entre 1 et 65535.");
+        bail!(tr!(
+            fr: "`ssh_port` doit être compris entre 1 et 65535.",
+            en: "`ssh_port` must be between 1 and 65535."
+        ));
     }
 
     let mut port_machines: Vec<(String, Vec<PortForward>)> = Vec::new();
     let mut lab_mounts: Vec<(String, std::path::PathBuf)> = Vec::new();
     let mut writable_mounts: Vec<(String, std::path::PathBuf)> = Vec::new();
     for (machine_name, spec) in &lab.machines {
-        validate_name(machine_name)
-            .with_context(|| format!("Nom de machine '{machine_name}' invalide"))?;
+        validate_name(machine_name).with_context(|| {
+            tr!(
+                fr: "Nom de machine '{machine_name}' invalide",
+                en: "Invalid machine name '{machine_name}'"
+            )
+        })?;
         if let Some(ref iface) = spec.bridge_interface {
-            validate_bridge_interface_name(iface)
-                .with_context(|| format!("Machine '{machine_name}': bridge_interface invalide"))?;
+            validate_bridge_interface_name(iface).with_context(|| {
+                tr!(
+                    fr: "Machine '{machine_name}': bridge_interface invalide",
+                    en: "Machine '{machine_name}': invalid bridge_interface"
+                )
+            })?;
         }
-        resolve_image(&spec.os, Path::new("/tmp/virtum-validate-images"))
-            .with_context(|| format!("Machine '{machine_name}': os inconnu"))?;
+        resolve_image(&spec.os, Path::new("/tmp/virtum-validate-images")).with_context(|| {
+            tr!(
+                fr: "Machine '{machine_name}': os inconnu",
+                en: "Machine '{machine_name}': unknown os"
+            )
+        })?;
         if spec.ram == 0 {
-            bail!("Machine '{machine_name}': `ram` doit être > 0.");
+            bail!(tr!(
+                fr: "Machine '{machine_name}': `ram` doit être > 0.",
+                en: "Machine '{machine_name}': `ram` must be > 0."
+            ));
         }
         if spec.cpu == 0 {
-            bail!("Machine '{machine_name}': `cpu` doit être > 0.");
+            bail!(tr!(
+                fr: "Machine '{machine_name}': `cpu` doit être > 0.",
+                en: "Machine '{machine_name}': `cpu` must be > 0."
+            ));
         }
         if spec.ssh_port == Some(0) {
-            bail!("Machine '{machine_name}': `ssh_port` doit être compris entre 1 et 65535.");
+            bail!(tr!(
+                fr: "Machine '{machine_name}': `ssh_port` doit être compris entre 1 et 65535.",
+                en: "Machine '{machine_name}': `ssh_port` must be between 1 and 65535."
+            ));
         }
         let autostarts =
             effective_restart(lab, machine_name).is_some_and(|r| r != RestartPolicy::No);
         if autostarts && !effective_mount_specs(lab, machine_name).is_empty() {
-            bail!(
-                "Machine '{machine_name}': `restart` est incompatible avec `mounts:` — au boot de l'hôte, \
-                 libvirt démarrerait la VM sans virtiofsd. Utilisez `restart: no` ou retirez les mounts."
-            );
+            bail!(tr!(
+                fr: "Machine '{machine_name}': `restart` est incompatible avec `mounts:` — au \
+                     boot de l'hôte, libvirt démarrerait la VM sans virtiofsd. Utilisez \
+                     `restart: no` ou retirez les mounts.",
+                en: "Machine '{machine_name}': `restart` is incompatible with `mounts:` — at \
+                     host boot, libvirt would start the VM without virtiofsd. Use \
+                     `restart: no` or remove the mounts."
+            ));
         }
         if let Some(ref size) = spec.disk_size {
-            parse_disk_size(size)
-                .with_context(|| format!("Machine '{machine_name}': disk_size invalide"))?;
+            parse_disk_size(size).with_context(|| {
+                tr!(
+                    fr: "Machine '{machine_name}': disk_size invalide",
+                    en: "Machine '{machine_name}': invalid disk_size"
+                )
+            })?;
         }
         let mut forwards = Vec::new();
         for port in &spec.ports {
-            let (host_port, guest_port) = parse_port_mapping(port)
-                .with_context(|| format!("Machine '{machine_name}': port invalide"))?;
+            let (host_port, guest_port) = parse_port_mapping(port).with_context(|| {
+                tr!(
+                    fr: "Machine '{machine_name}': port invalide",
+                    en: "Machine '{machine_name}': invalid port"
+                )
+            })?;
             forwards.push(PortForward {
                 host_port,
                 guest_port,
@@ -660,7 +771,12 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
         }
         port_machines.push((machine_name.clone(), forwards));
         let resolved = mounts::resolve_machine_mounts(lab, machine_name, virtumfile_dir)
-            .with_context(|| format!("Machine '{machine_name}' : mounts invalides"))?;
+            .with_context(|| {
+                tr!(
+                    fr: "Machine '{machine_name}' : mounts invalides",
+                    en: "Machine '{machine_name}': invalid mounts"
+                )
+            })?;
         for m in resolved {
             let label = format!("{machine_name}/{}", m.name);
             if !m.read_only {
@@ -681,7 +797,10 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
     if lab_uses_bridge(lab) {
         let explicit = lab_bridge_interface_for_validation(lab);
         bridge_network::require_bridge_interface(explicit).with_context(|| {
-            "Réseau `bridge` demandé mais l'hôte n'est pas prêt. Lancez `virtum doctor`."
+            tr!(
+                fr: "Réseau `bridge` demandé mais l'hôte n'est pas prêt. Lancez `virtum doctor`.",
+                en: "`bridge` network requested but the host is not ready. Run `virtum doctor`."
+            )
         })?;
     }
 
@@ -690,7 +809,10 @@ pub fn validate(lab: &Virtumfile, virtumfile_dir: &Path) -> Result<()> {
 
 fn validate_bridge_interface_name(iface: &str) -> Result<()> {
     if iface.trim().is_empty() {
-        bail!("`bridge_interface` ne peut pas être vide.");
+        bail!(tr!(
+            fr: "`bridge_interface` ne peut pas être vide.",
+            en: "`bridge_interface` cannot be empty."
+        ));
     }
     Ok(())
 }
@@ -712,17 +834,29 @@ pub fn machine_port_forwards(spec: &MachineSpec) -> Result<Vec<PortForward>> {
 /// Parse `8080:80` (hôte:invité).
 pub fn parse_port_mapping(input: &str) -> Result<(u16, u16)> {
     let s = input.trim();
-    let (host, guest) = s
-        .split_once(':')
-        .with_context(|| format!("Port invalide '{input}' (attendu host:guest, ex. 8080:80)"))?;
-    let host_port: u16 = host
-        .parse()
-        .with_context(|| format!("Port hôte invalide dans '{input}'"))?;
-    let guest_port: u16 = guest
-        .parse()
-        .with_context(|| format!("Port invité invalide dans '{input}'"))?;
+    let (host, guest) = s.split_once(':').with_context(|| {
+        tr!(
+            fr: "Port invalide '{input}' (attendu host:guest, ex. 8080:80)",
+            en: "Invalid port '{input}' (expected host:guest, e.g. 8080:80)"
+        )
+    })?;
+    let host_port: u16 = host.parse().with_context(|| {
+        tr!(
+            fr: "Port hôte invalide dans '{input}'",
+            en: "Invalid host port in '{input}'"
+        )
+    })?;
+    let guest_port: u16 = guest.parse().with_context(|| {
+        tr!(
+            fr: "Port invité invalide dans '{input}'",
+            en: "Invalid guest port in '{input}'"
+        )
+    })?;
     if host_port == 0 || guest_port == 0 {
-        bail!("Les ports doivent être > 0 dans '{input}'.");
+        bail!(tr!(
+            fr: "Les ports doivent être > 0 dans '{input}'.",
+            en: "Ports must be > 0 in '{input}'."
+        ));
     }
     Ok((host_port, guest_port))
 }

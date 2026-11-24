@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::command::{path_arg, run_command};
 use crate::metadata;
+use crate::tr;
 
 pub const LAB_NETWORK_PREFIX: &str = "virtum-lab-";
 
@@ -17,9 +18,12 @@ pub fn lab_network_name(lab_name: &str) -> Result<String> {
     let slug = lab_name.trim();
     let full = format!("{LAB_NETWORK_PREFIX}{slug}");
     if full.len() > 64 {
-        bail!(
-            "Le nom de lab '{lab_name}' est trop long pour le réseau libvirt (max 64 caractères avec le préfixe)."
-        );
+        bail!(tr!(
+            fr: "Le nom de lab '{lab_name}' est trop long pour le réseau libvirt (max 64 \
+                 caractères avec le préfixe).",
+            en: "Lab name '{lab_name}' is too long for the libvirt network (max 64 characters \
+                 including the prefix)."
+        ));
     }
     Ok(full)
 }
@@ -53,26 +57,44 @@ impl LabSubnet {
     /// `subnet:` du Virtumfile : `a.b.c.0/24`, dans une plage privée, hors `default`.
     pub fn parse(value: &str) -> Result<Self> {
         let value = value.trim();
-        let (addr, len) = value
-            .split_once('/')
-            .with_context(|| format!("subnet: '{value}' attendu au format a.b.c.0/24"))?;
+        let (addr, len) = value.split_once('/').with_context(|| {
+            tr!(
+                fr: "subnet: '{value}' attendu au format a.b.c.0/24",
+                en: "subnet: '{value}' must use the format a.b.c.0/24"
+            )
+        })?;
         if len != "24" {
-            bail!("subnet: '{value}' : seul le préfixe /24 est accepté (ex. 192.168.50.0/24).");
+            bail!(tr!(
+                fr: "subnet: '{value}' : seul le préfixe /24 est accepté (ex. 192.168.50.0/24).",
+                en: "subnet: '{value}': only the /24 prefix is accepted (e.g. 192.168.50.0/24)."
+            ));
         }
-        let ip: Ipv4Addr = addr
-            .parse()
-            .map_err(|_| anyhow::anyhow!("subnet: '{value}' : adresse IPv4 invalide"))?;
+        let ip: Ipv4Addr = addr.parse().map_err(|_| {
+            anyhow::anyhow!(tr!(
+                fr: "subnet: '{value}' : adresse IPv4 invalide",
+                en: "subnet: '{value}': invalid IPv4 address"
+            ))
+        })?;
         let [a, b, c, d] = ip.octets();
         if d != 0 {
-            bail!("subnet: '{value}' : l'adresse de réseau doit finir par .0 ({a}.{b}.{c}.0/24).");
+            bail!(tr!(
+                fr: "subnet: '{value}' : l'adresse de réseau doit finir par .0 ({a}.{b}.{c}.0/24).",
+                en: "subnet: '{value}': the network address must end in .0 ({a}.{b}.{c}.0/24)."
+            ));
         }
         if !ip.is_private() {
-            bail!(
-                "subnet: '{value}' : plage privée attendue (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)."
-            );
+            bail!(tr!(
+                fr: "subnet: '{value}' : plage privée attendue (10.0.0.0/8, 172.16.0.0/12, \
+                     192.168.0.0/16).",
+                en: "subnet: '{value}': a private range is required (10.0.0.0/8, 172.16.0.0/12, \
+                     192.168.0.0/16)."
+            ));
         }
         if [a, b, c] == [192, 168, 122] {
-            bail!("subnet: '{value}' est le réseau `default` de libvirt.");
+            bail!(tr!(
+                fr: "subnet: '{value}' est le réseau `default` de libvirt.",
+                en: "subnet: '{value}' is libvirt's `default` network."
+            ));
         }
         Ok(Self { prefix: [a, b, c] })
     }
@@ -174,7 +196,13 @@ fn run_virsh_output(args: &[&str]) -> Result<std::process::Output> {
     crate::libvirt::virsh_command()
         .args(args)
         .output()
-        .with_context(|| format!("Impossible d'exécuter virsh {}", args.join(" ")))
+        .with_context(|| {
+            tr!(
+                fr: "Impossible d'exécuter virsh {}",
+                en: "Cannot run virsh {}",
+                args.join(" ")
+            )
+        })
 }
 
 fn net_is_defined(net_name: &str) -> Result<bool> {
@@ -223,10 +251,12 @@ pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool)
     if let Some(xml) = defined_network_xml(&net_name)? {
         // Réseau d'un autre Virtum (même nom de lab) : ni réutilisé ni modifié.
         if let crate::ownership::Owner::Other(id) = crate::ownership::network_owner(&net_name) {
-            bail!(
-                "Le réseau {net_name} appartient à un autre Virtum ({id}) : refus de l'utiliser. \
-                 Renommez le lab (`name:`)."
-            );
+            bail!(tr!(
+                fr: "Le réseau {net_name} appartient à un autre Virtum ({id}) : refus de \
+                     l'utiliser. Renommez le lab (`name:`).",
+                en: "Network {net_name} belongs to another Virtum ({id}): refusing to use it. \
+                     Rename the lab (`name:`)."
+            ));
         }
         // Réseau non marqué : réutilisable seulement si aucun domaine d'un autre compte
         // n'y est attaché (sinon nos VM rejoindraient son réseau isolé).
@@ -236,19 +266,26 @@ pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool)
         ) && crate::ownership::network_has_attached_domains(&net_name)
             && !crate::ownership::network_may_modify(&net_name)
         {
-            bail!(
-                "Le réseau {net_name} existe sans marqueur Virtum et sert des VM qui ne sont pas \
-                 à cet état Virtum : refus de le réutiliser. Renommez le lab (`name:`)."
-            );
+            bail!(tr!(
+                fr: "Le réseau {net_name} existe sans marqueur Virtum et sert des VM qui ne \
+                     sont pas à cet état Virtum : refus de le réutiliser. Renommez le lab \
+                     (`name:`).",
+                en: "Network {net_name} exists without a Virtum marker and serves VMs that do not \
+                     belong to this Virtum state: refusing to reuse it. Rename the lab (`name:`)."
+            ));
         }
         let current = parse_network_ip(&xml);
         let subnet_differs = !current.is_some_and(|(addr, len)| len == 24 && subnet.contains(addr));
         if subnet_differs && !can_recreate {
             let (addr, len) = current.unwrap_or((Ipv4Addr::UNSPECIFIED, 0));
-            bail!(
-                "Le réseau {net_name} existe en {addr}/{len}, le Virtumfile demande {subnet}. \
-                 Les VM du lab en dépendent : `virtum down -f … --destroy` puis `virtum up` pour changer de sous-réseau."
-            );
+            bail!(tr!(
+                fr: "Le réseau {net_name} existe en {addr}/{len}, le Virtumfile demande {subnet}. \
+                     Les VM du lab en dépendent : `virtum down -f … --destroy` puis `virtum up` \
+                     pour changer de sous-réseau.",
+                en: "Network {net_name} exists as {addr}/{len}, the Virtumfile asks for {subnet}. \
+                     The lab's VMs depend on it: run `virtum down -f … --destroy` then `virtum up` \
+                     to change the subnet."
+            ));
         }
         // Sans VM, le réseau est recréé (sous-réseau changé ou réglages DHCP d'avant la
         // v0.9) ; avec des VM, un réseau sans réglages DHCP reste tel quel.
@@ -262,22 +299,32 @@ pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool)
             }
         };
         if can_recreate && !ours && subnet_differs {
-            bail!(
-                "Le réseau {net_name} existe déjà (autre utilisateur ou VM attachées) avec un autre \
-                 sous-réseau : refus de le recréer. Renommez le lab (`name:`) ou supprimez ce \
-                 réseau explicitement."
-            );
+            bail!(tr!(
+                fr: "Le réseau {net_name} existe déjà (autre utilisateur ou VM attachées) avec \
+                     un autre sous-réseau : refus de le recréer. Renommez le lab (`name:`) ou \
+                     supprimez ce réseau explicitement.",
+                en: "Network {net_name} already exists (another user or attached VMs) with a \
+                     different subnet: refusing to recreate it. Rename the lab (`name:`) or \
+                     delete this network explicitly."
+            ));
         }
         if can_recreate && ours && (subnet_differs || !has_dhcp_tuning(&xml)) {
             let why = if subnet_differs {
-                "sous-réseau changé"
+                tr!(fr: "sous-réseau changé", en: "subnet changed")
             } else {
-                "réglages DHCP v0.9"
+                tr!(fr: "réglages DHCP v0.9", en: "v0.9 DHCP settings")
             };
-            crate::verr!("Réseau {net_name} recréé en {subnet} ({why}, aucune VM).");
+            crate::verr!(
+                fr: "Réseau {net_name} recréé en {subnet} ({why}, aucune VM).",
+                en: "Network {net_name} recreated as {subnet} ({why}, no VMs)."
+            );
             let _ = run_virsh(&["net-destroy", &net_name]);
-            run_virsh(&["net-undefine", &net_name])
-                .with_context(|| format!("virsh net-undefine a échoué pour '{net_name}'"))?;
+            run_virsh(&["net-undefine", &net_name]).with_context(|| {
+                tr!(
+                    fr: "virsh net-undefine a échoué pour '{net_name}'",
+                    en: "virsh net-undefine failed for '{net_name}'"
+                )
+            })?;
         }
     }
 
@@ -294,28 +341,39 @@ pub fn ensure_lab_network(lab_name: &str, subnet: LabSubnet, can_recreate: bool)
             xml.as_bytes(),
         )?;
         run_virsh(&["net-define", path_arg(&tmp)?]).with_context(|| {
-            format!(
-                "virsh net-define a échoué pour le réseau '{net_name}'. \
-                 Vérifiez les droits libvirt (virtum doctor)."
+            tr!(
+                fr: "virsh net-define a échoué pour le réseau '{net_name}'. \
+                     Vérifiez les droits libvirt (virtum doctor).",
+                en: "virsh net-define failed for network '{net_name}'. \
+                     Check libvirt permissions (virtum doctor)."
             )
         })?;
         let _ = std::fs::remove_file(&tmp);
-        run_virsh(&["net-autostart", &net_name]).context("virsh net-autostart a échoué")?;
+        run_virsh(&["net-autostart", &net_name]).context(tr!(
+            fr: "virsh net-autostart a échoué",
+            en: "virsh net-autostart failed"
+        ))?;
     }
 
     run_virsh(&["net-start", &net_name]).with_context(|| {
-        format!(
-            "virsh net-start a échoué pour '{net_name}'. \
-             Essayez: sudo virsh net-start {net_name}"
+        tr!(
+            fr: "virsh net-start a échoué pour '{net_name}'. \
+                 Essayez: sudo virsh net-start {net_name}",
+            en: "virsh net-start failed for '{net_name}'. \
+                 Try: sudo virsh net-start {net_name}"
         )
     })?;
 
     if !net_is_active(&net_name)? {
-        bail!("Le réseau '{net_name}' n'est pas actif après net-start.");
+        bail!(tr!(
+            fr: "Le réseau '{net_name}' n'est pas actif après net-start.",
+            en: "Network '{net_name}' is not active after net-start."
+        ));
     }
 
     crate::verr!(
-        "Réseau lab actif: {net_name} (NAT {subnet}, pont {})",
+        fr: "Réseau lab actif: {net_name} (NAT {subnet}, pont {})",
+        en: "Lab network active: {net_name} (NAT {subnet}, bridge {})",
         lab_bridge_name(lab_name)
     );
     Ok(net_name)
@@ -381,7 +439,11 @@ pub fn used_networks(own_net: &str, own_bridge: &str) -> Vec<(String, Ipv4Addr, 
             continue;
         }
         if let Some((addr, len)) = parse_network_ip(&xml) {
-            used.push((format!("réseau libvirt {net}"), addr, len));
+            used.push((
+                tr!(fr: "réseau libvirt {net}", en: "libvirt network {net}"),
+                addr,
+                len,
+            ));
         }
     }
     let addrs = Command::new("ip")
@@ -433,15 +495,26 @@ fn conflict_messages(
         return Vec::new();
     }
     let origin = if lab.subnet.is_some() {
-        "déclaré"
+        tr!(fr: "déclaré", en: "declared")
     } else {
-        "calculé depuis le nom du lab"
+        tr!(fr: "calculé depuis le nom du lab", en: "computed from the lab name")
     };
     let hint = suggest_free_subnet(used)
-        .map(|s| format!(" Déclarez un autre sous-réseau, ex. `subnet: {s}`."))
-        .unwrap_or_else(|| " Déclarez un autre sous-réseau avec `subnet:`.".to_string());
-    vec![format!(
-        "Le sous-réseau du lab '{}' ({subnet}, {origin}) est déjà utilisé : {}.{hint}",
+        .map(|s| {
+            tr!(
+                fr: " Déclarez un autre sous-réseau, ex. `subnet: {s}`.",
+                en: " Declare another subnet, e.g. `subnet: {s}`."
+            )
+        })
+        .unwrap_or_else(|| {
+            tr!(
+                fr: " Déclarez un autre sous-réseau avec `subnet:`.",
+                en: " Declare another subnet with `subnet:`."
+            )
+        });
+    vec![tr!(
+        fr: "Le sous-réseau du lab '{}' ({subnet}, {origin}) est déjà utilisé : {}.{hint}",
+        en: "The subnet of lab '{}' ({subnet}, {origin}) is already in use: {}.{hint}",
         lab.name,
         clashes.join(", ")
     )]
@@ -455,14 +528,16 @@ pub fn destroy_lab_network(lab_name: &str) -> Result<()> {
     }
     if !crate::ownership::network_may_destroy(&net_name) {
         crate::verr!(
-            "Réseau {net_name} conservé : il n'est pas marqué par cet état Virtum ou des VM y sont \
-             encore attachées."
+            fr: "Réseau {net_name} conservé : il n'est pas marqué par cet état Virtum ou des VM \
+                 y sont encore attachées.",
+            en: "Network {net_name} kept: it is not marked by this Virtum state or VMs are still \
+                 attached to it."
         );
         return Ok(());
     }
     let _ = run_virsh(&["net-destroy", &net_name]);
     run_virsh(&["net-undefine", &net_name]).ok();
-    crate::verr!("Réseau lab supprimé: {net_name}");
+    crate::verr!(fr: "Réseau lab supprimé: {net_name}", en: "Lab network deleted: {net_name}");
     Ok(())
 }
 
@@ -503,12 +578,24 @@ impl DhcpHost {
 /// Vérifie qu'une adresse déclarée est utilisable sur le réseau du lab.
 pub fn validate_lab_ip(subnet: LabSubnet, ip: Ipv4Addr) -> Result<()> {
     if !subnet.contains(ip) {
-        bail!("{ip} est hors du réseau du lab ({subnet}).");
+        bail!(tr!(
+            fr: "{ip} est hors du réseau du lab ({subnet}).",
+            en: "{ip} is outside the lab network ({subnet})."
+        ));
     }
     match ip.octets()[3] {
-        0 => bail!("{ip} est l'adresse du réseau."),
-        1 => bail!("{ip} est réservée (passerelle du lab)."),
-        255 => bail!("{ip} est l'adresse de diffusion."),
+        0 => bail!(tr!(
+            fr: "{ip} est l'adresse du réseau.",
+            en: "{ip} is the network address."
+        )),
+        1 => bail!(tr!(
+            fr: "{ip} est réservée (passerelle du lab).",
+            en: "{ip} is reserved (lab gateway)."
+        )),
+        255 => bail!(tr!(
+            fr: "{ip} est l'adresse de diffusion.",
+            en: "{ip} is the broadcast address."
+        )),
         _ => Ok(()),
     }
 }
@@ -601,9 +688,12 @@ pub fn dhcp_leases(net_name: &str) -> Vec<DhcpLease> {
 
 fn net_update(net_name: &str, command: &str, host: &DhcpHost) -> Result<()> {
     if !crate::ownership::network_may_modify(net_name) {
-        bail!(
-            "Le réseau {net_name} n'appartient pas à cet état Virtum : réservation DHCP non modifiée."
-        );
+        bail!(tr!(
+            fr: "Le réseau {net_name} n'appartient pas à cet état Virtum : réservation DHCP non \
+                 modifiée.",
+            en: "Network {net_name} does not belong to this Virtum state: DHCP reservation left \
+                 unchanged."
+        ));
     }
     let xml = host.to_xml();
     let mut args = vec![
@@ -617,9 +707,12 @@ fn net_update(net_name: &str, command: &str, host: &DhcpHost) -> Result<()> {
         args.push("--live");
     }
     args.push("--config");
-    run_virsh(&args)
-        .map(|_| ())
-        .with_context(|| format!("virsh net-update {command} a échoué sur '{net_name}' ({xml})"))
+    run_virsh(&args).map(|_| ()).with_context(|| {
+        tr!(
+            fr: "virsh net-update {command} a échoué sur '{net_name}' ({xml})",
+            en: "virsh net-update {command} failed on '{net_name}' ({xml})"
+        )
+    })
 }
 
 /// Réserve `ip` pour `mac` (idempotent). Retire d'abord toute réservation de cette MAC
@@ -690,12 +783,20 @@ pub fn ip_conflicts(
     for d in declared {
         let holders = leases
             .iter()
-            .map(|l| (l.mac.as_str(), l.ip.as_str(), "louée"))
-            .chain(
-                hosts
-                    .iter()
-                    .map(|h| (h.mac.as_str(), h.ip.as_str(), "réservée")),
-            );
+            .map(|l| {
+                (
+                    l.mac.as_str(),
+                    l.ip.as_str(),
+                    tr!(fr: "louée", en: "leased"),
+                )
+            })
+            .chain(hosts.iter().map(|h| {
+                (
+                    h.mac.as_str(),
+                    h.ip.as_str(),
+                    tr!(fr: "réservée", en: "reserved"),
+                )
+            }));
         for (mac, ip, how) in holders {
             if ip != d.ip
                 || d.mac
@@ -708,10 +809,13 @@ pub fn ip_conflicts(
                 .iter()
                 .find(|(m, owner_mac)| m != d.machine && owner_mac.eq_ignore_ascii_case(mac))
             {
-                let msg = format!(
-                    "Machine '{}' : {} est déjà {how} pour la machine '{other}'. \
-                     Choisissez une autre adresse ou détruisez '{other}'.",
-                    d.machine, d.ip
+                let msg = tr!(
+                    fr: "Machine '{}' : {} est déjà {how} pour la machine '{other}'. \
+                         Choisissez une autre adresse ou détruisez '{other}'.",
+                    en: "Machine '{}': {} is already {how} for machine '{other}'. \
+                         Choose another address or destroy '{other}'.",
+                    d.machine,
+                    d.ip
                 );
                 errors.push(msg);
                 break; // un seul message par adresse (bail et réservation vont ensemble)
@@ -745,12 +849,15 @@ pub fn stale_lease_warnings(
             let until = lease
                 .expiry
                 .as_deref()
-                .map(|e| format!(" jusqu'à {e}"))
+                .map(|e| tr!(fr: " jusqu'à {e}", en: " until {e}"))
                 .unwrap_or_default();
-            Some(format!(
-                "Machine '{m}' : {ip} est encore louée à une VM supprimée ({mac}){until}. \
-                 D'ici là, la machine recevra une autre adresse ; ensuite \
-                 `virtum stop {m}` / `virtum start {m}` la ramène sur {ip}.",
+            Some(tr!(
+                fr: "Machine '{m}' : {ip} est encore louée à une VM supprimée ({mac}){until}. \
+                     D'ici là, la machine recevra une autre adresse ; ensuite \
+                     `virtum stop {m}` / `virtum start {m}` la ramène sur {ip}.",
+                en: "Machine '{m}': {ip} is still leased to a deleted VM ({mac}){until}. \
+                     Until then, the machine will get another address; afterwards \
+                     `virtum stop {m}` / `virtum start {m}` brings it back to {ip}.",
                 m = d.machine,
                 ip = d.ip,
                 mac = lease.mac,
