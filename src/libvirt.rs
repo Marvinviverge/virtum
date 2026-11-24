@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use crate::command::{path_arg, run_command};
+use crate::tr;
 
 /// Réseau NAT libvirt v0.1 (typiquement 192.168.122.0/24).
 pub const LIBVIRT_DEFAULT_NETWORK: &str = "default";
@@ -127,9 +128,15 @@ fn render_interface_xml(nic: &VmNic, mac: Option<&str>) -> String {
 }
 
 /// Builds libvirt domain XML for a headless KVM guest.
+///
+/// Carte graphique `<video>` sans affichage : sans elle, le GRUB des images Debian 13 fait
+/// redémarrer la VM en boucle avant de charger le noyau (libvirt n'en ajoute pas d'office).
 pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
     if spec.nics.is_empty() {
-        bail!("DomainSpec nécessite au moins une interface réseau.");
+        bail!(tr!(
+            fr: "DomainSpec nécessite au moins une interface réseau.",
+            en: "DomainSpec requires at least one network interface.",
+        ));
     }
     let disk = absolute_path(spec.disk_path)?;
     let iso = absolute_path(spec.iso_path)?;
@@ -202,8 +209,6 @@ pub fn generate_domain_xml(spec: &DomainSpec<'_>) -> Result<String> {
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
-    <!-- Carte graphique sans affichage : sans elle, le GRUB des images Debian 13 fait
-         redémarrer la VM en boucle avant de charger le noyau. -->
     <video>
       <model type='vga'/>
     </video>
@@ -475,8 +480,9 @@ pub fn refresh_domain_xml(
     let iso_path = instance_dir.join("cloud-init.iso");
 
     let (ram_mb, vcpus) = if xml_path.is_file() {
-        let content = std::fs::read_to_string(&xml_path)
-            .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
+        let content = std::fs::read_to_string(&xml_path).with_context(
+            || tr!(fr: "Impossible de lire {}", en: "Cannot read {}", xml_path.display()),
+        )?;
         parse_ram_vcpu_from_xml(&content).unwrap_or((2048, 2))
     } else {
         (2048, 2)
@@ -524,8 +530,9 @@ fn nics_from_refresh_args(
         }]);
     }
     if xml_path.is_file() {
-        let content = std::fs::read_to_string(xml_path)
-            .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
+        let content = std::fs::read_to_string(xml_path).with_context(
+            || tr!(fr: "Impossible de lire {}", en: "Cannot read {}", xml_path.display()),
+        )?;
         let parsed = parse_nics_from_xml(&content);
         if !parsed.is_empty() {
             return Ok(parsed);
@@ -539,10 +546,16 @@ fn nics_from_refresh_args(
 /// RAM (MiB) et vCPU lus depuis `config.xml` d'une instance.
 pub fn read_ram_vcpu_from_instance(instance_dir: &Path) -> Result<(u32, u32)> {
     let xml_path = instance_dir.join("config.xml");
-    let content = std::fs::read_to_string(&xml_path)
-        .with_context(|| format!("Impossible de lire {}", xml_path.display()))?;
-    parse_ram_vcpu_from_xml(&content)
-        .ok_or_else(|| anyhow::anyhow!("Impossible de lire RAM/vCPU dans {}", xml_path.display()))
+    let content = std::fs::read_to_string(&xml_path).with_context(
+        || tr!(fr: "Impossible de lire {}", en: "Cannot read {}", xml_path.display()),
+    )?;
+    parse_ram_vcpu_from_xml(&content).ok_or_else(|| {
+        anyhow::anyhow!(tr!(
+            fr: "Impossible de lire RAM/vCPU dans {}",
+            en: "Cannot read RAM/vCPU from {}",
+            xml_path.display(),
+        ))
+    })
 }
 
 /// RAM (MiB) et vCPU de la définition **persistante** du domaine (`virsh dumpxml --inactive`).
@@ -552,8 +565,12 @@ pub fn read_ram_vcpu_from_instance(instance_dir: &Path) -> Result<(u32, u32)> {
 pub fn read_ram_vcpu_from_domain(vm_id: &str) -> Result<(u32, u32)> {
     let output = run_virsh(&["dumpxml", "--inactive", vm_id])?;
     let xml = String::from_utf8_lossy(&output.stdout);
-    parse_ram_vcpu_from_xml(&xml)
-        .ok_or_else(|| anyhow::anyhow!("Impossible de lire RAM/vCPU dans `virsh dumpxml {vm_id}`"))
+    parse_ram_vcpu_from_xml(&xml).ok_or_else(|| {
+        anyhow::anyhow!(tr!(
+            fr: "Impossible de lire RAM/vCPU dans `virsh dumpxml {vm_id}`",
+            en: "Cannot read RAM/vCPU from `virsh dumpxml {vm_id}`",
+        ))
+    })
 }
 
 /// RAM convertie en MiB (attribut `unit`, KiB par défaut comme libvirt) et vCPU.
@@ -677,7 +694,10 @@ pub fn list_domain_names() -> Result<Vec<String>> {
 /// ([`crate::ownership::ensure_domain_ours`]).
 fn refuse_foreign_domain(vm_id: &str) -> Result<()> {
     if let crate::ownership::Owner::Other(id) = crate::ownership::domain_owner(vm_id) {
-        bail!("Le domaine {vm_id} appartient à un autre Virtum ({id}) : refus d'y toucher.");
+        bail!(tr!(
+            fr: "Le domaine {vm_id} appartient à un autre Virtum ({id}) : refus d'y toucher.",
+            en: "The domain {vm_id} belongs to another Virtum ({id}): refusing to touch it.",
+        ));
     }
     Ok(())
 }
@@ -713,13 +733,18 @@ pub fn start_domain(vm_id: &str) -> Result<()> {
         refuse_foreign_domain(vm_id)?;
         let state = domain_state(vm_id).unwrap_or_default();
         if state == "running" {
-            bail!("Le domaine libvirt '{vm_id}' est déjà actif.");
+            bail!(tr!(
+                fr: "Le domaine libvirt '{vm_id}' est déjà actif.",
+                en: "The libvirt domain '{vm_id}' is already running.",
+            ));
         }
     } else {
-        bail!(
-            "Le domaine libvirt '{vm_id}' n'existe pas. \
-             Exécutez virsh define avant virsh start."
-        );
+        bail!(tr!(
+            fr: "Le domaine libvirt '{vm_id}' n'existe pas. \
+             Exécutez virsh define avant virsh start.",
+            en: "The libvirt domain '{vm_id}' does not exist. \
+             Run virsh define before virsh start."
+        ));
     }
 
     run_virsh(&["start", vm_id]).map(|_| ())
@@ -773,9 +798,12 @@ pub fn set_domain_autostart(vm_id: &str, enabled: bool) -> Result<()> {
     } else {
         &["autostart", "--disable", vm_id]
     };
-    run_virsh(args)
-        .map(|_| ())
-        .with_context(|| format!("virsh autostart a échoué pour {vm_id}"))
+    run_virsh(args).map(|_| ()).with_context(|| {
+        tr!(
+            fr: "virsh autostart a échoué pour {vm_id}",
+            en: "virsh autostart failed for {vm_id}",
+        )
+    })
 }
 
 /// Idempotent: succeeds if the domain is not defined.
@@ -1067,7 +1095,11 @@ fn extract_ipv4_token(line: &str) -> Option<String> {
 /// parent est résolu, le nom du fichier est ajouté tel quel.
 fn socket_absolute_path(path: &Path) -> Result<String> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        bail!("Chemin de socket virtiofs invalide : {}", path.display());
+        bail!(tr!(
+            fr: "Chemin de socket virtiofs invalide : {}",
+            en: "Invalid virtiofs socket path: {}",
+            path.display(),
+        ));
     };
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -1075,8 +1107,9 @@ fn socket_absolute_path(path: &Path) -> Result<String> {
         parent
     };
     let dir = std::fs::canonicalize(parent).with_context(|| {
-        format!(
-            "Impossible de résoudre le dossier du socket {}",
+        tr!(
+            fr: "Impossible de résoudre le dossier du socket {}",
+            en: "Cannot resolve the socket directory {}",
             path.display()
         )
     })?;
@@ -1085,8 +1118,9 @@ fn socket_absolute_path(path: &Path) -> Result<String> {
 
 fn absolute_path(path: &Path) -> Result<String> {
     let abs = std::fs::canonicalize(path).with_context(|| {
-        format!(
-            "Impossible de résoudre le chemin absolu de {}",
+        tr!(
+            fr: "Impossible de résoudre le chemin absolu de {}",
+            en: "Cannot resolve the absolute path of {}",
             path.display()
         )
     })?;

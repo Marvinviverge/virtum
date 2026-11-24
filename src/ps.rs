@@ -9,6 +9,7 @@ use crate::disk::{format_virtual_size_label, image_virtual_size_bytes};
 use crate::libvirt::{domain_exists, domain_state};
 use crate::metadata::{self, Instance, InstanceStatus};
 use crate::port_forward;
+use crate::tr;
 
 #[derive(Debug, Clone)]
 struct PsRow {
@@ -28,7 +29,10 @@ pub fn ps(all: bool) -> Result<()> {
         .enable_io()
         .enable_time()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime"
+        ))?
         .block_on(ps_async(all))
 }
 
@@ -94,11 +98,15 @@ fn stopped_lab_hint(instances: &[Instance], is_stopped: impl Fn(&str) -> bool) -
     }
     let labs: Vec<String> = by_lab
         .iter()
-        .map(|(lab, vms)| format!("lab '{lab}' : {}", vms.join(", ")))
+        .map(|(lab, vms)| {
+            let vms = vms.join(", ");
+            tr!(fr: "lab '{lab}' : {vms}", en: "lab '{lab}': {vms}")
+        })
         .collect();
-    Some(format!(
-        "VM éteintes ({}). Relancez avec `virtum up` dans le dossier du lab ; détail : `virtum ps -a`.",
-        labs.join(" ; ")
+    let labs = labs.join(&tr!(fr: " ; ", en: "; "));
+    Some(tr!(
+        fr: "VM éteintes ({labs}). Relancez avec `virtum up` dans le dossier du lab ; détail : `virtum ps -a`.",
+        en: "Stopped VMs ({labs}). Restart them with `virtum up` in the lab folder; details: `virtum ps -a`."
     ))
 }
 
@@ -162,7 +170,15 @@ fn format_ip(instance: &Instance) -> String {
 fn print_table(rows: &[PsRow]) {
     println!(
         "{:<10} {:<16} {:<18} {:<12} {:<12} {:<8} {:<18} {:<18} {:<28}",
-        "NAME", "LAB", "VM ID", "OS", "STATUS", "DISK", "IP", "LAN", "FORWARD"
+        "NAME",    // i18n-ok : en-tête lu par des scripts
+        "LAB",     // i18n-ok : en-tête lu par des scripts
+        "VM ID",   // i18n-ok : en-tête lu par des scripts
+        "OS",      // i18n-ok : en-tête lu par des scripts
+        "STATUS",  // i18n-ok : en-tête lu par des scripts
+        "DISK",    // i18n-ok : en-tête lu par des scripts
+        "IP",      // i18n-ok : en-tête lu par des scripts
+        "LAN",     // i18n-ok : en-tête lu par des scripts
+        "FORWARD"  // i18n-ok : en-tête lu par des scripts
     );
     for row in rows {
         println!(

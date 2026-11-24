@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use tokio::fs;
 
 use crate::metadata::{self, Metadata};
+use crate::tr;
 
 /// Emplacement recommandé pour libvirt système (hors $HOME, lisible par libvirt-qemu).
 pub const VAR_LIB_VIRTUM: &str = "/var/lib/virtum";
@@ -36,7 +37,7 @@ impl VirtumPaths {
 pub fn virtum_home() -> Result<PathBuf> {
     if let Ok(dir) = env::var("VIRTUM_STATE_DIR") {
         if dir.is_empty() {
-            anyhow::bail!("VIRTUM_STATE_DIR est vide.");
+            anyhow::bail!(tr!(fr: "VIRTUM_STATE_DIR est vide.", en: "VIRTUM_STATE_DIR is empty."));
         }
         return Ok(PathBuf::from(dir));
     }
@@ -48,11 +49,14 @@ pub fn virtum_home() -> Result<PathBuf> {
 
     let home = dirs::home_dir()
         .or_else(|| env::var_os("HOME").map(PathBuf::from))
-        .context(
-            "Impossible de déterminer le répertoire personnel ($HOME). \
+        .context(tr!(
+            fr: "Impossible de déterminer le répertoire personnel ($HOME). \
              Définissez HOME, créez /var/lib/virtum (scripts/setup-var-lib.sh) \
              ou VIRTUM_STATE_DIR.",
-        )?;
+            en: "Cannot determine the home directory ($HOME). \
+             Set HOME, create /var/lib/virtum (scripts/setup-var-lib.sh) \
+             or set VIRTUM_STATE_DIR."
+        ))?;
     Ok(home.join(".virtum"))
 }
 
@@ -67,18 +71,18 @@ pub fn uses_var_lib_storage() -> bool {
 pub async fn ensure_layout() -> Result<VirtumPaths> {
     let paths = VirtumPaths::resolve()?;
 
-    fs::create_dir_all(&paths.root)
-        .await
-        .with_context(|| format!("Impossible de créer {}", paths.root.display()))?;
-    fs::create_dir_all(&paths.images)
-        .await
-        .with_context(|| format!("Impossible de créer {}", paths.images.display()))?;
-    fs::create_dir_all(&paths.instances)
-        .await
-        .with_context(|| format!("Impossible de créer {}", paths.instances.display()))?;
-    fs::create_dir_all(&paths.keys)
-        .await
-        .with_context(|| format!("Impossible de créer {}", paths.keys.display()))?;
+    fs::create_dir_all(&paths.root).await.with_context(
+        || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", paths.root.display()),
+    )?;
+    fs::create_dir_all(&paths.images).await.with_context(
+        || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", paths.images.display()),
+    )?;
+    fs::create_dir_all(&paths.instances).await.with_context(
+        || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", paths.instances.display()),
+    )?;
+    fs::create_dir_all(&paths.keys).await.with_context(
+        || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", paths.keys.display()),
+    )?;
 
     init_metadata_if_missing(&paths.metadata).await?;
 
@@ -90,7 +94,10 @@ pub fn ensure_layout_blocking() -> Result<VirtumPaths> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
-        .context("Impossible de démarrer le runtime Tokio")?
+        .context(tr!(
+            fr: "Impossible de démarrer le runtime Tokio",
+            en: "Cannot start the Tokio runtime",
+        ))?
         .block_on(ensure_layout())
 }
 
