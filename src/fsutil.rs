@@ -9,6 +9,7 @@ use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::tr;
 use anyhow::{bail, Context, Result};
 
 /// Uid du processus courant.
@@ -28,12 +29,16 @@ pub fn write_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()> {
             .mode(mode)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&tmp)
-            .with_context(|| format!("Impossible de créer {}", tmp.display()))?;
-        file.write_all(content)
-            .with_context(|| format!("Impossible d'écrire {}", tmp.display()))?;
+            .with_context(
+                || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", tmp.display()),
+            )?;
+        file.write_all(content).with_context(
+            || tr!(fr: "Impossible d'écrire {}", en: "Cannot write {}", tmp.display()),
+        )?;
         file.sync_all().ok();
-        fs::rename(&tmp, path)
-            .with_context(|| format!("Impossible de remplacer {}", path.display()))?;
+        fs::rename(&tmp, path).with_context(
+            || tr!(fr: "Impossible de remplacer {}", en: "Cannot replace {}", path.display()),
+        )?;
         Ok(())
     })();
     if result.is_err() {
@@ -51,9 +56,12 @@ pub fn write_new_temp(dir: &Path, prefix: &str, content: &[u8]) -> Result<PathBu
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
-        .with_context(|| format!("Impossible de créer {}", path.display()))?;
-    file.write_all(content)
-        .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
+        .with_context(
+            || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", path.display()),
+        )?;
+    file.write_all(content).with_context(
+        || tr!(fr: "Impossible d'écrire {}", en: "Cannot write {}", path.display()),
+    )?;
     Ok(path)
 }
 
@@ -63,32 +71,43 @@ pub fn read_owned(path: &Path) -> Result<Option<String>> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("Impossible de lire {}", path.display())),
+        Err(e) => {
+            return Err(e).with_context(
+                || tr!(fr: "Impossible de lire {}", en: "Cannot read {}", path.display()),
+            )
+        }
     };
     ensure_owned_regular_file(path, &meta)?;
     let content = fs::read_to_string(path)
-        .with_context(|| format!("Impossible de lire {}", path.display()))?;
+        .with_context(|| tr!(fr: "Impossible de lire {}", en: "Cannot read {}", path.display()))?;
     Ok(Some(content))
 }
 
 /// Refuse un lien symbolique, un non-fichier ou un fichier d'un autre utilisateur.
 pub fn ensure_owned_regular_file(path: &Path, meta: &fs::Metadata) -> Result<()> {
     if meta.file_type().is_symlink() {
-        bail!(
-            "{} est un lien symbolique : fichier d'état refusé (possible altération).",
+        bail!(tr!(
+            fr: "{} est un lien symbolique : fichier d'état refusé (possible altération).",
+            en: "{} is a symbolic link: state file rejected (possible tampering).",
             path.display()
-        );
+        ));
     }
     if !meta.is_file() {
-        bail!("{} n'est pas un fichier régulier.", path.display());
+        bail!(tr!(
+            fr: "{} n'est pas un fichier régulier.",
+            en: "{} is not a regular file.",
+            path.display(),
+        ));
     }
     if meta.uid() != current_uid() {
-        bail!(
-            "{} appartient à l'uid {} et non à l'utilisateur courant : fichier d'état refusé \
+        bail!(tr!(
+            fr: "{} appartient à l'uid {} et non à l'utilisateur courant : fichier d'état refusé \
              (possible altération). Supprimez-le s'il est légitime.",
+            en: "{} belongs to uid {}, not to the current user: state file rejected \
+             (possible tampering). Remove it if it is legitimate.",
             path.display(),
             meta.uid()
-        );
+        ));
     }
     Ok(())
 }
@@ -101,7 +120,7 @@ fn unique_sibling(path: &Path) -> Result<PathBuf> {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .context("Nom de fichier invalide")?;
+        .context(tr!(fr: "Nom de fichier invalide", en: "Invalid file name"))?;
     unique_in(dir, &format!(".{name}"))
 }
 
