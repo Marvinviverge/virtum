@@ -451,7 +451,7 @@ fn base_images_result(instances: &[Instance], instances_dir: &Path) -> CheckResu
             ),
         };
     }
-    let broken = broken.join(" ; ");
+    let broken = broken.join(&crate::tr!(fr: " ; ", en: "; "));
     CheckResult {
         name: base_images_check(),
         ok: false,
@@ -590,7 +590,7 @@ fn orphans_result(orphans: &Orphans, instances_dir: &Path) -> CheckResult {
         }
     }
 
-    let parts = parts.join(" ; ");
+    let parts = parts.join(&crate::tr!(fr: " ; ", en: "; "));
     let hints = hints.join(", ");
     CheckResult {
         name: orphans_check(),

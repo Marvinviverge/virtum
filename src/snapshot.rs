@@ -286,7 +286,11 @@ where
             tr!(fr: "Relance de '{}'…", en: "Restarting '{}'…", target.label())
         );
         if let Err(err) = vm::start_vm_async(target.label()).await {
-            eprintln!("error [{}]: {err:#}", target.label()); // i18n-ok : identique en anglais
+            let label = target.label();
+            eprintln!(
+                "{}",
+                tr!(fr: "erreur [{label}] : {err:#}", en: "error [{label}]: {err:#}")
+            );
             restart_failures.push(target.label().to_string());
         }
     }

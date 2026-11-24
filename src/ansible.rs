@@ -12,16 +12,6 @@ use crate::ssh::{self, SshSessionOpts};
 use crate::tr;
 use crate::virtumfile::{self, Virtumfile};
 
-/// `tr!` pour un libellé court sans argument renvoyé en `&'static str`.
-macro_rules! tr_static {
-    (fr: $fr:literal, en: $en:literal $(,)?) => {
-        match crate::i18n::lang() {
-            crate::i18n::Lang::Fr => $fr,
-            crate::i18n::Lang::En => $en,
-        }
-    };
-}
-
 /// État du provisionnement d'un lab (`ansible-<lab>.json`, à côté de `firewall-<lab>.json`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnsibleState {
@@ -89,9 +79,11 @@ pub fn provision_reason(
     created_machines: bool,
 ) -> Option<&'static str> {
     match previous {
-        None => return Some(tr_static!(fr: "lab non provisionné", en: "lab not provisioned")),
+        None => {
+            return Some(crate::tr_static!(fr: "lab non provisionné", en: "lab not provisioned"))
+        }
         Some(state) if !state.succeeded() => {
-            return Some(tr_static!(
+            return Some(crate::tr_static!(
                 fr: "dernier provisionnement en échec",
                 en: "last provisioning failed"
             ))
@@ -99,7 +91,7 @@ pub fn provision_reason(
         Some(_) => {}
     }
     if created_machines {
-        Some(tr_static!(fr: "machines ajoutées", en: "machines added"))
+        Some(crate::tr_static!(fr: "machines ajoutées", en: "machines added"))
     } else {
         None
     }

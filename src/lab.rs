@@ -810,7 +810,7 @@ pub(crate) fn confirm_lan_deploy() -> Result<()> {
         "{}",
         tr!(
             fr: "ATTENTION: bind: lan expose les ports mappés sur le réseau local (0.0.0.0). \
-                 Continuer ? [y/N] ",
+                 Continuer ? [o/N] ",
             en: "WARNING: bind: lan exposes the mapped ports on the local network (0.0.0.0). \
                  Continue? [y/N] "
         )
@@ -821,8 +821,7 @@ pub(crate) fn confirm_lan_deploy() -> Result<()> {
         crate::verr!(fr: "\nDéploiement annulé.", en: "\nDeployment cancelled.");
         std::process::exit(0);
     }
-    let answer = line.trim();
-    if answer == "y" || answer == "Y" {
+    if crate::i18n::confirmed(&line) {
         return Ok(());
     }
     crate::verr!(fr: "Déploiement annulé.", en: "Deployment cancelled.");

@@ -759,7 +759,7 @@ fn confirm_prune(removals: &[Removal]) -> Result<bool> {
     eprint!(
         "{}",
         tr!(
-            fr: "Supprimer ces machines ? Les dossiers `mounts:` de l'hôte sont conservés. [y/N] ",
+            fr: "Supprimer ces machines ? Les dossiers `mounts:` de l'hôte sont conservés. [o/N] ",
             en: "Remove these machines? The host's `mounts:` folders are kept. [y/N] "
         )
     );
@@ -768,7 +768,7 @@ fn confirm_prune(removals: &[Removal]) -> Result<bool> {
     if io::stdin().read_line(&mut line).is_err() {
         return Ok(false);
     }
-    Ok(matches!(line.trim(), "y" | "Y"))
+    Ok(crate::i18n::confirmed(&line))
 }
 
 /// Supprime les machines hors du Virtumfile (comme `virtum destroy`, sans `--purge`).

@@ -135,8 +135,13 @@ fn ini_value(value: &str) -> String {
 }
 
 pub fn render_ini(inv: &Inventory) -> String {
+    // Contenu du fichier d'inventaire, identique quelle que soit la langue (FR-011).
     let mut out = format!(
-        "# Généré par virtum inventory — lab {} (ne pas éditer)\n# Groupe implicite du lab : chaque hôte y est déclaré avec ses variables.\n[{}]\n", // i18n-ok : inventaire
+        concat!(
+            "# Généré par virtum inventory — lab {} (ne pas éditer)\n", // i18n-ok : inventaire
+            "# Groupe implicite du lab : chaque hôte y est déclaré avec ses variables.\n", // i18n-ok
+            "[{}]\n",
+        ),
         inv.lab_name, inv.lab_group
     );
     for host in &inv.hosts {
