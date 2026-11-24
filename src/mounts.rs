@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::libvirt_access;
+use crate::tr;
 use crate::virtumfile::{MountSpec, Virtumfile};
 
 pub const VIRTUM_GUEST_HOME: &str = "/home/virtum";
@@ -44,23 +45,30 @@ pub fn resolve_virtiofsd_path() -> Option<PathBuf> {
 /// options de Virtum : sans cette vérification, la VM attendrait son socket en vain.
 pub fn ensure_virtiofsd_usable() -> Result<PathBuf> {
     let Some(path) = resolve_virtiofsd_path() else {
-        bail!(
-            "Dossiers partagés (`mounts:`) indisponibles : virtiofsd est absent. \
+        bail!(tr!(
+            fr: "Dossiers partagés (`mounts:`) indisponibles : virtiofsd est absent. \
              Installez-le (sudo apt install virtiofsd) ; le paquet n'existe pas sur Debian 12 \
-             ni Ubuntu 22.04. Sinon, retirez `mounts:` du Virtumfile."
-        );
+             ni Ubuntu 22.04. Sinon, retirez `mounts:` du Virtumfile.",
+            en: "Shared folders (`mounts:`) unavailable: virtiofsd is missing. \
+             Install it (sudo apt install virtiofsd); the package does not exist on Debian 12 \
+             or Ubuntu 22.04. Otherwise, remove `mounts:` from the Virtumfile."
+        ));
     };
     let works = Command::new(&path)
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success());
     if !works {
-        bail!(
-            "Dossiers partagés (`mounts:`) indisponibles : {} est l'ancien virtiofsd en C \
+        bail!(tr!(
+            fr: "Dossiers partagés (`mounts:`) indisponibles : {} est l'ancien virtiofsd en C \
              fourni par QEMU, incompatible. Il faut le virtiofsd en Rust (paquet virtiofsd, \
              absent de Debian 12 et d'Ubuntu 22.04). Sinon, retirez `mounts:` du Virtumfile.",
+            en: "Shared folders (`mounts:`) unavailable: {} is the old C virtiofsd \
+             shipped with QEMU, which is incompatible. The Rust virtiofsd is required (virtiofsd \
+             package, missing from Debian 12 and Ubuntu 22.04). Otherwise, remove `mounts:` \
+             from the Virtumfile.",
             path.display()
-        );
+        ));
     }
     Ok(path)
 }
@@ -140,7 +148,10 @@ fn mount_entry_to_spec(entry: MountYamlEntry, index: usize) -> Result<MountSpec>
 fn parse_mount_shortcut(s: &str) -> Result<(String, String, bool)> {
     let s = s.trim();
     let (host, rest) = s.split_once(':').with_context(|| {
-        format!("Mount invalide '{s}' (attendu host:guest[:rw], ex. ./app:~/app:rw)")
+        tr!(
+            fr: "Mount invalide '{s}' (attendu host:guest[:rw], ex. ./app:~/app:rw)",
+            en: "Invalid mount '{s}' (expected host:guest[:rw], e.g. ./app:~/app:rw)"
+        )
     })?;
     let (guest, rw) = match rest.rsplit_once(':') {
         Some((guest, "rw")) => (guest, true),
@@ -177,13 +188,19 @@ fn default_volume_name(host: &str, index: usize) -> String {
 fn validate_volume_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
-        bail!("Le nom de volume mount ne peut pas être vide.");
+        bail!(tr!(
+            fr: "Le nom de volume mount ne peut pas être vide.",
+            en: "The mount volume name cannot be empty."
+        ));
     }
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        bail!("Nom de volume '{name}' invalide (utilisez lettres, chiffres, '_' ou '-').");
+        bail!(tr!(
+            fr: "Nom de volume '{name}' invalide (utilisez lettres, chiffres, '_' ou '-').",
+            en: "Invalid volume name '{name}' (use letters, digits, '_' or '-')."
+        ));
     }
     Ok(name.to_string())
 }
@@ -214,8 +231,9 @@ pub fn resolve_machine_mounts(
 ) -> Result<Vec<ResolvedMount>> {
     let specs = effective_mount_specs(lab, machine_name);
     let base = virtumfile_dir.canonicalize().with_context(|| {
-        format!(
-            "Répertoire Virtumfile invalide: {}",
+        tr!(
+            fr: "Répertoire Virtumfile invalide: {}",
+            en: "Invalid Virtumfile directory: {}",
             virtumfile_dir.display()
         )
     })?;
@@ -223,10 +241,11 @@ pub fn resolve_machine_mounts(
     let mut names = std::collections::HashSet::new();
     for spec in specs {
         if !names.insert(spec.name.clone()) {
-            bail!(
-                "Machine '{machine_name}' : nom de volume mount '{}' en double.",
+            bail!(tr!(
+                fr: "Machine '{machine_name}' : nom de volume mount '{}' en double.",
+                en: "Machine '{machine_name}': duplicate mount volume name '{}'.",
                 spec.name
-            );
+            ));
         }
         resolved.push(resolve_mount_spec(&spec, &base)?);
     }
@@ -247,13 +266,17 @@ pub fn ensure_mounts_not_nested(mounts: &[(String, PathBuf)]) -> Result<()> {
     for (outer_label, outer) in mounts {
         for (inner_label, inner) in mounts {
             if inner != outer && inner.starts_with(outer) {
-                bail!(
-                    "Mounts imbriqués interdits : '{inner_label}' ({}) est à l'intérieur de \
+                bail!(tr!(
+                    fr: "Mounts imbriqués interdits : '{inner_label}' ({}) est à l'intérieur de \
                      '{outer_label}' ({}). Un invité pourrait remplacer le dossier inclus par un \
-                     lien symbolique vers un autre dossier de l'hôte ; utilisez des dossiers disjoints.",
+                     lien symbolique vers un autre dossier de l'hôte ; \
+                    utilisez des dossiers disjoints.",
+                    en: "Nested mounts are not allowed: '{inner_label}' ({}) is inside \
+                     '{outer_label}' ({}). A guest could replace the inner folder with a \
+                     symbolic link to another host folder; use disjoint folders.",
                     inner.display(),
                     outer.display()
-                );
+                ));
             }
         }
     }
@@ -280,29 +303,37 @@ pub fn resolve_mount_spec(spec: &MountSpec, virtumfile_base: &Path) -> Result<Re
 pub fn resolve_host_path(virtumfile_base: &Path, host: &str) -> Result<PathBuf> {
     let host = host.trim();
     if host.is_empty() {
-        bail!("Chemin hôte mount vide.");
+        bail!(tr!(fr: "Chemin hôte mount vide.", en: "Empty mount host path."));
     }
     if Path::new(host).is_absolute() {
-        bail!(
-            "Chemin hôte mount absolu interdit : {host}. \
-             Utilisez un chemin relatif au Virtumfile (ex. ./src)."
-        );
+        bail!(tr!(
+            fr: "Chemin hôte mount absolu interdit : {host}. \
+             Utilisez un chemin relatif au Virtumfile (ex. ./src).",
+            en: "Absolute mount host path not allowed: {host}. \
+             Use a path relative to the Virtumfile (e.g. ./src)."
+        ));
     }
     let base = virtumfile_base
         .canonicalize()
-        .context("canonicalize virtumfile base")?;
+        .context("canonicalize virtumfile base")?; // i18n-ok : déjà en anglais, identique
 
     // Composants relatifs, sans `.` ; `..` interdit.
     let mut rel = Vec::new();
     for component in Path::new(host).components() {
         match component {
             Component::ParentDir => {
-                bail!("Chemin hôte '{host}' sort du répertoire du Virtumfile (.. interdit).")
+                bail!(tr!(
+                    fr: "Chemin hôte '{host}' sort du répertoire du Virtumfile (.. interdit).",
+                    en: "Host path '{host}' leaves the Virtumfile directory (.. not allowed)."
+                ))
             }
             Component::CurDir => {}
             Component::Normal(c) => rel.push(c.to_os_string()),
             Component::RootDir | Component::Prefix(_) => {
-                bail!("Chemin hôte mount absolu interdit : {host}.")
+                bail!(tr!(
+                    fr: "Chemin hôte mount absolu interdit : {host}.",
+                    en: "Absolute mount host path not allowed: {host}."
+                ))
             }
         }
     }
@@ -314,39 +345,47 @@ pub fn resolve_host_path(virtumfile_base: &Path, host: &str) -> Result<PathBuf> 
     for c in &rel {
         current.push(c);
         match fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => bail!(
-                "Chemin hôte '{host}' : {} est un lien symbolique (refusé ; utilisez le \
+            Ok(meta) if meta.file_type().is_symlink() => bail!(tr!(
+                fr: "Chemin hôte '{host}' : {} est un lien symbolique (refusé ; utilisez le \
                  répertoire réel sous le Virtumfile).",
+                en: "Host path '{host}': {} is a symbolic link (refused; use the \
+                 real directory under the Virtumfile).",
                 current.display()
-            ),
-            Ok(meta) if !meta.is_dir() => bail!(
-                "Le chemin hôte mount doit être un répertoire : {}",
+            )),
+            Ok(meta) if !meta.is_dir() => bail!(tr!(
+                fr: "Le chemin hôte mount doit être un répertoire : {}",
+                en: "The mount host path must be a directory: {}",
                 current.display()
-            ),
+            )),
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 fs::create_dir(&current).with_context(|| {
-                    format!(
-                        "Impossible de créer le répertoire hôte mount {} (résolu depuis '{host}').",
+                    tr!(
+                        fr: "Impossible de créer le répertoire hôte mount {} \
+                        (résolu depuis '{host}').",
+                        en: "Cannot create the mount host directory {} (resolved from '{host}').",
                         current.display()
                     )
                 })?;
             }
             Err(e) => {
-                return Err(e).with_context(|| format!("Impossible de lire {}", current.display()))
+                return Err(e).with_context(
+                    || tr!(fr: "Impossible de lire {}", en: "Cannot read {}", current.display()),
+                )
             }
         }
     }
 
-    let canonical = current
-        .canonicalize()
-        .with_context(|| format!("Impossible de résoudre {}", current.display()))?;
+    let canonical = current.canonicalize().with_context(
+        || tr!(fr: "Impossible de résoudre {}", en: "Cannot resolve {}", current.display()),
+    )?;
     if canonical != current || !host_path_under_virtumfile_root(&canonical, &base) {
-        bail!(
-            "Chemin hôte '{}' résout hors du répertoire Virtumfile ({})",
+        bail!(tr!(
+            fr: "Chemin hôte '{}' résout hors du répertoire Virtumfile ({})",
+            en: "Host path '{}' resolves outside the Virtumfile directory ({})",
             host,
             base.display()
-        );
+        ));
     }
     Ok(canonical)
 }
@@ -366,25 +405,37 @@ fn host_path_under_virtumfile_root(candidate: &Path, base: &Path) -> bool {
 pub fn resolve_guest_path(guest: &str) -> Result<String> {
     let raw = guest.trim();
     if raw.is_empty() {
-        bail!(guest_path_error(raw, "chemin vide"));
+        bail!(guest_path_error(
+            raw,
+            &tr!(fr: "chemin vide", en: "empty path")
+        ));
     }
 
     let normalized = normalize_guest_path(raw)?;
     if normalized.contains("..") {
-        bail!(guest_path_error(raw, "ne doit pas contenir '..'"));
+        bail!(guest_path_error(
+            raw,
+            &tr!(fr: "ne doit pas contenir '..'", en: "must not contain '..'")
+        ));
     }
     validate_guest_path_chars(raw, &normalized)?;
     if !is_strict_virtum_home(&normalized) {
         bail!(guest_path_error(
             raw,
-            "doit être sous /home/virtum (ex. ~/app)"
+            &tr!(
+                fr: "doit être sous /home/virtum (ex. ~/app)",
+                en: "must be under /home/virtum (e.g. ~/app)"
+            )
         ));
     }
     Ok(normalized)
 }
 
 fn guest_path_error(raw: &str, reason: &str) -> String {
-    format!("Chemin invité '{raw}' invalide : {reason}")
+    tr!(
+        fr: "Chemin invité '{raw}' invalide : {reason}",
+        en: "Invalid guest path '{raw}': {reason}"
+    )
 }
 
 fn normalize_guest_path(raw: &str) -> Result<String> {
@@ -402,7 +453,10 @@ fn normalize_guest_path(raw: &str) -> Result<String> {
     }
     bail!(guest_path_error(
         raw,
-        "utilisez ~/chemin ou /home/virtum/chemin"
+        &tr!(
+            fr: "utilisez ~/chemin ou /home/virtum/chemin",
+            en: "use ~/path or /home/virtum/path"
+        )
     ))
 }
 
@@ -421,7 +475,10 @@ fn validate_guest_path_chars(raw: &str, normalized: &str) -> Result<()> {
         }
         bail!(guest_path_error(
             raw,
-            &format!("caractère '{c}' interdit (autorisés : [a-zA-Z0-9/_.-])")
+            &tr!(
+                fr: "caractère '{c}' interdit (autorisés : [a-zA-Z0-9/_.-])",
+                en: "character '{c}' not allowed (allowed: [a-zA-Z0-9/_.-])"
+            )
         ));
     }
     Ok(())
@@ -470,8 +527,9 @@ fn ensure_virtiofs_socket_running(instance_dir: &Path, mount: &mut ResolvedMount
     }
     if mount.socket_path.exists() {
         std::fs::remove_file(&mount.socket_path).with_context(|| {
-            format!(
-                "Socket virtiofs orphelin (démon arrêté) : {}",
+            tr!(
+                fr: "Socket virtiofs orphelin (démon arrêté) : {}",
+                en: "Orphaned virtiofs socket (daemon stopped): {}",
                 mount.socket_path.display()
             )
         })?;
@@ -503,18 +561,27 @@ fn restrict_share_root(name: &str, shared: &Path) -> Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let uid = crate::fsutil::current_uid();
-    let meta = fs::symlink_metadata(shared)
-        .with_context(|| format!("Répertoire partagé {} introuvable", shared.display()))?;
+    let meta = fs::symlink_metadata(shared).with_context(|| {
+        tr!(
+            fr: "Répertoire partagé {} introuvable",
+            en: "Shared directory {} not found",
+            shared.display()
+        )
+    })?;
 
     let acl = crate::share_access::named_acl_traversers_of(shared, uid)?;
     if !acl.is_empty() {
-        bail!(
-            "Volume '{name}' : une ACL sur {} permet à d'autres comptes de traverser le partage \
+        bail!(tr!(
+            fr: "Volume '{name}' : une ACL sur {} permet à d'autres comptes de \
+             traverser le partage \
              ({}). Un invité pourrait y déposer un exécutable setuid qu'ils pourraient lancer. \
              Retirez ces entrées (setfacl -x …) puis relancez.",
+            en: "Volume '{name}': an ACL on {} lets other accounts traverse the share \
+             ({}). A guest could drop a setuid executable there that they could run. \
+             Remove these entries (setfacl -x …) and try again.",
             shared.display(),
             acl.join(", ")
-        );
+        ));
     }
 
     let mode = meta.permissions().mode() & 0o7777;
@@ -528,24 +595,34 @@ fn restrict_share_root(name: &str, shared: &Path) -> Result<()> {
     }
     let new_mode = mode & !remove;
     if meta.uid() != uid {
-        bail!(
-            "Volume '{name}' : {} est accessible à d'autres comptes (mode {mode:o}) et \
+        bail!(tr!(
+            fr: "Volume '{name}' : {} est accessible à d'autres comptes (mode {mode:o}) et \
              n'appartient pas à l'utilisateur courant. Un invité pourrait y déposer un \
              exécutable setuid atteignable par ces comptes : passez-le en {new_mode:o} puis \
              relancez.",
+            en: "Volume '{name}': {} is accessible to other accounts (mode {mode:o}) and \
+             is not owned by the current user. A guest could drop a setuid executable there \
+             that these accounts could reach: change it to {new_mode:o} and try again.",
             shared.display()
-        );
+        ));
     }
-    fs::set_permissions(shared, fs::Permissions::from_mode(new_mode))
-        .with_context(|| format!("Impossible de restreindre l'accès à {}", shared.display()))?;
+    fs::set_permissions(shared, fs::Permissions::from_mode(new_mode)).with_context(|| {
+        tr!(
+            fr: "Impossible de restreindre l'accès à {}",
+            en: "Cannot restrict access to {}",
+            shared.display()
+        )
+    })?;
     let who = if shared_group {
-        "« autres » et groupe partagé"
+        tr!(fr: "« autres » et groupe partagé", en: "'other' and shared group")
     } else {
-        "« autres »"
+        tr!(fr: "« autres »", en: "'other'")
     };
     crate::verr!(
-        "Volume '{name}' : accès {who} retiré sur {} ({mode:o} → {new_mode:o}), pour qu'aucun \
+        fr: "Volume '{name}' : accès {who} retiré sur {} ({mode:o} → {new_mode:o}), pour qu'aucun \
          autre compte local n'atteigne les fichiers déposés par l'invité.",
+        en: "Volume '{name}': {who} access removed on {} ({mode:o} → {new_mode:o}), so that no \
+         other local account can reach the files dropped by the guest.",
         shared.display()
     );
     Ok(())
@@ -559,34 +636,47 @@ fn restrict_share_root(name: &str, shared: &Path) -> Result<()> {
 fn validate_stored_share(mount: &ResolvedMount) -> Result<()> {
     let shared = &mount.host_abs;
     if !shared.is_absolute() {
-        bail!(
-            "Volume '{}' : chemin hôte enregistré non absolu ({}).",
+        bail!(tr!(
+            fr: "Volume '{}' : chemin hôte enregistré non absolu ({}).",
+            en: "Volume '{}': stored host path is not absolute ({}).",
             mount.name,
             shared.display()
-        );
+        ));
     }
-    let meta = fs::symlink_metadata(shared)
-        .with_context(|| format!("Répertoire partagé {} introuvable", shared.display()))?;
-    let canonical = shared
-        .canonicalize()
-        .with_context(|| format!("Répertoire partagé {}", shared.display()))?;
+    let meta = fs::symlink_metadata(shared).with_context(|| {
+        tr!(
+            fr: "Répertoire partagé {} introuvable",
+            en: "Shared directory {} not found",
+            shared.display()
+        )
+    })?;
+    let canonical = shared.canonicalize().with_context(|| {
+        tr!(
+            fr: "Répertoire partagé {}",
+            en: "Shared directory {}",
+            shared.display()
+        )
+    })?;
     if meta.file_type().is_symlink() || !meta.is_dir() || canonical != *shared {
-        bail!(
-            "Volume '{}' : {} a été remplacé (lien symbolique ou autre chemin réel {}). \
+        bail!(tr!(
+            fr: "Volume '{}' : {} a été remplacé (lien symbolique ou autre chemin réel {}). \
              Partage refusé ; vérifiez le dossier puis recréez la VM.",
+            en: "Volume '{}': {} has been replaced (symbolic link or other real path {}). \
+             Share refused; check the folder and recreate the VM.",
             mount.name,
             shared.display(),
             canonical.display()
-        );
+        ));
     }
     if let Some(root) = &mount.virtumfile_dir {
         if !host_path_under_virtumfile_root(&canonical, root) {
-            bail!(
-                "Volume '{}' : {} est hors du répertoire Virtumfile ({}). Partage refusé.",
+            bail!(tr!(
+                fr: "Volume '{}' : {} est hors du répertoire Virtumfile ({}). Partage refusé.",
+                en: "Volume '{}': {} is outside the Virtumfile directory ({}). Share refused.",
                 mount.name,
                 canonical.display(),
                 root.display()
-            );
+            ));
         }
     }
     Ok(())
@@ -635,15 +725,20 @@ fn start_virtiofsd(
     read_only: bool,
 ) -> Result<u32> {
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Impossible de créer {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(
+            || tr!(fr: "Impossible de créer {}", en: "Cannot create {}", parent.display()),
+        )?;
     }
     let shared = shared_dir.to_path_buf();
     let socket = socket_path.to_path_buf();
 
     let virtiofsd = resolve_virtiofsd_path().with_context(|| {
-        "virtiofsd introuvable. Installez le paquet virtiofsd (sudo apt install virtiofsd) \
-         puis relancez `virtum doctor`."
+        tr!(
+            fr: "virtiofsd introuvable. Installez le paquet virtiofsd (sudo apt install virtiofsd) \
+         puis relancez `virtum doctor`.",
+            en: "virtiofsd not found. Install the virtiofsd package (sudo apt install virtiofsd) \
+         then run `virtum doctor` again."
+        )
     })?;
 
     let log_path = instance_dir.join(format!("virtiofs-{mount_name}.log"));
@@ -652,7 +747,9 @@ fn start_virtiofsd(
         .append(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&log_path)
-        .with_context(|| format!("Impossible d'ouvrir {}", log_path.display()))?;
+        .with_context(
+            || tr!(fr: "Impossible d'ouvrir {}", en: "Cannot open {}", log_path.display()),
+        )?;
 
     // Sans --sandbox=none, virtiofsd peut quitter si uidmap/newuidmap est absent.
     // --killpriv-v2 : toute écriture, chown ou troncature par l'invité efface les bits
@@ -664,16 +761,22 @@ fn start_virtiofsd(
     // bubblewrap, dans un espace de noms où le dossier partagé est monté en lecture seule.
     let backend = if read_only {
         Some(read_only_backend(&virtiofsd).with_context(|| {
-            format!(
-                "Volume '{mount_name}' en lecture seule : ce virtiofsd n'a pas `--readonly` et \
+            tr!(
+                fr: "Volume '{mount_name}' en lecture seule : ce virtiofsd n'a pas `--readonly` et \
                  bubblewrap est absent. Installez-le (sudo apt install bubblewrap) ou déclarez \
-                 le partage `rw: true`."
+                 le partage `rw: true`.",
+                en: "Read-only volume '{mount_name}': this virtiofsd has no `--readonly` and \
+                 bubblewrap is missing. Install it (sudo apt install bubblewrap) or declare \
+                 the share `rw: true`."
             )
         })?)
     } else {
         None
     };
-    let shared_str = shared.to_str().context("shared-dir non UTF-8")?;
+    let shared_str = shared.to_str().context(tr!(
+        fr: "shared-dir non UTF-8",
+        en: "shared-dir is not UTF-8"
+    ))?;
     let mut cmd = match &backend {
         Some(ReadOnlyBackend::Bwrap(bwrap)) => {
             let mut c = Command::new(bwrap);
@@ -690,7 +793,10 @@ fn start_virtiofsd(
     cmd.args([
         "--sandbox=none",
         "--socket-path",
-        socket.to_str().context("socket path non UTF-8")?,
+        socket.to_str().context(tr!(
+            fr: "socket path non UTF-8",
+            en: "socket path is not UTF-8"
+        ))?,
         "--shared-dir",
         shared_str,
         "--killpriv-v2",
@@ -709,9 +815,11 @@ fn start_virtiofsd(
         });
     }
     let child = cmd.spawn().with_context(|| {
-        format!(
-            "Impossible de démarrer virtiofsd pour {} → {}. \
+        tr!(
+            fr: "Impossible de démarrer virtiofsd pour {} → {}. \
                  Lancez `virtum doctor` (paquet virtiofsd).",
+            en: "Cannot start virtiofsd for {} → {}. \
+                 Run `virtum doctor` (virtiofsd package).",
             shared.display(),
             socket.display()
         )
@@ -723,11 +831,13 @@ fn start_virtiofsd(
     for _ in 0..50 {
         if !daemon_running(daemon_pid) {
             let log_hint = instance_dir.join(format!("virtiofs-{mount_name}.log"));
-            bail!(
-                "virtiofsd s'est arrêté tout de suite pour le volume '{mount_name}'. \
+            bail!(tr!(
+                fr: "virtiofsd s'est arrêté tout de suite pour le volume '{mount_name}'. \
                  Consultez {} (souvent sandbox/uidmap ; Virtum utilise --sandbox=none).",
+                en: "virtiofsd stopped immediately for volume '{mount_name}'. \
+                 Check {} (often sandbox/uidmap; Virtum uses --sandbox=none).",
                 log_hint.display()
-            );
+            ));
         }
         if path_is_socket(&socket) && daemon_running(daemon_pid) {
             libvirt_access::prepare_virtiofs_socket(&socket)?;
@@ -741,22 +851,25 @@ fn start_virtiofsd(
                 {
                     return Ok(pid);
                 }
-                bail!(
-                    "virtiofsd introuvable sous bubblewrap pour le volume '{mount_name}' ({}).",
+                bail!(tr!(
+                    fr: "virtiofsd introuvable sous bubblewrap pour le volume '{mount_name}' ({}).",
+                    en: "virtiofsd not found under bubblewrap for volume '{mount_name}' ({}).",
                     socket.display()
-                );
+                ));
             }
             return Ok(daemon_pid);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     let log_hint = instance_dir.join(format!("virtiofs-{mount_name}.log"));
-    bail!(
-        "Timeout en attendant le socket virtiofsd {}. \
+    bail!(tr!(
+        fr: "Timeout en attendant le socket virtiofsd {}. \
          Consultez {} et `ps aux | grep virtiofsd`.",
+        en: "Timed out waiting for the virtiofsd socket {}. \
+         Check {} and `ps aux | grep virtiofsd`.",
         socket.display(),
         log_hint.display()
-    );
+    ));
 }
 
 fn daemon_running(pid: u32) -> bool {
@@ -770,23 +883,34 @@ pub fn load_mounts_state(instance_dir: &Path) -> Result<Vec<ResolvedMount>> {
     let Some(content) = crate::fsutil::read_owned(&path)? else {
         return Ok(Vec::new());
     };
-    let mounts: Vec<ResolvedMount> =
-        serde_json::from_str(&content).with_context(|| format!("{} invalide", path.display()))?;
+    let mounts: Vec<ResolvedMount> = serde_json::from_str(&content)
+        .with_context(|| tr!(fr: "{} invalide", en: "{} is invalid", path.display()))?;
     for m in &mounts {
         if validate_volume_name(&m.name)? != m.name {
-            bail!("{} : nom de volume '{}' invalide.", path.display(), m.name);
+            bail!(tr!(
+                fr: "{} : nom de volume '{}' invalide.",
+                en: "{}: invalid volume name '{}'.",
+                path.display(),
+                m.name
+            ));
         }
-        resolve_guest_path(&m.guest_path)
-            .with_context(|| format!("{} : chemin invité invalide", path.display()))?;
+        resolve_guest_path(&m.guest_path).with_context(|| {
+            tr!(
+                fr: "{} : chemin invité invalide",
+                en: "{}: invalid guest path",
+                path.display()
+            )
+        })?;
         if m.socket_path != PathBuf::new()
             && m.socket_path != socket_path_for(instance_dir, &m.name)
         {
-            bail!(
-                "{} : socket inattendu pour '{}' ({}).",
+            bail!(tr!(
+                fr: "{} : socket inattendu pour '{}' ({}).",
+                en: "{}: unexpected socket for '{}' ({}).",
                 path.display(),
                 m.name,
                 m.socket_path.display()
-            );
+            ));
         }
     }
     Ok(mounts)
@@ -794,7 +918,10 @@ pub fn load_mounts_state(instance_dir: &Path) -> Result<Vec<ResolvedMount>> {
 
 fn save_mounts_state(instance_dir: &Path, mounts: &[ResolvedMount]) -> Result<()> {
     let path = instance_dir.join(MOUNTS_STATE_FILE);
-    let content = serde_json::to_string_pretty(mounts).context("sérialisation mounts-state")?;
+    let content = serde_json::to_string_pretty(mounts).context(tr!(
+        fr: "sérialisation mounts-state",
+        en: "mounts-state serialization"
+    ))?;
     crate::fsutil::write_atomic(&path, format!("{content}\n").as_bytes(), 0o644)
 }
 
@@ -815,16 +942,22 @@ pub fn purge_targets_from_instance(instance_dir: &Path) -> Result<(Vec<PathBuf>,
     let dirs: Vec<PathBuf> = mounts.iter().map(|m| m.host_abs.clone()).collect();
     let mut roots = mounts.iter().map(|m| m.virtumfile_dir.clone());
     let root = match roots.next() {
-        None => bail!("--purge : aucun dossier mount enregistré pour cette VM"),
+        None => bail!(tr!(
+            fr: "--purge : aucun dossier mount enregistré pour cette VM",
+            en: "--purge: no mount folder recorded for this VM"
+        )),
         Some(first) => first,
     };
     let root = match root {
         Some(r) if mounts.iter().all(|m| m.virtumfile_dir.as_ref() == Some(&r)) => r,
-        _ => bail!(
-            "--purge : répertoire du Virtumfile non enregistré pour cette VM (état antérieur). \
+        _ => bail!(tr!(
+            fr: "--purge : répertoire du Virtumfile non enregistré pour cette VM (état antérieur). \
              Utilisez `virtum down --destroy --purge -f <Virtumfile>`, ou supprimez les dossiers \
-             à la main."
-        ),
+             à la main.",
+            en: "--purge: Virtumfile directory not recorded for this VM (older state). \
+             Use `virtum down --destroy --purge -f <Virtumfile>`, or delete the folders \
+             by hand."
+        )),
     };
     Ok((dirs, root))
 }
@@ -858,35 +991,46 @@ pub async fn ensure_not_nested_across_instances(
                 if *path != m.host_abs
                     && (path.starts_with(&m.host_abs) || m.host_abs.starts_with(path))
                 {
-                    bail!(
-                        "Mounts imbriqués interdits : '{new_label}' ({}) et le partage actif \
+                    bail!(tr!(
+                        fr: "Mounts imbriqués interdits : '{new_label}' ({}) et le partage actif \
                          '{label}' ({}) se recouvrent. Un invité pourrait remplacer le dossier \
                          inclus par un lien symbolique ; utilisez des dossiers disjoints (ou \
                          détruisez l'instance qui sert l'autre partage).",
+                        en: "Nested mounts are not allowed: '{new_label}' ({}) \
+                         and the active share \
+                         '{label}' ({}) overlap. A guest could replace the inner folder \
+                         with a symbolic link; use disjoint folders (or \
+                         destroy the instance serving the other share).",
                         path.display(),
                         m.host_abs.display()
-                    );
+                    ));
                 }
                 if *rw {
                     if let Some(other_vf) = &m.virtumfile_dir {
                         if other_vf.starts_with(path) {
-                            bail!(
-                                "Mount '{new_label}' ({}) est inscriptible et contient le projet \
+                            bail!(tr!(
+                                fr: "Mount '{new_label}' ({}) est inscriptible et \
+                                 contient le projet \
                                  d'une autre instance ({}) : refus.",
+                                en: "Mount '{new_label}' ({}) is writable and contains the project \
+                                 of another instance ({}): refused.",
                                 path.display(),
                                 other_vf.display()
-                            );
+                            ));
                         }
                     }
                 }
             }
             if !m.read_only && vf.starts_with(&m.host_abs) {
-                bail!(
-                    "Le Virtumfile ({}) est dans le partage inscriptible actif '{label}' ({}) : \
+                bail!(tr!(
+                    fr: "Le Virtumfile ({}) est dans le partage inscriptible \
+                     actif '{label}' ({}) : \
                      un invité pourrait le modifier. Déplacez le projet hors de ce partage.",
+                    en: "The Virtumfile ({}) is inside the active writable share '{label}' ({}): \
+                     a guest could modify it. Move the project out of this share.",
                     vf.display(),
                     m.host_abs.display()
-                );
+                ));
             }
         }
     }
@@ -907,58 +1051,73 @@ pub fn collect_host_dirs_for_lab(lab: &Virtumfile, virtumfile_dir: &Path) -> Res
 /// Supprime les répertoires hôte déclarés dans `mounts:` (option `--purge` au destroy).
 /// Ne supprime que des sous-répertoires stricts de `allowed_root` (répertoire du Virtumfile).
 pub fn purge_host_mount_dirs(dirs: &[PathBuf], allowed_root: &Path) -> Result<usize> {
-    let base = allowed_root
-        .canonicalize()
-        .with_context(|| format!("Répertoire Virtumfile invalide: {}", allowed_root.display()))?;
+    let base = allowed_root.canonicalize().with_context(|| {
+        tr!(
+            fr: "Répertoire Virtumfile invalide: {}",
+            en: "Invalid Virtumfile directory: {}",
+            allowed_root.display()
+        )
+    })?;
     // La racine et les dossiers enregistrés doivent encore se résoudre vers eux-mêmes :
     // un lien posé par un invité (via un partage englobant) déplacerait sinon la racine
     // et les cibles ensemble, et la suppression sortirait de tout partage.
     if base != allowed_root {
-        bail!(
-            "--purge : le répertoire du Virtumfile {} résout maintenant vers {} (lien \
+        bail!(tr!(
+            fr: "--purge : le répertoire du Virtumfile {} résout maintenant vers {} (lien \
              symbolique ?) : suppression refusée.",
+            en: "--purge: the Virtumfile directory {} now resolves to {} (symbolic \
+             link?): deletion refused.",
             allowed_root.display(),
             base.display()
-        );
+        ));
     }
     let mut purged = 0usize;
     for dir in dirs {
         if !dir.exists() {
             continue;
         }
-        let canonical = dir
-            .canonicalize()
-            .with_context(|| format!("Impossible de résoudre {}", dir.display()))?;
+        let canonical = dir.canonicalize().with_context(
+            || tr!(fr: "Impossible de résoudre {}", en: "Cannot resolve {}", dir.display()),
+        )?;
         if canonical != *dir {
-            bail!(
-                "--purge : {} résout maintenant vers {} (lien symbolique ?) : suppression refusée.",
+            bail!(tr!(
+                fr: "--purge : {} résout maintenant vers {} \
+                (lien symbolique ?) : suppression refusée.",
+                en: "--purge: {} now resolves to {} (symbolic link?): deletion refused.",
                 dir.display(),
                 canonical.display()
-            );
+            ));
         }
         if canonical == base {
-            bail!(
-                "Refus de supprimer le répertoire du Virtumfile lui-même ({})",
+            bail!(tr!(
+                fr: "Refus de supprimer le répertoire du Virtumfile lui-même ({})",
+                en: "Refusing to delete the Virtumfile directory itself ({})",
                 base.display()
-            );
+            ));
         }
         if !canonical.starts_with(&base) {
-            bail!(
-                "Refus de supprimer {} : hors du répertoire Virtumfile ({})",
+            bail!(tr!(
+                fr: "Refus de supprimer {} : hors du répertoire Virtumfile ({})",
+                en: "Refusing to delete {}: outside the Virtumfile directory ({})",
                 canonical.display(),
                 base.display()
-            );
+            ));
         }
         if !canonical.is_dir() {
             continue;
         }
         std::fs::remove_dir_all(&canonical).with_context(|| {
-            format!(
-                "Impossible de supprimer le dossier mount hôte {}",
+            tr!(
+                fr: "Impossible de supprimer le dossier mount hôte {}",
+                en: "Cannot delete the mount host folder {}",
                 canonical.display()
             )
         })?;
-        crate::verr!("Dossier mount supprimé : {}", canonical.display());
+        crate::verr!(
+            fr: "Dossier mount supprimé : {}",
+            en: "Mount folder deleted: {}",
+            canonical.display()
+        );
         purged += 1;
     }
     Ok(purged)
@@ -1022,15 +1181,19 @@ pub fn mounts_changed_blocking(stored: &[MountSpec], desired: &[MountSpec]) -> V
     for d in desired {
         if let Some(s) = stored_map.get(&d.name) {
             if s.host != d.host || s.guest != d.guest {
-                errors.push(format!(
-                    "volume '{}' : chemins modifiés ({}:{} → {}:{}). \
+                errors.push(tr!(
+                    fr: "volume '{}' : chemins modifiés ({}:{} → {}:{}). \
                      Utilisez virtum destroy puis virtum up.",
+                    en: "volume '{}': paths changed ({}:{} → {}:{}). \
+                     Use virtum destroy then virtum up.",
                     d.name, s.host, s.guest, d.host, d.guest
                 ));
             } else if s.rw != d.rw {
-                errors.push(format!(
-                    "volume '{}' : accès modifié ({} → {}). \
+                errors.push(tr!(
+                    fr: "volume '{}' : accès modifié ({} → {}). \
                      Utilisez virtum destroy puis virtum up.",
+                    en: "volume '{}': access changed ({} → {}). \
+                     Use virtum destroy then virtum up.",
                     d.name,
                     access_label(s.rw),
                     access_label(d.rw)
@@ -1041,11 +1204,11 @@ pub fn mounts_changed_blocking(stored: &[MountSpec], desired: &[MountSpec]) -> V
     errors
 }
 
-fn access_label(rw: bool) -> &'static str {
+fn access_label(rw: bool) -> String {
     if rw {
-        "lecture-écriture"
+        tr!(fr: "lecture-écriture", en: "read-write")
     } else {
-        "lecture seule"
+        tr!(fr: "lecture seule", en: "read-only")
     }
 }
 
