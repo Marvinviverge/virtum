@@ -12,7 +12,7 @@ virtum shell web                       # SSH session
 virtum up                              # the lab described in ./Virtumfile
 ```
 
-![Demo: virtum up creates a two-VM lab, nginx answers on the forwarded port, virtum shell opens a session in the VM](./assets/demo.gif)
+![Demo: virtum up creates a two-VM lab, nginx answers on the forwarded port, virtum shell opens a session in the VM](./assets/demo.en.gif)
 
 ## Why Virtum
 
