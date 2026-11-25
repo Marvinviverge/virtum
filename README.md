@@ -1,63 +1,63 @@
 # Virtum
 
-**Français** | [English](./README.en.md)
+**English** | [Français](./README.fr.md)
 
-**La VM, tout simplement.**
+**VMs, made simple.**
 
-Virtum lance des machines virtuelles locales et des labs multi-VM avec une expérience proche de Docker : `virtum run`, `virtum ps`, `virtum shell`, et un fichier `Virtumfile` pour décrire un lab entier. Les VM tournent sur KVM et libvirt, sur votre propre machine Linux.
+Virtum runs local virtual machines and multi-VM labs with a Docker-like experience: `virtum run`, `virtum ps`, `virtum shell`, and a `Virtumfile` to describe a whole lab. VMs run on KVM and libvirt, on your own Linux machine.
 
 ```bash
-virtum run --os debian-13 --name web   # une VM Debian, prête en une minute
-virtum shell web                       # session SSH
-virtum up                              # le lab décrit dans ./Virtumfile
+virtum run --os debian-13 --name web   # a Debian VM, ready in about a minute
+virtum shell web                       # SSH session
+virtum up                              # the lab described in ./Virtumfile
 ```
 
-![Démo : virtum up crée un lab de deux VM, nginx répond sur le port redirigé, virtum shell ouvre une session dans la VM](./assets/demo.gif)
+![Demo: virtum up creates a two-VM lab, nginx answers on the forwarded port, virtum shell opens a session in the VM](./assets/demo.en.gif)
 
-## Nouveautés
+## What's new
 
-| Version | Ce qu'elle apporte |
+| Version | What it brings |
 | :--- | :--- |
-| [**1.4.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.0) · 24/11/2026 | **Virtum en français ou en anglais**, aide comprise, selon la langue du système ; `virtum config set language en` pour choisir. |
-| [**1.3.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.3.0) · 23/11/2026 | **Debian 13 et Ubuntu 26.04** par défaut ; installation corrigée sur Debian 12 ; images épinglées sur des versions datées. |
-| [**1.2.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.2.0) · 22/11/2026 | **Clé SSH de chaque VM épinglée dès sa création** ; une VM ne peut plus envoyer de séquences au terminal. |
-| [**1.1.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.1.0) · 20/11/2026 | **Paquet Debian** (`.deb`) avec chaque release, signé par attestation de provenance. |
+| [**1.4.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.0) · 2026-11-24 | **Virtum in English or French**, help included, following the system language; `virtum config set language en` to choose. |
+| [**1.3.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.3.0) · 2026-11-23 | **Debian 13 and Ubuntu 26.04** by default; installation fixed on Debian 12; images pinned to dated versions. |
+| [**1.2.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.2.0) · 2026-11-22 | **Each VM's SSH host key pinned from creation**; a VM can no longer send sequences to your terminal. |
+| [**1.1.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.1.0) · 2026-11-20 | **Debian package** (`.deb`) with every release, with build provenance attestations. |
 
-Historique complet : [CHANGELOG.md](./CHANGELOG.md).
+Full history: [CHANGELOG.md](./CHANGELOG.md) (in French).
 
-## Pourquoi Virtum
+## Why Virtum
 
-- **Simple** : une commande pour une VM, un fichier YAML pour un lab. Pas de Vagrantfile en Ruby, pas de console web.
-- **Rapide** : images cloud officielles, disques en copie sur écriture, création des machines en parallèle.
-- **Reproductible** : `plan` montre ce qui va changer, `apply` l'applique, les instantanés ramènent un lab à un état connu.
-- **Sûr par défaut** : partages en lecture seule, clé SSH épinglée par VM, ports locaux sauf exposition confirmée. Voir [SECURITY.md](./SECURITY.md).
-- **Open source** : licence Apache-2.0.
+- **Simple**: one command for a VM, one YAML file for a lab. No Ruby Vagrantfile, no web console.
+- **Fast**: official cloud images, copy-on-write disks, machines created in parallel.
+- **Reproducible**: `plan` shows what will change, `apply` applies it, snapshots bring a lab back to a known state.
+- **Secure by default**: read-only shares, SSH host key pinned per VM, local-only ports unless exposure is confirmed. See [SECURITY.md](./SECURITY.md).
+- **Open source**: Apache-2.0 license.
 
 ## Installation
 
-Prérequis : Linux x86_64 avec KVM (virtualisation activée dans le BIOS/UEFI), glibc 2.34 ou plus récente. Testé de bout en bout sur Ubuntu 24.04, Debian 13 et Debian 12 ; Ubuntu 22.04 n'est pas encore validé.
+Requirements: Linux x86_64 with KVM (virtualization enabled in the BIOS/UEFI), glibc 2.34 or newer. Tested end to end on Ubuntu 24.04, Debian 13 and Debian 12; Ubuntu 22.04 is not validated yet.
 
-KVM est indispensable : un poste Linux ou un serveur dédié conviennent, mais un VPS classique n'expose généralement pas KVM. Vérifiez que `/dev/kvm` existe.
+KVM is required: a Linux workstation or a dedicated server works, but a regular VPS usually does not expose KVM. Check that `/dev/kvm` exists.
 
-**Debian** : le réseau libvirt `default` n'y démarre pas tout seul. Après l'installation, une fois :
+**Debian**: the libvirt `default` network does not start on its own there. After installing, once:
 
 ```bash
 virsh -c qemu:///system net-autostart default && virsh -c qemu:///system net-start default
 ```
 
-Sur Debian 12 et Ubuntu 22.04, les dossiers partagés (`mounts:`) ne sont pas disponibles : le paquet `virtiofsd` n'y existe pas. VM, labs, ports, Ansible et instantanés y fonctionnent.
+On Debian 12 and Ubuntu 22.04, shared folders (`mounts:`) are not available: the `virtiofsd` package does not exist there. VMs, labs, ports, Ansible and snapshots work.
 
-### Depuis une release (recommandé)
+### From a release (recommended)
 
-Sur la [page des releases](https://github.com/Marvinviverge/virtum/releases), téléchargez `SHA256SUMS` et le paquet `.deb` (Debian, Ubuntu) ou l'archive `.tar.gz` (autres distributions).
+From the [releases page](https://github.com/Marvinviverge/virtum/releases), download `SHA256SUMS` and either the `.deb` package (Debian, Ubuntu) or the `.tar.gz` archive (other distributions).
 
-**Paquet Debian/Ubuntu**
+**Debian/Ubuntu package**
 
 ```bash
-sha256sum -c --ignore-missing SHA256SUMS    # le fichier n'a pas été altéré
-sudo apt install ./virtum_*_amd64.deb       # installe aussi libvirt, QEMU, socat…
-sudo usermod -aG libvirt,kvm $USER          # puis reconnectez votre session
-sudo /usr/share/virtum/setup-var-lib.sh     # prépare /var/lib/virtum
+sha256sum -c --ignore-missing SHA256SUMS    # the file has not been altered
+sudo apt install ./virtum_*_amd64.deb       # also installs libvirt, QEMU, socat…
+sudo usermod -aG libvirt,kvm $USER          # then log in again
+sudo /usr/share/virtum/setup-var-lib.sh     # prepares /var/lib/virtum
 virtum doctor
 ```
 
@@ -66,49 +66,49 @@ virtum doctor
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS
 tar xzf virtum-*-x86_64-linux.tar.gz && cd virtum-*-x86_64-linux
-sudo ./scripts/setup-host.sh                # une fois par machine : paquets, libvirt, groupes
+sudo ./scripts/setup-host.sh                # once per machine: packages, libvirt, groups
 install -D -m 755 virtum ~/.local/bin/virtum
-sudo ./scripts/setup-var-lib.sh             # prépare /var/lib/virtum
+sudo ./scripts/setup-var-lib.sh             # prepares /var/lib/virtum
 virtum doctor
 ```
 
-`~/.local/bin` doit être dans votre `PATH`. Après l'ajout aux groupes `libvirt` et `kvm`, reconnectez votre session. Tous les contrôles de `virtum doctor` doivent être `[ok]`.
+`~/.local/bin` must be in your `PATH`. After joining the `libvirt` and `kvm` groups, log in again. Every `virtum doctor` check must be `[ok]`.
 
-Pour vérifier que le fichier a été construit par la CI du dépôt (GitHub CLI 2.49 ou plus récent) : `gh attestation verify <fichier> -R Marvinviverge/virtum`.
+To check that a file was built by the repository's CI (GitHub CLI 2.49 or newer): `gh attestation verify <file> -R Marvinviverge/virtum`.
 
-### Depuis les sources
+### From source
 
-Avec [Rust](https://rustup.rs) installé :
+With [Rust](https://rustup.rs) installed:
 
 ```bash
 sudo ./scripts/setup-host.sh
-make install                  # compile et installe dans ~/.cargo/bin
+make install                  # builds and installs into ~/.cargo/bin
 sudo ./scripts/setup-var-lib.sh
 virtum doctor
 ```
 
-Paquets installés par `setup-host.sh` (Debian/Ubuntu) : `qemu-kvm`, `libvirt-daemon-system`, `libvirt-clients`, `qemu-utils`, `cloud-image-utils`, `openssh-client`, `socat`, `virtiofsd`, `bubblewrap`. Sur une autre distribution, installez leurs équivalents et ajoutez votre compte aux groupes `libvirt` et `kvm`.
+Packages installed by `setup-host.sh` (Debian/Ubuntu): `qemu-kvm`, `libvirt-daemon-system`, `libvirt-clients`, `qemu-utils`, `cloud-image-utils`, `openssh-client`, `socat`, `virtiofsd`, `bubblewrap`. On another distribution, install their equivalents and add your account to the `libvirt` and `kvm` groups.
 
-## Démarrage rapide
+## Quick start
 
-### Une VM
+### A single VM
 
 ```bash
-virtum run --os debian-13 --name web              # Debian 13 (aussi : ubuntu-26.04)
+virtum run --os debian-13 --name web              # Debian 13 (also: ubuntu-26.04)
 virtum run --os ubuntu-26.04 --ram 4096 --cpu 2 --disk-size 20G
-virtum ps                                         # VM en cours, IP ; -a pour toutes
+virtum ps                                         # running VMs and their IP; -a for all
 virtum shell web
 virtum stop web && virtum start web
 virtum destroy web
 ```
 
-Images proposées : `debian-13` et `ubuntu-26.04`. `debian-12` et `ubuntu-24.04` restent acceptées pour les labs existants.
+Available images: `debian-13` and `ubuntu-26.04`. `debian-12` and `ubuntu-24.04` are still accepted for existing labs.
 
-La première utilisation d'un OS télécharge son image cloud (`virtum pull <os>` pour le faire à l'avance).
+The first use of an OS downloads its cloud image (`virtum pull <os>` does it ahead of time).
 
-### Un lab
+### A lab
 
-Un `Virtumfile` décrit plusieurs machines sur un réseau isolé :
+A `Virtumfile` describes several machines on an isolated network:
 
 ```yaml
 name: demo-lab
@@ -119,7 +119,7 @@ machines:
     ram: 2048
     cpu: 2
     ports:
-      - "18080:80"          # http://127.0.0.1:18080 → port 80 de la VM
+      - "18080:80"          # http://127.0.0.1:18080 → port 80 of the VM
     provision:
       - apt-get update
       - apt-get install -y nginx
@@ -130,58 +130,58 @@ machines:
 ```
 
 ```bash
-virtum plan                    # ce qui va être créé ou modifié, sans rien toucher
-virtum up                      # crée ou relance le lab
+virtum plan                    # what will be created or changed, without touching anything
+virtum up                      # creates or restarts the lab
 virtum shell web
-virtum down                    # arrête le lab ; --destroy pour le supprimer
+virtum down                    # stops the lab; --destroy to delete it
 ```
 
-Exemple complet : [`examples/Virtumfile`](./examples/Virtumfile).
+Full example: [`examples/Virtumfile`](./examples/Virtumfile).
 
-## Fonctions
+## Features
 
-### Commandes
+### Commands
 
-| Commande | Rôle |
+| Command | Purpose |
 | :--- | :--- |
-| `doctor` | Vérifie que l'hôte est prêt (KVM, libvirt, groupes, stockage, outils) |
-| `run`, `ps`, `shell`, `stop`, `start`, `destroy` | Cycle de vie d'une VM |
-| `pull` | Télécharge une image d'OS en cache |
-| `plan`, `up`, `apply`, `down` | Cycle de vie d'un lab décrit par un Virtumfile |
-| `snapshot create\|restore\|ls\|rm` | Instantanés d'une VM ou d'un lab entier |
-| `inventory`, `provision` | Inventaire et playbook Ansible du lab |
-| `open`, `close` | Pare-feu de l'hôte (ufw) pour les ports exposés au réseau local |
-| `config` | Réglages de l'utilisateur : langue de la sortie |
+| `doctor` | Checks that the host is ready (KVM, libvirt, groups, storage, tools) |
+| `run`, `ps`, `shell`, `stop`, `start`, `destroy` | VM lifecycle |
+| `pull` | Downloads an OS image into the cache |
+| `plan`, `up`, `apply`, `down` | Lifecycle of a lab described by a Virtumfile |
+| `snapshot create\|restore\|ls\|rm` | Snapshots of a VM or a whole lab |
+| `inventory`, `provision` | The lab's Ansible inventory and playbook |
+| `open`, `close` | Host firewall (ufw) for ports exposed to the local network |
+| `config` | User settings: output language |
 
-`virtum <commande> --help` détaille chaque option.
+`virtum <command> --help` details every option.
 
-### Réseau
+### Networking
 
-- Chaque lab a son **réseau libvirt isolé** (`virtum-lab-<nom>`) ; les machines d'un lab se joignent entre elles.
-- `subnet: 10.42.0.0/24` fixe le sous-réseau du lab ; sinon il est calculé depuis le nom. `plan` et `up` refusent un sous-réseau qui chevauche un réseau existant.
-- `ip: 10.42.0.20` donne une adresse fixe à une machine.
-- `ports:` redirige un port de l'hôte vers la VM, sur `127.0.0.1`. Avec `bind: lan`, il écoute sur le réseau local, après confirmation ; `virtum open` ouvre alors le pare-feu.
-- **Bridge** : `virtum run --network bridge` ou `network: bridge` dans un lab place la VM directement sur le réseau local, avec sa propre adresse. Ethernet recommandé, le Wi-Fi est souvent incompatible. Un lab peut mêler machines en bridge et machines privées.
+- Each lab has its own **isolated libvirt network** (`virtum-lab-<name>`); machines in a lab can reach each other.
+- `subnet: 10.42.0.0/24` sets the lab subnet; otherwise it is derived from the lab name. `plan` and `up` refuse a subnet that overlaps an existing network.
+- `ip: 10.42.0.20` gives a machine a fixed address.
+- `ports:` forwards a host port to the VM, on `127.0.0.1`. With `bind: lan`, it listens on the local network after confirmation; `virtum open` then opens the firewall.
+- **Bridge**: `virtum run --network bridge` or `network: bridge` in a lab puts the VM directly on the local network, with its own address. Ethernet is recommended, Wi-Fi is often incompatible. A lab can mix bridged and private machines.
 
-### Dossiers partagés
+### Shared folders
 
 ```yaml
 machines:
   web:
     os: debian-13
     mounts:
-      - ./src:~/src             # lecture seule (par défaut)
-      - ./out:~/out:rw          # la VM peut écrire
+      - ./src:~/src             # read-only (default)
+      - ./out:~/out:rw          # the VM can write
 ```
 
-Les partages passent par virtiofs. La lecture seule est imposée côté hôte. Un partage `rw` ne peut contenir ni le Virtumfile ni les fichiers Ansible, et les partages ne s'imbriquent pas. `down --destroy --purge` supprime aussi les dossiers créés pour les partages.
+Shares use virtiofs. Read-only access is enforced on the host. A `rw` share cannot contain the Virtumfile or the Ansible files, and shares cannot be nested. `down --destroy --purge` also deletes the folders created for shares.
 
 ### Ansible
 
 ```yaml
 ansible:
   playbook: ansible/site.yml
-  requirements: ansible/requirements.yml   # optionnel
+  requirements: ansible/requirements.yml   # optional
 
 machines:
   web:
@@ -189,53 +189,53 @@ machines:
     groups: [front]
 ```
 
-`virtum up` joue le playbook au premier déploiement, puis prend l'instantané de lab `provisioned` (`virtum snapshot restore provisioned` y ramène). `virtum provision` le rejoue, `virtum inventory` produit l'inventaire (INI ou YAML) avec les clés SSH de chaque VM. Le playbook tourne sur une copie privée de son dossier, sans les partages inscriptibles.
+`virtum up` runs the playbook on the first deployment, then takes the `provisioned` lab snapshot (`virtum snapshot restore provisioned` brings you back to it). `virtum provision` runs it again, and `virtum inventory` prints the inventory (INI or YAML) with each VM's SSH keys. The playbook runs from a private copy of its folder, without the writable shares.
 
-### Instantanés
+### Snapshots
 
 ```bash
-virtum snapshot create avant-test      # tout le lab (ou : avant-test web db)
-virtum snapshot restore avant-test
+virtum snapshot create before-test     # the whole lab (or: before-test web db)
+virtum snapshot restore before-test
 virtum snapshot ls
-virtum snapshot rm avant-test
+virtum snapshot rm before-test
 ```
 
-Instantanés à froid des disques : les VM sont arrêtées le temps de l'opération puis relancées.
+Cold disk snapshots: VMs are stopped during the operation, then restarted.
 
-### Autres options du Virtumfile
+### Other Virtumfile options
 
-| Champ | Rôle |
+| Field | Purpose |
 | :--- | :--- |
-| `ram`, `cpu`, `disk_size` | Ressources ; `apply` les met à jour sur des VM existantes |
-| `provision:` | Commandes shell jouées au premier démarrage |
-| `ssh_port:` | Port SSH si la VM le déplace (repli sur 22) |
-| `restart: no \| always \| unless-stopped` | Démarrage au boot de l'hôte, comme dans Docker Compose |
+| `ram`, `cpu`, `disk_size` | Resources; `apply` updates them on existing VMs |
+| `provision:` | Shell commands run at first boot |
+| `ssh_port:` | SSH port if the VM moves it (falls back to 22) |
+| `restart: no \| always \| unless-stopped` | Start at host boot, as in Docker Compose |
 
-Retirer une machine du Virtumfile ne la supprime pas : `plan` la signale, `apply --prune` la supprime.
+Removing a machine from the Virtumfile does not delete it: `plan` reports it, `apply --prune` deletes it.
 
-## Langue
+## Language
 
-Virtum affiche ses messages et son aide en français ou en anglais, selon la langue du système : français si la locale est française (`LANG=fr_FR.UTF-8`…), anglais sinon. Pour choisir :
+Virtum prints its messages and help in English or French, following the system language: French if the locale is French (`LANG=fr_FR.UTF-8`…), English otherwise. To choose:
 
 ```bash
-virtum config set language en     # ou fr ; enregistré dans ~/.config/virtum/config.yml
-virtum config get language        # langue active et son origine
-virtum config unset language      # revient à la langue du système
-VIRTUM_LANG=en virtum up          # pour une seule commande
+virtum config set language en     # or fr; saved in ~/.config/virtum/config.yml
+virtum config get language        # active language and where it comes from
+virtum config unset language      # back to the system language
+VIRTUM_LANG=en virtum up          # for a single command
 ```
 
-## Stockage
+## Storage
 
-Virtum utilise libvirt système (`qemu:///system`) et range images, instances, clés et état dans `/var/lib/virtum` (préparé par `setup-var-lib.sh`), sinon dans `~/.virtum`.
+Virtum uses the system libvirt (`qemu:///system`) and keeps images, instances, keys and state in `/var/lib/virtum` (prepared by `setup-var-lib.sh`), otherwise in `~/.virtum`.
 
-## Sécurité
+## Security
 
-Modèle de menace, garanties et limites : [SECURITY.md](./SECURITY.md). Pour signaler une faille : **security@virtum.dev**.
+Threat model, guarantees and limits: [SECURITY.md](./SECURITY.md) (in French). To report a vulnerability: **security@virtum.dev**.
 
-## Contribuer
+## Contributing
 
-Les contributions sont bienvenues : voir [CONTRIBUTING.md](./CONTRIBUTING.md). `make check` lance le format, clippy, les tests et l'audit des dépendances ; `make smoke-lab` vérifie un vrai lab de bout en bout.
+Contributions are welcome: see [CONTRIBUTING.en.md](./CONTRIBUTING.en.md). `make check` runs formatting, clippy, the tests and the dependency audit; `make smoke-lab` checks a real lab end to end.
 
-## Licence
+## License
 
-Virtum est distribué sous licence [Apache 2.0](./LICENSE) : usage, modification et redistribution libres, y compris commerciaux, en conservant la licence et les mentions de copyright. Historique des versions : [CHANGELOG.md](./CHANGELOG.md).
+Virtum is distributed under the [Apache 2.0](./LICENSE) license: free to use, modify and redistribute, including commercially, as long as the license and copyright notices are kept. Release history: [CHANGELOG.md](./CHANGELOG.md) (in French).

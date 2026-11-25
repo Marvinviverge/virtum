@@ -16,7 +16,7 @@ fi
 
 if ! command -v apt-get >/dev/null 2>&1; then
   echo "Ce script cible Debian/Ubuntu (apt). Sur d'autres distributions," >&2
-  echo "installez manuellement les paquets listés dans README.md." >&2
+  echo "installez manuellement les paquets listés dans README.fr.md (README.md en anglais)." >&2
   exit 1
 fi
 

@@ -2,6 +2,12 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Documentation
+
+- Le README par défaut du dépôt est désormais en anglais (`README.md`) ; la version française passe dans `README.fr.md`, à un clic depuis l'en-tête. Le paquet `.deb` et l'archive `.tar.gz` contiennent les deux.
+
 ## [1.4.0] - 2026-11-24
 
 ### Ajouts
