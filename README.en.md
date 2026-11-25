@@ -14,6 +14,17 @@ virtum up                              # the lab described in ./Virtumfile
 
 ![Demo: virtum up creates a two-VM lab, nginx answers on the forwarded port, virtum shell opens a session in the VM](./assets/demo.en.gif)
 
+## What's new
+
+| Version | What it brings |
+| :--- | :--- |
+| [**1.4.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.0) · 2026-11-24 | **Virtum in English or French**, help included, following the system language; `virtum config set language en` to choose. |
+| [**1.3.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.3.0) · 2026-11-23 | **Debian 13 and Ubuntu 26.04** by default; installation fixed on Debian 12; images pinned to dated versions. |
+| [**1.2.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.2.0) · 2026-11-22 | **Each VM's SSH host key pinned from creation**; a VM can no longer send sequences to your terminal. |
+| [**1.1.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.1.0) · 2026-11-20 | **Debian package** (`.deb`) with every release, with build provenance attestations. |
+
+Full history: [CHANGELOG.md](./CHANGELOG.md) (in French).
+
 ## Why Virtum
 
 - **Simple**: one command for a VM, one YAML file for a lab. No Ruby Vagrantfile, no web console.
