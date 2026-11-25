@@ -10,7 +10,7 @@ Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
 ### Plateformes
 
-- **VM imbriquée** : validé avec Virtum 1.4.0 dans une VM Debian 13 (6 vCPU, 8 Go, CPU `host-passthrough`) sur un hôte Ubuntu 24.04 (Ryzen 5 3550H, `kvm_amd nested=1`) : paquet `.deb`, `virtum doctor` (15/15), VM seule, lab d'exemple avec ports et provision, instantané de lab, dossiers partagés, `make smoke-lab`. Création d'une VM environ 40 % plus lente que sur l'hôte nu. Si la VM est sur le réseau `default` de l'hôte (`192.168.122.0/24`), déplacer le réseau `default` de la VM sur un autre sous-réseau (voir README). Réseau bridge non testé dans ce montage.
+- **VM imbriquée** : validé avec Virtum 1.4.0 dans une VM Debian 13 (6 vCPU, 8 Go, CPU `host-passthrough`) sur un hôte Ubuntu 24.04 (Ryzen 5 3550H, `kvm_amd nested=1`) : paquet `.deb`, `virtum doctor` (15/15), VM seule, lab d'exemple avec ports et provision, instantané de lab, dossiers partagés, `make smoke-lab`. Création d'une VM environ 40 % plus lente que sur l'hôte nu. Si la VM est sur le réseau `default` de l'hôte (`192.168.122.0/24`), déplacer le réseau `default` de la VM sur un autre sous-réseau (voir README). Réseau bridge non testé dans ce montage. Hyperviseur testé : KVM/libvirt (Proxmox, VMware, Hyper-V non testés). SECURITY.md : recommandations pour un serveur commun avec une VM par personne.
 
 ## [1.4.0] - 2026-11-24
 
