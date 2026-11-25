@@ -131,14 +131,7 @@ pub fn ensure_ports_not_in_metadata(
 }
 
 fn ensure_socat() -> Result<()> {
-    let ok = Command::new("which")
-        .arg("socat")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok {
+    if crate::command::command_exists("socat") {
         return Ok(());
     }
     bail!(tr!(

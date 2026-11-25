@@ -18,6 +18,7 @@ virtum up                              # le lab décrit dans ./Virtumfile
 
 | Version | Ce qu'elle apporte |
 | :--- | :--- |
+| [**1.4.1**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.1) · 25/11/2026 | **Fedora et Arch Linux** validés ; ports corrigés sur les systèmes sans `which` ; dossiers partagés sur Arch. |
 | [**1.4.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.0) · 24/11/2026 | **Virtum en français ou en anglais**, aide comprise, selon la langue du système ; `virtum config set language en` pour choisir. |
 | [**1.3.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.3.0) · 23/11/2026 | **Debian 13 et Ubuntu 26.04** par défaut ; installation corrigée sur Debian 12 ; images épinglées sur des versions datées. |
 | [**1.2.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.2.0) · 22/11/2026 | **Clé SSH de chaque VM épinglée dès sa création** ; une VM ne peut plus envoyer de séquences au terminal. |
@@ -35,7 +36,7 @@ Historique complet : [CHANGELOG.md](./CHANGELOG.md).
 
 ## Installation
 
-Prérequis : Linux x86_64 avec KVM (virtualisation activée dans le BIOS/UEFI), glibc 2.34 ou plus récente. Testé de bout en bout sur Ubuntu 24.04, Debian 13 et Debian 12 ; Ubuntu 22.04 n'est pas encore validé.
+Prérequis : Linux x86_64 avec KVM (virtualisation activée dans le BIOS/UEFI), glibc 2.34 ou plus récente. Testé de bout en bout sur Ubuntu 24.04, Debian 13, Debian 12, Fedora 45 et Arch Linux (Fedora et Arch : Virtum 1.4.1 ou plus récent) ; Ubuntu 22.04 n'est pas encore validé.
 
 KVM est indispensable : un poste Linux ou un serveur dédié conviennent, mais un VPS classique n'expose généralement pas KVM. Vérifiez que `/dev/kvm` existe.
 
@@ -45,7 +46,7 @@ KVM est indispensable : un poste Linux ou un serveur dédié conviennent, mais u
 virsh -c qemu:///system net-autostart default && virsh -c qemu:///system net-start default
 ```
 
-Sur Debian 12 et Ubuntu 22.04, les dossiers partagés (`mounts:`) ne sont pas disponibles : le paquet `virtiofsd` n'y existe pas. VM, labs, ports, Ansible et instantanés y fonctionnent.
+Sur Debian 12 et Ubuntu 22.04, les dossiers partagés (`mounts:`) ne sont pas disponibles : le paquet `virtiofsd` n'y existe pas. VM, labs, ports, Ansible et instantanés y fonctionnent. De même sur Fedora avec SELinux en mode enforcing (voir plus bas).
 
 **Dans une VM (virtualisation imbriquée)** : Virtum fonctionne aussi dans une VM Linux, si l'hyperviseur lui expose la virtualisation (`/dev/kvm` existe dans la VM : CPU en mode `host-passthrough`, `nested=1` sur le module `kvm_intel` ou `kvm_amd` de l'hôte). Validé avec Virtum 1.4.0 dans une VM Debian 13 sur un hôte Ubuntu 24.04 sous KVM/libvirt (Proxmox, VMware et Hyper-V non testés) : VM, labs avec ports et provision, instantanés, dossiers partagés et `make smoke-lab`. La création d'une VM y prend environ 40 % de temps en plus que sur l'hôte nu (mesuré sur un portable : 16 s → 22 s pour une VM seule, 24 s → 34 s pour une VM de lab sans provision). Le réseau bridge n'a pas été testé dans ce montage. Ce montage ne rend pas Virtum multi-utilisateur : chaque VM a son propre Virtum, pour une seule personne. Pour un serveur commun avec une VM par personne, voir [SECURITY.md](./SECURITY.md).
 
@@ -82,6 +83,25 @@ virtum doctor
 ```
 
 `~/.local/bin` doit être dans votre `PATH`. Après l'ajout aux groupes `libvirt` et `kvm`, reconnectez votre session. Tous les contrôles de `virtum doctor` doivent être `[ok]`.
+
+**Fedora et Arch Linux** (Virtum 1.4.1 ou plus récent) : `setup-host.sh` ne gère que Debian et Ubuntu. À la place, installez les paquets ci-dessous, ajoutez votre compte aux groupes (`sudo usermod -aG libvirt,kvm $USER`, puis reconnectez-vous), et continuez avec `install` et `setup-var-lib.sh` ci-dessus.
+
+```bash
+# Fedora
+sudo dnf install qemu-kvm libvirt-daemon-kvm libvirt-daemon-config-network libvirt-client \
+  qemu-img cloud-utils openssh-clients socat
+sudo systemctl start virtqemud.socket virtnetworkd.socket virtstoraged.socket \
+  virtnodedevd.socket virtnwfilterd.socket virtlogd.socket virtlockd.socket
+```
+
+Sur Fedora, le réseau `default` démarre seul et choisit un sous-réseau libre. Avec SELinux en mode enforcing (le réglage par défaut), les dossiers partagés (`mounts:`) ne sont pas disponibles : Virtum les refuse avec un message clair. Tout le reste fonctionne.
+
+```bash
+# Arch Linux (redémarrez d'abord si le noyau vient d'être mis à jour)
+sudo pacman -S qemu-base libvirt dnsmasq cloud-image-utils openssh socat virtiofsd bubblewrap
+sudo systemctl enable --now libvirtd.service
+sudo virsh -c qemu:///system net-autostart default && sudo virsh -c qemu:///system net-start default
+```
 
 Pour vérifier que le fichier a été construit par la CI du dépôt (GitHub CLI 2.49 ou plus récent) : `gh attestation verify <fichier> -R Marvinviverge/virtum`.
 
