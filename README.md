@@ -47,6 +47,15 @@ virsh -c qemu:///system net-autostart default && virsh -c qemu:///system net-sta
 
 On Debian 12 and Ubuntu 22.04, shared folders (`mounts:`) are not available: the `virtiofsd` package does not exist there. VMs, labs, ports, Ansible and snapshots work.
 
+**Inside a VM (nested virtualization)**: Virtum also runs inside a Linux VM, as long as the hypervisor exposes virtualization to it (`/dev/kvm` exists in the VM: CPU in `host-passthrough` mode, `nested=1` on the host's `kvm_intel` or `kvm_amd` module). Validated with Virtum 1.4.0 in a Debian 13 VM on an Ubuntu 24.04 host: VMs, labs with ports and provisioning, snapshots, shared folders and `make smoke-lab`. Creating a VM takes about 40% longer than on the bare host (measured on one laptop: 16 s → 22 s for a single VM, 24 s → 34 s for a lab VM without provisioning). The bridge network was not tested in this setup. This does not make Virtum multi-user: each VM runs its own Virtum, for one person.
+
+If the VM is itself on a `192.168.122.0/24` network (libvirt's `default` network on the host), the `default` network inside the VM cannot start (`Network is already in use`). Move it to another subnet, once:
+
+```bash
+virsh -c qemu:///system net-dumpxml default | sed 's/192\.168\.122\./192.168.123./g' > default.xml
+virsh -c qemu:///system net-define default.xml && virsh -c qemu:///system net-start default
+```
+
 ### From a release (recommended)
 
 From the [releases page](https://github.com/Marvinviverge/virtum/releases), download `SHA256SUMS` and either the `.deb` package (Debian, Ubuntu) or the `.tar.gz` archive (other distributions).
