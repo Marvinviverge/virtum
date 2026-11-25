@@ -48,6 +48,17 @@ Ce que Virtum ne protège pas, et ce qu'il faut faire à la place :
 - **socat antérieur à 1.8** (Debian 12, Ubuntu 22.04) : socat ne sait pas recevoir le port déjà ouvert par Virtum, il l'ouvre lui-même. Un autre compte local qui prendrait le port dans l'intervalle ne peut pas détourner la redirection (socat ne démarre pas et la commande échoue), mais peut l'empêcher. Avec socat ≥ 1.8, le port n'est jamais libre.
 - **Failles de QEMU, libvirt, virtiofsd, du noyau ou des images cloud** : hors de portée de Virtum. Tenez l'hôte et les images à jour (`virtum pull`).
 
+## Serveur commun : une VM par personne
+
+Virtum reste un outil à un seul utilisateur. Pour le partager entre plusieurs personnes (une école, une équipe), donnez à chacune sa propre VM Linux, avec Virtum installé dedans (README, Installation, « Dans une VM »). Chaque personne est root dans sa VM : ce qui protège le serveur et les autres VM, c'est l'hyperviseur, pas Virtum.
+
+- **Virtum ne donne aucun accès à l'hyperviseur** : il tourne entièrement dans la VM, sans compte, API ni stockage de l'hôte.
+- **Réseau d'administration séparé** : les VM des utilisateurs ne doivent pas joindre l'interface d'administration de l'hyperviseur (pour Proxmox : port 8006 et SSH). C'est le risque le plus réaliste.
+- **VM cloisonnées entre elles** : pare-feu de l'hyperviseur sur chaque VM, pour qu'une personne n'atteigne pas la VM d'une autre.
+- **Virtualisation imbriquée** : Virtum en a besoin dans ce montage, et elle ajoute de la surface d'attaque au noyau de l'hôte (des failles d'évasion de VM ont déjà touché ce code). Tenez l'hyperviseur à jour et ne l'activez que pour les VM qui en ont besoin.
+- **`bind: lan` et `bridge`** exposent des VM de lab sur le réseau des utilisateurs. Un lab de formation contient souvent des machines volontairement vulnérables : gardez les `ports:` locaux (par défaut) ou cloisonnez ce réseau.
+- **Hyperviseur testé** : KVM/libvirt. Proxmox (lui aussi basé sur KVM), VMware et Hyper-V ne sont pas testés.
+
 ## Signaler une faille
 
 Écrivez à **security@virtum.dev**, ou ouvrez un signalement privé (security advisory) sur le [dépôt GitHub](https://github.com/Marvinviverge/virtum/security/advisories/new), avec les étapes pour reproduire et la version concernée (`virtum --version`). Ne publiez pas de détails d'exploitation avant le correctif.
