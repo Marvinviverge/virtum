@@ -2,7 +2,7 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [1.4.1] - 2026-11-25
+## [1.4.1] - 2026-11-26
 
 ### Corrections
 

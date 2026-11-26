@@ -18,7 +18,7 @@ virtum up                              # le lab décrit dans ./Virtumfile
 
 | Version | Ce qu'elle apporte |
 | :--- | :--- |
-| [**1.4.1**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.1) · 25/11/2026 | **Fedora et Arch Linux** validés ; ports corrigés sur les systèmes sans `which` ; dossiers partagés sur Arch. |
+| [**1.4.1**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.1) · 26/11/2026 | **Fedora et Arch Linux** validés ; ports corrigés sur les systèmes sans `which` ; dossiers partagés sur Arch. |
 | [**1.4.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.0) · 24/11/2026 | **Virtum en français ou en anglais**, aide comprise, selon la langue du système ; `virtum config set language en` pour choisir. |
 | [**1.3.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.3.0) · 23/11/2026 | **Debian 13 et Ubuntu 26.04** par défaut ; installation corrigée sur Debian 12 ; images épinglées sur des versions datées. |
 | [**1.2.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.2.0) · 22/11/2026 | **Clé SSH de chaque VM épinglée dès sa création** ; une VM ne peut plus envoyer de séquences au terminal. |
