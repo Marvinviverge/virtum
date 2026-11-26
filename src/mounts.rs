@@ -18,18 +18,18 @@ pub const VIRTUM_GUEST_HOME: &str = "/home/virtum";
 
 const MOUNTS_STATE_FILE: &str = "mounts-state.json";
 
-/// Emplacements courants sur Debian/Ubuntu (le paquet n'ajoute pas toujours un lien dans `PATH`).
-const VIRTIOFSD_CANDIDATES: &[&str] = &["/usr/libexec/virtiofsd", "/usr/lib/qemu/virtiofsd"];
+/// Emplacements courants hors du `PATH` : `/usr/libexec` (Debian, Ubuntu, Fedora),
+/// `/usr/lib/qemu` (anciens paquets Debian/Ubuntu), `/usr/lib` (Arch).
+const VIRTIOFSD_CANDIDATES: &[&str] = &[
+    "/usr/libexec/virtiofsd",
+    "/usr/lib/qemu/virtiofsd",
+    "/usr/lib/virtiofsd",
+];
 
-/// Résout le binaire `virtiofsd` (`which` puis chemins FHS connus).
+/// Résout le binaire `virtiofsd` (`PATH` puis chemins connus).
 pub fn resolve_virtiofsd_path() -> Option<PathBuf> {
-    if let Ok(output) = Command::new("which").arg("virtiofsd").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
+    if let Some(path) = crate::command::find_in_path("virtiofsd") {
+        return Some(path);
     }
     VIRTIOFSD_CANDIDATES
         .iter()
@@ -44,6 +44,16 @@ pub fn resolve_virtiofsd_path() -> Option<PathBuf> {
 /// l'ancien virtiofsd en C de QEMU, qui ne répond pas à `--version` et n'accepte pas les
 /// options de Virtum : sans cette vérification, la VM attendrait son socket en vain.
 pub fn ensure_virtiofsd_usable() -> Result<PathBuf> {
+    if selinux_enforcing() {
+        bail!(tr!(
+            fr: "Dossiers partagés (`mounts:`) indisponibles : SELinux est en mode enforcing \
+             (Fedora, RHEL…) et empêche QEMU de se connecter au virtiofsd lancé par Virtum. \
+             Les VM et les labs fonctionnent : retirez `mounts:` du Virtumfile.",
+            en: "Shared folders (`mounts:`) unavailable: SELinux is in enforcing mode \
+             (Fedora, RHEL…) and prevents QEMU from connecting to the virtiofsd started by \
+             Virtum. VMs and labs work: remove `mounts:` from the Virtumfile."
+        ));
+    }
     let Some(path) = resolve_virtiofsd_path() else {
         bail!(tr!(
             fr: "Dossiers partagés (`mounts:`) indisponibles : virtiofsd est absent. \
@@ -71,6 +81,20 @@ pub fn ensure_virtiofsd_usable() -> Result<PathBuf> {
         ));
     }
     Ok(path)
+}
+
+/// SELinux en mode enforcing : QEMU, confiné (`svirt_t`), ne peut pas se connecter au
+/// socket du virtiofsd que Virtum lance lui-même (vérifié sur Fedora 45).
+pub fn selinux_enforcing() -> bool {
+    selinux_enforce_value(
+        std::fs::read_to_string("/sys/fs/selinux/enforce")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn selinux_enforce_value(content: Option<&str>) -> bool {
+    content.is_some_and(|c| c.trim() == "1")
 }
 
 /// Mount résolu (chemins absolus hôte + invité).
@@ -1287,6 +1311,14 @@ pub fn format_mount_list(mounts: &[MountSpec]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selinux_enforce_value_reads_sysfs_content() {
+        assert!(selinux_enforce_value(Some("1")));
+        assert!(selinux_enforce_value(Some("1\n")));
+        assert!(!selinux_enforce_value(Some("0")));
+        assert!(!selinux_enforce_value(None));
+    }
     use std::fs;
 
     #[test]

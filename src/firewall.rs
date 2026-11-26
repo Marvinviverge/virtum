@@ -235,14 +235,7 @@ fn remove_firewall_state(paths: &VirtumPaths, lab_name: &str) -> Result<()> {
 }
 
 fn ensure_ufw_available() -> Result<()> {
-    let which = Command::new("which")
-        .arg("ufw")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !which {
+    if !crate::command::command_exists("ufw") {
         bail!(tr!(
             fr: "ufw est introuvable. Sur Debian/Ubuntu : sudo apt install ufw. \
              Pare-feu firewalld / nftables : ouvrez les ports manuellement.",

@@ -18,6 +18,7 @@ virtum up                              # the lab described in ./Virtumfile
 
 | Version | What it brings |
 | :--- | :--- |
+| [**1.4.1**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.1) · 2026-11-26 | **Fedora and Arch Linux** validated; ports fixed on systems without `which`; shared folders on Arch. |
 | [**1.4.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.4.0) · 2026-11-24 | **Virtum in English or French**, help included, following the system language; `virtum config set language en` to choose. |
 | [**1.3.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.3.0) · 2026-11-23 | **Debian 13 and Ubuntu 26.04** by default; installation fixed on Debian 12; images pinned to dated versions. |
 | [**1.2.0**](https://github.com/Marvinviverge/virtum/releases/tag/v1.2.0) · 2026-11-22 | **Each VM's SSH host key pinned from creation**; a VM can no longer send sequences to your terminal. |
@@ -35,7 +36,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md) (in French).
 
 ## Installation
 
-Requirements: Linux x86_64 with KVM (virtualization enabled in the BIOS/UEFI), glibc 2.34 or newer. Tested end to end on Ubuntu 24.04, Debian 13 and Debian 12; Ubuntu 22.04 is not validated yet.
+Requirements: Linux x86_64 with KVM (virtualization enabled in the BIOS/UEFI), glibc 2.34 or newer. Tested end to end on Ubuntu 24.04, Debian 13, Debian 12, Fedora 45 and Arch Linux (Fedora and Arch: Virtum 1.4.1 or newer); Ubuntu 22.04 is not validated yet.
 
 KVM is required: a Linux workstation or a dedicated server works, but a regular VPS usually does not expose KVM. Check that `/dev/kvm` exists.
 
@@ -45,7 +46,7 @@ KVM is required: a Linux workstation or a dedicated server works, but a regular 
 virsh -c qemu:///system net-autostart default && virsh -c qemu:///system net-start default
 ```
 
-On Debian 12 and Ubuntu 22.04, shared folders (`mounts:`) are not available: the `virtiofsd` package does not exist there. VMs, labs, ports, Ansible and snapshots work.
+On Debian 12 and Ubuntu 22.04, shared folders (`mounts:`) are not available: the `virtiofsd` package does not exist there. VMs, labs, ports, Ansible and snapshots work. The same goes for Fedora with SELinux in enforcing mode (see below).
 
 **Inside a VM (nested virtualization)**: Virtum also runs inside a Linux VM, as long as the hypervisor exposes virtualization to it (`/dev/kvm` exists in the VM: CPU in `host-passthrough` mode, `nested=1` on the host's `kvm_intel` or `kvm_amd` module). Validated with Virtum 1.4.0 in a Debian 13 VM on an Ubuntu 24.04 host running KVM/libvirt (Proxmox, VMware and Hyper-V not tested): VMs, labs with ports and provisioning, snapshots, shared folders and `make smoke-lab`. Creating a VM takes about 40% longer than on the bare host (measured on one laptop: 16 s → 22 s for a single VM, 24 s → 34 s for a lab VM without provisioning). The bridge network was not tested in this setup. This does not make Virtum multi-user: each VM runs its own Virtum, for one person. For a shared server with one VM per person, see [SECURITY.md](./SECURITY.md) (in French).
 
@@ -82,6 +83,25 @@ virtum doctor
 ```
 
 `~/.local/bin` must be in your `PATH`. After joining the `libvirt` and `kvm` groups, log in again. Every `virtum doctor` check must be `[ok]`.
+
+**Fedora and Arch Linux** (Virtum 1.4.1 or newer): `setup-host.sh` only supports Debian and Ubuntu. Instead, install the packages below, add your account to the groups (`sudo usermod -aG libvirt,kvm $USER`, then log in again), and continue with `install` and `setup-var-lib.sh` above.
+
+```bash
+# Fedora
+sudo dnf install qemu-kvm libvirt-daemon-kvm libvirt-daemon-config-network libvirt-client \
+  qemu-img cloud-utils openssh-clients socat
+sudo systemctl start virtqemud.socket virtnetworkd.socket virtstoraged.socket \
+  virtnodedevd.socket virtnwfilterd.socket virtlogd.socket virtlockd.socket
+```
+
+On Fedora, the `default` network starts on its own and picks a free subnet. With SELinux in enforcing mode (the default), shared folders (`mounts:`) are not available: Virtum refuses them with a clear message. Everything else works.
+
+```bash
+# Arch Linux (reboot first if the kernel was just updated)
+sudo pacman -S qemu-base libvirt dnsmasq cloud-image-utils openssh socat virtiofsd bubblewrap
+sudo systemctl enable --now libvirtd.service
+sudo virsh -c qemu:///system net-autostart default && sudo virsh -c qemu:///system net-start default
+```
 
 To check that a file was built by the repository's CI (GitHub CLI 2.49 or newer): `gh attestation verify <file> -R Marvinviverge/virtum`.
 

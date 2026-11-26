@@ -172,6 +172,12 @@ fn check_virtiofsd() -> CheckResult {
             en: "{reason}: VMs and labs work, but shared folders (`mounts:`) do not."
         ),
     };
+    if crate::mounts::selinux_enforcing() {
+        return unavailable(tr!(
+            fr: "SELinux en mode enforcing (il bloque le virtiofsd lancé par Virtum)",
+            en: "SELinux in enforcing mode (it blocks the virtiofsd started by Virtum)"
+        ));
+    }
     let Some(path) = crate::mounts::resolve_virtiofsd_path() else {
         return unavailable(tr!(
             fr: "absent (sudo apt install virtiofsd ; paquet inexistant sur Debian 12 et \
@@ -244,14 +250,14 @@ fn check_apparmor_virtiofs() -> CheckResult {
             name: NAME.to_string(),
             ok: false,
             detail: {
-                let dir = env!("CARGO_MANIFEST_DIR");
+                let script = crate::command::host_script_hint("setup-apparmor-virtiofs.sh");
                 tr!(
                     fr: "Les sockets virtiofsd sous /var/lib/virtum sont bloqués par AppArmor \
                          tant que la règle n'est pas installée :\n\
-                           sudo {dir}/scripts/setup-apparmor-virtiofs.sh",
+                           sudo {script}",
                     en: "virtiofsd sockets under /var/lib/virtum are blocked by AppArmor \
                          until the rule is installed:\n\
-                           sudo {dir}/scripts/setup-apparmor-virtiofs.sh"
+                           sudo {script}"
                 )
             },
         };
@@ -269,12 +275,12 @@ fn check_apparmor_virtiofs() -> CheckResult {
             ok: false,
             detail: {
                 let snippet = snippet.display();
-                let dir = env!("CARGO_MANIFEST_DIR");
+                let script = crate::command::host_script_hint("setup-apparmor-virtiofs.sh");
                 tr!(
                     fr: "{snippet} existe mais ne contient pas la règle Virtum attendue. \
-                         Réinstallez : sudo {dir}/scripts/setup-apparmor-virtiofs.sh",
+                         Réinstallez : sudo {script}",
                     en: "{snippet} exists but does not contain the expected Virtum rule. \
-                         Reinstall: sudo {dir}/scripts/setup-apparmor-virtiofs.sh"
+                         Reinstall: sudo {script}"
                 )
             },
         }
