@@ -1,7 +1,6 @@
 //! Prévisualisation d'un déploiement lab (`virtum plan`, style Terraform plan).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
@@ -770,15 +769,7 @@ fn network_mode_label(mode: NetworkMode) -> &'static str {
     }
 }
 
-fn command_exists(bin: &str) -> bool {
-    Command::new("which")
-        .arg(bin)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
+use crate::command::command_exists;
 
 #[cfg(test)]
 mod tests {

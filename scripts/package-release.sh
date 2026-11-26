@@ -29,7 +29,7 @@ DIR="$STAGE/$NAME"
 mkdir -p "$DIR/scripts"
 
 install -m 755 "$BIN" "$DIR/virtum"
-install -m 644 LICENSE README.md README.en.md SECURITY.md CHANGELOG.md CONTRIBUTING.md CONTRIBUTING.en.md "$DIR/"
+install -m 644 LICENSE README.md README.fr.md SECURITY.md CHANGELOG.md CONTRIBUTING.md CONTRIBUTING.en.md "$DIR/"
 install -m 755 scripts/setup-host.sh scripts/setup-var-lib.sh scripts/setup-apparmor-virtiofs.sh "$DIR/scripts/"
 git ls-files -z examples | while IFS= read -r -d '' f; do
   install -D -m 644 "$f" "$DIR/$f"

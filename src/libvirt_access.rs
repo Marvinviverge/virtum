@@ -38,20 +38,20 @@ pub fn permission_denied_hint(paths: &VirtumPaths) -> String {
         return tr!(
             fr: "QEMU système (libvirt-qemu) ne peut pas accéder aux fichiers ou sockets virtiofs sous {}.\n\
              Sur Ubuntu/Debian, AppArmor bloque souvent les sockets virtiofsd externes :\n\
-               sudo {}/scripts/setup-apparmor-virtiofs.sh\n\
+               sudo {}\n\
              Puis vérifiez les groupes libvirt et kvm (virtum doctor). Si besoin :\n\
                sudo chown -R \"$USER:libvirt\" {}\n\
                sudo chgrp -R kvm {}/instances\n\
              Relancez ensuite virtum up.",
             en: "System QEMU (libvirt-qemu) cannot access the files or virtiofs sockets under {}.\n\
              On Ubuntu/Debian, AppArmor often blocks external virtiofsd sockets:\n\
-               sudo {}/scripts/setup-apparmor-virtiofs.sh\n\
+               sudo {}\n\
              Then check the libvirt and kvm groups (virtum doctor). If needed:\n\
                sudo chown -R \"$USER:libvirt\" {}\n\
                sudo chgrp -R kvm {}/instances\n\
              Then run virtum up again.",
             paths.root.display(),
-            env!("CARGO_MANIFEST_DIR"),
+            crate::command::host_script_hint("setup-apparmor-virtiofs.sh"),
             paths.root.display(),
             paths.root.display()
         );
@@ -60,16 +60,16 @@ pub fn permission_denied_hint(paths: &VirtumPaths) -> String {
     tr!(
         fr: "QEMU système (libvirt-qemu) ne peut pas lire les disques sous {} (AppArmor bloque souvent $HOME).\n\
          Solution recommandée (une fois) :\n\
-           sudo {}/scripts/setup-var-lib.sh\n\
+           sudo {}\n\
          Puis relancez virtum run (stockage dans /var/lib/virtum).\n\
          Alternative : setfacl sur $HOME + chown de l'image — voir README.",
         en: "System QEMU (libvirt-qemu) cannot read the disks under {} (AppArmor often blocks $HOME).\n\
          Recommended fix (once):\n\
-           sudo {}/scripts/setup-var-lib.sh\n\
+           sudo {}\n\
          Then run virtum run again (storage in /var/lib/virtum).\n\
          Alternative: setfacl on $HOME + chown of the image — see README.",
         paths.root.display(),
-        env!("CARGO_MANIFEST_DIR")
+        crate::command::host_script_hint("setup-var-lib.sh")
     )
 }
 

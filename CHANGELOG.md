@@ -2,6 +2,24 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [1.4.1] - 2026-11-26
+
+### Corrections
+
+- **Fedora, Arch et systèmes sans la commande `which`** : les `ports:` échouaient (« socat est requis ») alors que socat était installé, et `virtum plan` pouvait signaler à tort socat, cloud-localds ou ufw manquants. Virtum cherche désormais les commandes dans le `PATH` lui-même.
+- **virtiofsd sur Arch** (`/usr/lib/virtiofsd`) : il est trouvé, et les dossiers partagés fonctionnent.
+- **SELinux en mode enforcing** (Fedora, RHEL) : il empêche QEMU de se connecter au virtiofsd lancé par Virtum. Les dossiers partagés sont désormais refusés tout de suite, avec un message clair, au lieu d'un échec « Permission denied » au démarrage de la VM ; `virtum doctor` le signale.
+- Messages d'aide : le chemin des scripts de préparation de l'hôte (`setup-var-lib.sh`, `setup-apparmor-virtiofs.sh`) est celui du paquet `.deb` (`/usr/share/virtum/`) ou du dossier de l'archive, et non plus un chemin de la machine de compilation.
+
+### Documentation
+
+- Le README par défaut du dépôt est désormais en anglais (`README.md`) ; la version française passe dans `README.fr.md`, à un clic depuis l'en-tête. Le paquet `.deb` et l'archive `.tar.gz` contiennent les deux.
+
+### Plateformes
+
+- **VM imbriquée** : validé avec Virtum 1.4.0 dans une VM Debian 13 (6 vCPU, 8 Go, CPU `host-passthrough`) sur un hôte Ubuntu 24.04 (Ryzen 5 3550H, `kvm_amd nested=1`) : paquet `.deb`, `virtum doctor` (15/15), VM seule, lab d'exemple avec ports et provision, instantané de lab, dossiers partagés, `make smoke-lab`. Création d'une VM environ 40 % plus lente que sur l'hôte nu. Si la VM est sur le réseau `default` de l'hôte (`192.168.122.0/24`), déplacer le réseau `default` de la VM sur un autre sous-réseau (voir README). Réseau bridge non testé dans ce montage. Hyperviseur testé : KVM/libvirt (Proxmox, VMware, Hyper-V non testés). SECURITY.md : recommandations pour un serveur commun avec une VM par personne.
+- **Fedora 45** (archive `.tar.gz`, SELinux en mode enforcing) et **Arch Linux** (archive, système à jour au 25/11/2026) : validés avec Virtum 1.4.1, chacun dans une VM (6 vCPU, 8 Go, virtualisation imbriquée) sur un hôte Ubuntu 24.04. `virtum doctor` (15/15), VM seule, lab d'exemple avec ports et provision, instantané de lab, `make smoke-lab`, sans la commande `which`. Dossiers partagés : fonctionnent sur Arch ; indisponibles sur Fedora avec SELinux en mode enforcing. Paquets à installer : voir README (`setup-host.sh` ne gère que Debian et Ubuntu). Avec Virtum 1.4.0, les `ports:` échouent sur ces deux systèmes sans `which`, et les dossiers partagés sur Arch.
+
 ## [1.4.0] - 2026-11-24
 
 ### Ajouts

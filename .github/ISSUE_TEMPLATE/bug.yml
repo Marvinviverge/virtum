@@ -12,7 +12,7 @@ body:
     attributes:
       label: Version
       description: Sortie de `virtum --version`. / Output of `virtum --version`.
-      placeholder: virtum 1.4.0
+      placeholder: virtum 1.4.1
     validations:
       required: true
   - type: textarea

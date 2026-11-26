@@ -32,7 +32,7 @@ install -D -m 755 "$BIN" "$PKG/usr/bin/virtum"
 install -D -m 755 scripts/setup-var-lib.sh "$PKG/usr/share/virtum/setup-var-lib.sh"
 install -D -m 755 scripts/setup-apparmor-virtiofs.sh "$PKG/usr/share/virtum/setup-apparmor-virtiofs.sh"
 install -D -m 644 README.md "$DOC/README.md"
-install -m 644 README.en.md SECURITY.md "$DOC/"
+install -m 644 README.fr.md SECURITY.md "$DOC/"
 install -D -m 644 examples/Virtumfile "$DOC/examples/Virtumfile"
 
 cat > "$DOC/copyright" <<EOF
