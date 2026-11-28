@@ -1,8 +1,25 @@
-# Virtum
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/readme/hero-dark-fr.png">
+    <img alt="Virtum — La VM, tout simplement. Un Virtumfile décrit un lab de deux VM ; virtum up le crée, virtum shell ouvre une session dans la VM." src="./assets/readme/hero-light-fr.png" width="100%">
+  </picture>
+</p>
 
-[English](./README.md) | **Français**
+<p align="center">
+  <a href="https://virtum.dev"><b>Site</b></a> &nbsp;·&nbsp;
+  <a href="https://virtum.dev/docs/installation"><b>Documentation</b></a> &nbsp;·&nbsp;
+  <a href="https://virtum.dev/telecharger"><b>Télécharger</b></a> &nbsp;·&nbsp;
+  <a href="./CHANGELOG.md"><b>Changelog</b></a> &nbsp;·&nbsp;
+  <a href="./README.md"><b>English</b></a>
+</p>
 
-**La VM, tout simplement.**
+<p align="center">
+  <a href="https://github.com/Marvinviverge/virtum/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Marvinviverge/virtum?color=007ec6"></a>
+  <a href="https://github.com/Marvinviverge/virtum/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Marvinviverge/virtum/actions/workflows/ci.yml/badge.svg?branch=develop"></a>
+  <a href="./LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-007ec6"></a>
+  <img alt="Platform: Linux, KVM" src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20KVM-0f766e">
+  <img alt="Made with Rust" src="https://img.shields.io/badge/made%20with-Rust-dea584">
+</p>
 
 Virtum lance des machines virtuelles locales et des labs multi-VM avec une expérience proche de Docker : `virtum run`, `virtum ps`, `virtum shell`, et un fichier `Virtumfile` pour décrire un lab entier. Les VM tournent sur KVM et libvirt, sur votre propre machine Linux.
 
