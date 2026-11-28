@@ -2,7 +2,7 @@
 
 [Français](./CONTRIBUTING.md) | **English**
 
-Thank you for your interest. Bug reports, ideas and fixes are welcome.
+Thank you for your interest. Bug reports, ideas and fixes are welcome. Exchanges follow the [code of conduct](./CODE_OF_CONDUCT.md).
 
 ## Reporting a problem
 

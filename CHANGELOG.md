@@ -2,6 +2,12 @@
 
 Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Documentation
+
+- Code de conduite (`CODE_OF_CONDUCT.md`, en anglais, et `CODE_OF_CONDUCT.fr.md`), signalements à contact@virtum.dev, et modèle de pull request bilingue reprenant les vérifications de CONTRIBUTING.
+
 ## [1.4.1] - 2026-11-26
 
 ### Corrections

@@ -2,7 +2,7 @@
 
 **Français** | [English](./CONTRIBUTING.en.md)
 
-Merci de votre intérêt. Les rapports de bug, les idées et les correctifs sont bienvenus.
+Merci de votre intérêt. Les rapports de bug, les idées et les correctifs sont bienvenus. Les échanges suivent le [code de conduite](./CODE_OF_CONDUCT.fr.md).
 
 ## Signaler un problème
 
