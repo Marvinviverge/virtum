@@ -7,6 +7,7 @@ Les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 ### Documentation
 
 - Code de conduite (`CODE_OF_CONDUCT.md`, en anglais, et `CODE_OF_CONDUCT.fr.md`), signalements à contact@virtum.dev, et modèle de pull request bilingue reprenant les vérifications de CONTRIBUTING.
+- En-tête du README (anglais et français) : bannière aux couleurs de Virtum, en clair et en sombre selon le thème de GitHub, liens vers le site, la documentation et le téléchargement, et badges (version, CI, licence, plateforme).
 
 ## [1.4.1] - 2026-11-26
 
